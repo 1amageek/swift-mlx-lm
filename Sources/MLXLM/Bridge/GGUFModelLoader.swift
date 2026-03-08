@@ -20,6 +20,7 @@ public struct GGUFModelLoader {
     /// - Parameters:
     ///   - repo: Hugging Face repository ID (e.g., `"Qwen/Qwen2.5-0.5B-Instruct-GGUF"`).
     ///   - filename: Explicit GGUF filename. When `nil`, auto-selects the best available.
+    ///   - mmprojFilename: Optional mmproj GGUF filename for VLM vision encoder.
     ///   - quantization: Quantization settings. `nil` for auto-detect, `.disabled` for F16.
     ///   - token: Optional Hugging Face access token for private models.
     ///   - adapterDirectory: Optional path to LoRA adapter directory.
@@ -29,6 +30,7 @@ public struct GGUFModelLoader {
     public func load(
         repo: String,
         filename: String? = nil,
+        mmprojFilename: String? = nil,
         quantization: QuantizationConfiguration? = nil,
         token: String? = nil,
         adapterDirectory: URL? = nil,
@@ -38,8 +40,15 @@ public struct GGUFModelLoader {
         let downloader = HuggingFaceDownloader()
         let localURL = try await downloader.download(
             repo: repo, filename: filename, token: token, progress: progress)
+
+        var mmprojURL: URL?
+        if let mmprojFilename {
+            mmprojURL = try await downloader.download(
+                repo: repo, filename: mmprojFilename, token: token, progress: progress)
+        }
+
         return try load(
-            url: localURL, quantization: quantization,
+            url: localURL, mmprojURL: mmprojURL, quantization: quantization,
             adapterDirectory: adapterDirectory, configOverride: configOverride)
     }
 
@@ -47,6 +56,7 @@ public struct GGUFModelLoader {
     ///
     /// - Parameters:
     ///   - url: Path to the GGUF file.
+    ///   - mmprojURL: Optional path to mmproj GGUF for VLM vision encoder.
     ///   - quantization: Quantization settings. Pass `nil` to auto-detect from GGUF metadata,
     ///     an explicit config like `.fourBit` to override, or `.disabled` to keep F16 weights.
     ///   - adapterDirectory: Optional path to a directory containing `adapter_config.json` and `adapters.safetensors`.
@@ -54,12 +64,13 @@ public struct GGUFModelLoader {
     /// - Returns: A fully initialized `ModelContainer` ready for generation.
     public func load(
         url: URL,
+        mmprojURL: URL? = nil,
         quantization: QuantizationConfiguration? = nil,
         adapterDirectory: URL? = nil,
         configOverride: ModelConfigurationOverride? = nil
     ) throws -> ModelContainer {
         let context = try loadContext(
-            url: url, quantization: quantization,
+            url: url, mmprojURL: mmprojURL, quantization: quantization,
             adapterDirectory: adapterDirectory, configOverride: configOverride)
         return ModelContainer(context: context)
     }
@@ -69,6 +80,7 @@ public struct GGUFModelLoader {
     /// Use this when you need to inspect the context before wrapping in a container.
     public func loadContext(
         url: URL,
+        mmprojURL: URL? = nil,
         quantization: QuantizationConfiguration? = nil,
         adapterDirectory: URL? = nil,
         configOverride: ModelConfigurationOverride? = nil
@@ -119,6 +131,48 @@ public struct GGUFModelLoader {
             try loadWeightsWithLoRA(into: cohereModel, from: file, mapper: CohereTensorNameMapper(), quantization: quantization)
             model = cohereModel
 
+        case "qwen2vl", "qwen2_5_vl", "qwen25vl":
+            let textConfig = try GGUFConfigExtractor.extractTransformerConfig(
+                from: file, archHint: "qwen2", isMoE: false)
+            let qwen25vlTextConfig = Qwen25VLConfiguration.TextConfiguration(
+                hiddenSize: textConfig.hiddenSize,
+                hiddenLayers: textConfig.hiddenLayers,
+                intermediateSize: textConfig.intermediateSize,
+                attentionHeads: textConfig.attentionHeads,
+                kvHeads: textConfig.kvHeads,
+                vocabularySize: textConfig.vocabularySize,
+                normEps: textConfig.normEps,
+                ropeTheta: textConfig.ropeTheta,
+                tieWordEmbeddings: textConfig.tieWordEmbeddings
+            )
+
+            var visionConfig = Qwen25VLConfiguration.VisionConfiguration()
+            if let mmprojURL {
+                let visionLoader = GGUFVisionLoader()
+                let (_, loadedVisionConfig) = try visionLoader.load(url: mmprojURL)
+                visionConfig = loadedVisionConfig
+            }
+            visionConfig.outHiddenSize = qwen25vlTextConfig.hiddenSize
+
+            let vlmConfig = Qwen25VLConfiguration(text: qwen25vlTextConfig, vision: visionConfig)
+            let vlmModel = Qwen25VLModel(vlmConfig)
+
+            // Load text weights using Llama mapper (Qwen2 uses llama-style naming in GGUF)
+            try loadWeightsWithLoRA(
+                into: vlmModel, from: file, mapper: LlamaTensorNameMapper(), quantization: quantization)
+
+            // Load vision weights from mmproj if provided
+            if let mmprojURL {
+                let visionLoader = GGUFVisionLoader()
+                let (loadedEncoder, _) = try visionLoader.load(url: mmprojURL)
+                // Transfer loaded vision encoder weights into the model
+                let visionParams = loadedEncoder.parameters()
+                try vlmModel.visionEncoder.update(parameters: visionParams, verify: .noUnusedKeys)
+                eval(vlmModel.visionEncoder)
+            }
+
+            model = vlmModel
+
         default:
             throw GGUFLoadError.unsupportedArchitecture(arch)
         }
@@ -164,13 +218,27 @@ public struct GGUFModelLoader {
 
         // 6. Build user input processor
         let chatTemplate = file.chatTemplate
-        let processor = GGUFUserInputProcessor(
-            tokenizer: tokenizer,
-            chatTemplate: chatTemplate,
-            bosToken: tokenizer.bosTokenID.flatMap { tokenizer.tokenToString($0) },
-            eosToken: tokenizer.eosTokenID.flatMap { tokenizer.tokenToString($0) },
-            addBosToken: file.addBosToken ?? false
-        )
+        let isVLM = archKey == "qwen2vl" || archKey == "qwen2_5_vl" || archKey == "qwen25vl"
+        let processor: any UserInputProcessor
+
+        if isVLM, let vlmModel = model as? Qwen25VLModel {
+            processor = VLMUserInputProcessor(
+                tokenizer: tokenizer,
+                chatTemplate: chatTemplate,
+                bosToken: tokenizer.bosTokenID.flatMap { tokenizer.tokenToString($0) },
+                eosToken: tokenizer.eosTokenID.flatMap { tokenizer.tokenToString($0) },
+                addBosToken: file.addBosToken ?? false,
+                visionConfig: vlmModel.configuration.vision
+            )
+        } else {
+            processor = GGUFUserInputProcessor(
+                tokenizer: tokenizer,
+                chatTemplate: chatTemplate,
+                bosToken: tokenizer.bosTokenID.flatMap { tokenizer.tokenToString($0) },
+                eosToken: tokenizer.eosTokenID.flatMap { tokenizer.tokenToString($0) },
+                addBosToken: file.addBosToken ?? false
+            )
+        }
 
         // 7. Assemble context
         return ModelContext(

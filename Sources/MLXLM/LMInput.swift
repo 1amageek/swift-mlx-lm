@@ -7,14 +7,19 @@ public struct LMInput: Sendable {
     public let image: ProcessedImage?
     public let video: ProcessedVideo?
 
-    /// Token sequence with optional mask.
+    /// Token sequence with optional mask and position IDs.
     public struct Text: Sendable {
         public let tokens: MLXArray
         public let mask: MLXArray?
 
-        public init(tokens: MLXArray, mask: MLXArray? = nil) {
+        /// Per-token position IDs for models that use non-sequential positioning
+        /// (e.g. M-RoPE with shape `[3, B, S]` for temporal/height/width).
+        public let positionIds: MLXArray?
+
+        public init(tokens: MLXArray, mask: MLXArray? = nil, positionIds: MLXArray? = nil) {
             self.tokens = tokens
             self.mask = mask
+            self.positionIds = positionIds
         }
     }
 
