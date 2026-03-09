@@ -10,9 +10,12 @@
 /// - Runtime plan generation
 public protocol ModelCompiler: Sendable {
 
+    /// The compiled artifact type produced by this compiler.
+    associatedtype Compiled: Sendable
+
     /// Compile a model graph with bound weights into an executable form.
     func compile(
         graph: ModelGraph,
         weights: BoundWeights
-    ) throws -> CompiledModel
+    ) throws -> Compiled
 }

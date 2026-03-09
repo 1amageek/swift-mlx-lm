@@ -8,16 +8,15 @@
 /// (`WeightsDeclaration`) that can be inspected, compared, cached, and
 /// resolved independently.
 ///
-/// ```swift
-/// var weights: some WeightsSpec {
-///     GGUFWeightsSpec(file: modelFile)
-/// }
+/// Attach weights to a model via the `.weights()` modifier:
 ///
-/// var weights: some WeightsSpec {
-///     Merge {
-///         GGUFWeightsSpec(file: baseModel)
-///         LoRAWeightsSpec(file: adapter)
-///     }
+/// ```swift
+/// let weighted = model.weights(.gguf(location: "model.gguf"))
+///
+/// // Or compose multiple sources:
+/// let weighted = model.weights {
+///     WeightsDeclaration.gguf(location: "base.gguf")
+///     WeightsDeclaration.safetensors(directory: "adapter/", indexFile: nil)
 /// }
 /// ```
 public protocol WeightsSpec: Sendable {

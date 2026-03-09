@@ -3,14 +3,12 @@
 /// The builder converts each weight spec expression into a `WeightsDeclaration`
 /// via `makeDeclaration()`, then combines them via `.merge(...)`.
 ///
+/// Used with the `.weights()` modifier on `LanguageModel` or `WeightedModel`:
+///
 /// ```swift
-/// @WeightsBuilder
-/// var weights: some WeightsSpec {
+/// let weighted = model.weights {
 ///     WeightsDeclaration.gguf(location: "base.gguf")
-///     WeightsDeclaration.override(
-///         base: .gguf(location: "base.gguf"),
-///         with: .safetensors(directory: "adapter/", indexFile: nil)
-///     )
+///     WeightsDeclaration.safetensors(directory: "adapter/", indexFile: nil)
 /// }
 /// ```
 @resultBuilder

@@ -1012,4 +1012,1059 @@ struct ModelGraphTests {
         try GraphValidator.validate(graph)
         try LLMProfileValidator.validate(graph)
     }
+
+    // MARK: - Canonicalizer Idempotence
+
+    @Test("Canonicalization is idempotent")
+    func canonicalizationIdempotence() throws {
+        let model = TinyLlama(
+            vocabSize: 100, hiddenSize: 64, headCount: 4,
+            kvHeadCount: 2, intermediateSize: 256, layerCount: 2
+        )
+        let graph = try model.makeModelGraph()
+        let once = canonicalize(graph)
+        let twice = canonicalize(once)
+        #expect(once == twice)
+    }
+
+    @Test("Canonicalization is idempotent for Cohere-style parallel model")
+    func canonicalizationIdempotenceCohere() throws {
+        let model = TinyCohere(
+            vocabSize: 256000, hiddenSize: 4096, headCount: 32,
+            kvHeadCount: 8, intermediateSize: 11008, layerCount: 2
+        )
+        let graph = try model.makeModelGraph()
+        let once = canonicalize(graph)
+        let twice = canonicalize(once)
+        #expect(once == twice)
+    }
+
+    @Test("Canonicalization strips attention implementation hint")
+    func canonicalizationStripsHint() throws {
+        let decl: ModelDeclaration = .sequence([
+            .primitive(.tokenEmbedding(TokenEmbeddingAttributes(vocabSize: 100, embeddingSize: 64))),
+            .primitive(.attention(AttentionAttributes(
+                hiddenSize: 64, headCount: 4, kvHeadCount: 4, headDimension: 16,
+                implementationHint: .fused
+            ))),
+            .primitive(.outputHead(OutputHeadAttributes(inputSize: 64, vocabSize: 100))),
+        ])
+
+        let graph = try normalize(decl).graph
+        let canon = canonicalize(graph)
+
+        if case .attention(let attrs) = canon.rootRegion.operations[1].kind {
+            #expect(attrs.implementationHint == nil)
+        } else {
+            Issue.record("Expected attention operation")
+        }
+    }
+
+    @Test("Canonicalization produces equal graphs from different ID assignments")
+    func canonicalizationEqualizesIDs() throws {
+        // Two graphs with same structure but different ValueID/OperationKey numbering.
+        let graphA = ModelGraph(rootRegion: Region(
+            operations: [
+                Operation(
+                    key: OperationKey(rawValue: 42),
+                    kind: .rmsNorm(RMSNormAttributes(dimension: 64)),
+                    results: [OperationResult(id: ValueID(rawValue: 99))]
+                ),
+            ],
+            results: [ValueUse(value: ValueID(rawValue: 99))]
+        ))
+        let graphB = ModelGraph(rootRegion: Region(
+            operations: [
+                Operation(
+                    key: OperationKey(rawValue: 7),
+                    kind: .rmsNorm(RMSNormAttributes(dimension: 64)),
+                    results: [OperationResult(id: ValueID(rawValue: 3))]
+                ),
+            ],
+            results: [ValueUse(value: ValueID(rawValue: 3))]
+        ))
+
+        #expect(graphA != graphB)
+        #expect(canonicalize(graphA) == canonicalize(graphB))
+    }
+
+    // MARK: - Attribute Codable Roundtrips
+
+    @Test("RoPEAttributes with scaling roundtrips through JSON")
+    func ropeScalingCodable() throws {
+        let attrs = RoPEAttributes(
+            dimension: 128,
+            base: 500_000.0,
+            scaling: RoPEScaling(
+                kind: .yarn,
+                factor: 4.0,
+                originalMaxPositions: 8192
+            )
+        )
+        let data = try JSONEncoder().encode(attrs)
+        let decoded = try JSONDecoder().decode(RoPEAttributes.self, from: data)
+        #expect(attrs == decoded)
+    }
+
+    @Test("RoPEScalingKind custom variant roundtrips through JSON")
+    func ropeScalingKindCustomCodable() throws {
+        let scaling = RoPEScaling(kind: .custom("ntk-aware"), factor: 2.0)
+        let data = try JSONEncoder().encode(scaling)
+        let decoded = try JSONDecoder().decode(RoPEScaling.self, from: data)
+        #expect(scaling == decoded)
+    }
+
+    @Test("AttentionAttributes with all optional fields roundtrips through JSON")
+    func attentionFullCodable() throws {
+        let attrs = AttentionAttributes(
+            hiddenSize: 4096,
+            headCount: 32,
+            kvHeadCount: 8,
+            headDimension: 128,
+            bias: true,
+            causal: true,
+            rope: RoPEAttributes(dimension: 128, base: 10_000.0),
+            qkNorm: .rmsNorm,
+            window: AttentionWindow(left: 4096, right: 0),
+            implementationHint: .pagedKVPreferred
+        )
+        let data = try JSONEncoder().encode(attrs)
+        let decoded = try JSONDecoder().decode(AttentionAttributes.self, from: data)
+        #expect(attrs == decoded)
+    }
+
+    @Test("QKNormKind all cases roundtrip through JSON")
+    func qkNormKindCodable() throws {
+        let cases: [QKNormKind] = [.none, .rmsNorm, .layerNorm, .custom("my-norm")]
+        for kind in cases {
+            let data = try JSONEncoder().encode(kind)
+            let decoded = try JSONDecoder().decode(QKNormKind.self, from: data)
+            #expect(kind == decoded)
+        }
+    }
+
+    @Test("AttentionImplementationHint all cases roundtrip through JSON")
+    func attentionHintCodable() throws {
+        let cases: [AttentionImplementationHint] = [
+            .unspecified, .fused, .unfused, .pagedKVPreferred, .custom("flash-attn-3")
+        ]
+        for hint in cases {
+            let data = try JSONEncoder().encode(hint)
+            let decoded = try JSONDecoder().decode(AttentionImplementationHint.self, from: data)
+            #expect(hint == decoded)
+        }
+    }
+
+    @Test("MoEAttributes with nested MLPAttributes roundtrips through JSON")
+    func moeCodable() throws {
+        let attrs = MoEAttributes(
+            expertCount: 8,
+            expertsPerToken: 2,
+            gateKind: .sigmoidTopK,
+            expertMLP: MLPAttributes(
+                inputSize: 4096, outputSize: 4096,
+                intermediateSize: 14336,
+                activation: .gelu, gating: .geglu, bias: true
+            )
+        )
+        let data = try JSONEncoder().encode(attrs)
+        let decoded = try JSONDecoder().decode(MoEAttributes.self, from: data)
+        #expect(attrs == decoded)
+    }
+
+    @Test("ActivationKind and GatingKind custom variants roundtrip through JSON")
+    func activationGatingCustomCodable() throws {
+        let activation = ActivationKind.custom("mish")
+        let gating = GatingKind.custom("reglu")
+        let data1 = try JSONEncoder().encode(activation)
+        let data2 = try JSONEncoder().encode(gating)
+        #expect(try JSONDecoder().decode(ActivationKind.self, from: data1) == activation)
+        #expect(try JSONDecoder().decode(GatingKind.self, from: data2) == gating)
+    }
+
+    @Test("ResidualStrategy all cases roundtrip through JSON")
+    func residualStrategyCodable() throws {
+        let cases: [ResidualStrategy] = [.add, .weighted, .gated, .custom("learnable")]
+        for strategy in cases {
+            let data = try JSONEncoder().encode(strategy)
+            let decoded = try JSONDecoder().decode(ResidualStrategy.self, from: data)
+            #expect(strategy == decoded)
+        }
+    }
+
+    @Test("ParallelMergeStrategy all cases roundtrip through JSON")
+    func parallelMergeStrategyCodable() throws {
+        let cases: [ParallelMergeStrategy] = [.add, .concat, .stack, .custom("mean")]
+        for strategy in cases {
+            let data = try JSONEncoder().encode(strategy)
+            let decoded = try JSONDecoder().decode(ParallelMergeStrategy.self, from: data)
+            #expect(strategy == decoded)
+        }
+    }
+
+    @Test("CustomNodeAttributes with JSON value roundtrips through JSON")
+    func customNodeCodable() throws {
+        let attrs = CustomNodeAttributes(
+            domain: "research.lab",
+            name: "gated-linear-unit",
+            attributes: .object([
+                "width": .int(1024),
+                "scale": .double(0.5),
+                "enabled": .bool(true),
+                "mode": .string("fast"),
+                "dims": .array([.int(1), .int(2), .int(3)]),
+            ])
+        )
+        let data = try JSONEncoder().encode(attrs)
+        let decoded = try JSONDecoder().decode(CustomNodeAttributes.self, from: data)
+        #expect(attrs == decoded)
+    }
+
+    @Test("StateSpaceAttributes roundtrips through JSON")
+    func stateSpaceCodable() throws {
+        let attrs = StateSpaceAttributes(hiddenSize: 2048, stateSize: 64, variant: "mamba2")
+        let data = try JSONEncoder().encode(attrs)
+        let decoded = try JSONDecoder().decode(StateSpaceAttributes.self, from: data)
+        #expect(attrs == decoded)
+    }
+
+    @Test("PositionalEmbeddingKind all cases roundtrip through JSON")
+    func positionalEmbeddingKindCodable() throws {
+        let cases: [PositionalEmbeddingKind] = [.learnedAbsolute, .sinusoidal]
+        for kind in cases {
+            let data = try JSONEncoder().encode(kind)
+            let decoded = try JSONDecoder().decode(PositionalEmbeddingKind.self, from: data)
+            #expect(kind == decoded)
+        }
+    }
+
+    @Test("OutputHeadAttributes roundtrips through JSON")
+    func outputHeadCodable() throws {
+        let attrs = OutputHeadAttributes(inputSize: 4096, vocabSize: 128256, tiedToEmbedding: false, bias: true)
+        let data = try JSONEncoder().encode(attrs)
+        let decoded = try JSONDecoder().decode(OutputHeadAttributes.self, from: data)
+        #expect(attrs == decoded)
+    }
+
+    // MARK: - GraphValidator Edge Cases
+
+    @Test("GraphValidator accepts parallel within parallel")
+    func nestedParallel() throws {
+        let decl: ModelDeclaration = .sequence([
+            .primitive(.rmsNorm(RMSNormAttributes(dimension: 64))),
+            .parallel(merge: .add, branches: [
+                .parallel(merge: .add, branches: [
+                    .primitive(.linear(LinearAttributes(inputSize: 64, outputSize: 64))),
+                    .primitive(.linear(LinearAttributes(inputSize: 64, outputSize: 64))),
+                ]),
+                .primitive(.linear(LinearAttributes(inputSize: 64, outputSize: 64))),
+            ]),
+        ])
+
+        let graph = try normalize(decl).graph
+        try GraphValidator.validate(graph)
+    }
+
+    @Test("GraphValidator accepts residual within residual")
+    func nestedResidual() throws {
+        let decl: ModelDeclaration = .sequence([
+            .primitive(.rmsNorm(RMSNormAttributes(dimension: 64))),
+            .residual(strategy: .add, body:
+                .residual(strategy: .add, body:
+                    .primitive(.linear(LinearAttributes(inputSize: 64, outputSize: 64)))
+                )
+            ),
+        ])
+
+        let graph = try normalize(decl).graph
+        try GraphValidator.validate(graph)
+    }
+
+    @Test("GraphValidator accepts repeating within repeating")
+    func nestedRepeating() throws {
+        let decl: ModelDeclaration = .sequence([
+            .primitive(.rmsNorm(RMSNormAttributes(dimension: 64))),
+            .repeating(count: 2, label: nil, body:
+                .repeating(count: 3, label: nil, body:
+                    .primitive(.linear(LinearAttributes(inputSize: 64, outputSize: 64)))
+                )
+            ),
+        ])
+
+        let graph = try normalize(decl).graph
+        try GraphValidator.validate(graph)
+    }
+
+    // MARK: - GraphValidator Error Detection
+
+    @Test("GraphValidator detects forward reference (use before definition)")
+    func forwardReference() {
+        // Operation references a value produced by a later operation.
+        let graph = ModelGraph(rootRegion: Region(
+            operations: [
+                Operation(
+                    key: OperationKey(rawValue: 0),
+                    kind: .rmsNorm(RMSNormAttributes(dimension: 64)),
+                    operands: [Operand(value: ValueID(rawValue: 99))],
+                    results: [OperationResult(id: ValueID(rawValue: 0))]
+                ),
+                Operation(
+                    key: OperationKey(rawValue: 1),
+                    kind: .linear(LinearAttributes(inputSize: 64, outputSize: 64)),
+                    results: [OperationResult(id: ValueID(rawValue: 99))]
+                ),
+            ],
+            results: [ValueUse(value: ValueID(rawValue: 99))]
+        ))
+
+        #expect(throws: GraphValidationError.self) {
+            try GraphValidator.validate(graph)
+        }
+    }
+
+    @Test("GraphValidator detects undefined region result")
+    func undefinedRegionResult() {
+        // Region result references a value that was never produced.
+        let graph = ModelGraph(rootRegion: Region(
+            operations: [
+                Operation(
+                    key: OperationKey(rawValue: 0),
+                    kind: .rmsNorm(RMSNormAttributes(dimension: 64)),
+                    results: [OperationResult(id: ValueID(rawValue: 0))]
+                ),
+            ],
+            results: [ValueUse(value: ValueID(rawValue: 42))]
+        ))
+
+        #expect(throws: GraphValidationError.self) {
+            try GraphValidator.validate(graph)
+        }
+    }
+
+    @Test("GraphValidator detects residual body result arity mismatch")
+    func residualBodyResultArityMismatch() {
+        // body.results.count (2) != op.results.count (1)
+        let body = Region(
+            parameters: [RegionParameter(id: ValueID(rawValue: 10))],
+            operations: [
+                Operation(
+                    key: OperationKey(rawValue: 0),
+                    kind: .linear(LinearAttributes(inputSize: 64, outputSize: 64)),
+                    operands: [Operand(value: ValueID(rawValue: 10))],
+                    results: [
+                        OperationResult(id: ValueID(rawValue: 11)),
+                        OperationResult(id: ValueID(rawValue: 12)),
+                    ]
+                ),
+            ],
+            results: [
+                ValueUse(value: ValueID(rawValue: 11)),
+                ValueUse(value: ValueID(rawValue: 12)),
+            ]
+        )
+        let graph = ModelGraph(rootRegion: Region(
+            operations: [
+                Operation(
+                    key: OperationKey(rawValue: 1),
+                    kind: .rmsNorm(RMSNormAttributes(dimension: 64)),
+                    results: [OperationResult(id: ValueID(rawValue: 0))]
+                ),
+                Operation(
+                    key: OperationKey(rawValue: 2),
+                    kind: .residual(strategy: .add, body: body),
+                    operands: [Operand(value: ValueID(rawValue: 0))],
+                    results: [OperationResult(id: ValueID(rawValue: 1))]
+                ),
+            ],
+            results: [ValueUse(value: ValueID(rawValue: 1))]
+        ))
+
+        #expect(throws: GraphValidationError.self) {
+            try GraphValidator.validate(graph)
+        }
+    }
+
+    @Test("GraphValidator detects parallel branch parameter arity mismatch")
+    func parallelBranchParameterArityMismatch() {
+        // Branch has 2 parameters but operation has 1 operand.
+        let branch = Region(
+            parameters: [
+                RegionParameter(id: ValueID(rawValue: 10)),
+                RegionParameter(id: ValueID(rawValue: 11)),
+            ],
+            operations: [
+                Operation(
+                    key: OperationKey(rawValue: 0),
+                    kind: .linear(LinearAttributes(inputSize: 64, outputSize: 64)),
+                    operands: [Operand(value: ValueID(rawValue: 10))],
+                    results: [OperationResult(id: ValueID(rawValue: 12))]
+                ),
+            ],
+            results: [ValueUse(value: ValueID(rawValue: 12))]
+        )
+        let graph = ModelGraph(rootRegion: Region(
+            operations: [
+                Operation(
+                    key: OperationKey(rawValue: 1),
+                    kind: .rmsNorm(RMSNormAttributes(dimension: 64)),
+                    results: [OperationResult(id: ValueID(rawValue: 0))]
+                ),
+                Operation(
+                    key: OperationKey(rawValue: 2),
+                    kind: .parallel(merge: .add, branches: [branch]),
+                    operands: [Operand(value: ValueID(rawValue: 0))],
+                    results: [OperationResult(id: ValueID(rawValue: 1))]
+                ),
+            ],
+            results: [ValueUse(value: ValueID(rawValue: 1))]
+        ))
+
+        #expect(throws: GraphValidationError.self) {
+            try GraphValidator.validate(graph)
+        }
+    }
+
+    @Test("GraphValidator detects repeating result arity mismatch")
+    func repeatingResultArityMismatch() {
+        // op.results.count (2) != op.operands.count (1)
+        let body = Region(
+            parameters: [RegionParameter(id: ValueID(rawValue: 10))],
+            operations: [
+                Operation(
+                    key: OperationKey(rawValue: 0),
+                    kind: .linear(LinearAttributes(inputSize: 64, outputSize: 64)),
+                    operands: [Operand(value: ValueID(rawValue: 10))],
+                    results: [OperationResult(id: ValueID(rawValue: 11))]
+                ),
+            ],
+            results: [ValueUse(value: ValueID(rawValue: 11))]
+        )
+        let graph = ModelGraph(rootRegion: Region(
+            operations: [
+                Operation(
+                    key: OperationKey(rawValue: 1),
+                    kind: .rmsNorm(RMSNormAttributes(dimension: 64)),
+                    results: [OperationResult(id: ValueID(rawValue: 0))]
+                ),
+                Operation(
+                    key: OperationKey(rawValue: 2),
+                    kind: .repeating(count: 3, body: body),
+                    operands: [Operand(value: ValueID(rawValue: 0))],
+                    results: [
+                        OperationResult(id: ValueID(rawValue: 1)),
+                        OperationResult(id: ValueID(rawValue: 2)),
+                    ]
+                ),
+            ],
+            results: [ValueUse(value: ValueID(rawValue: 1))]
+        ))
+
+        #expect(throws: GraphValidationError.self) {
+            try GraphValidator.validate(graph)
+        }
+    }
+
+    @Test("GraphValidator detects value leak between sibling regions")
+    func valueBetweenSiblingRegions() {
+        // Branch 1 references a value produced inside Branch 0.
+        let branch0 = Region(
+            parameters: [RegionParameter(id: ValueID(rawValue: 10))],
+            operations: [
+                Operation(
+                    key: OperationKey(rawValue: 0),
+                    kind: .linear(LinearAttributes(inputSize: 64, outputSize: 64)),
+                    operands: [Operand(value: ValueID(rawValue: 10))],
+                    results: [OperationResult(id: ValueID(rawValue: 50))]
+                ),
+            ],
+            results: [ValueUse(value: ValueID(rawValue: 50))]
+        )
+        let branch1 = Region(
+            parameters: [RegionParameter(id: ValueID(rawValue: 11))],
+            operations: [
+                Operation(
+                    key: OperationKey(rawValue: 1),
+                    kind: .linear(LinearAttributes(inputSize: 64, outputSize: 64)),
+                    // Illegally references ValueID 50 from branch0
+                    operands: [Operand(value: ValueID(rawValue: 50))],
+                    results: [OperationResult(id: ValueID(rawValue: 51))]
+                ),
+            ],
+            results: [ValueUse(value: ValueID(rawValue: 51))]
+        )
+        let graph = ModelGraph(rootRegion: Region(
+            operations: [
+                Operation(
+                    key: OperationKey(rawValue: 2),
+                    kind: .rmsNorm(RMSNormAttributes(dimension: 64)),
+                    results: [OperationResult(id: ValueID(rawValue: 0))]
+                ),
+                Operation(
+                    key: OperationKey(rawValue: 3),
+                    kind: .parallel(merge: .add, branches: [branch0, branch1]),
+                    operands: [Operand(value: ValueID(rawValue: 0))],
+                    results: [OperationResult(id: ValueID(rawValue: 1))]
+                ),
+            ],
+            results: [ValueUse(value: ValueID(rawValue: 1))]
+        ))
+
+        #expect(throws: GraphValidationError.self) {
+            try GraphValidator.validate(graph)
+        }
+    }
+
+    // MARK: - GraphValidator Edge Cases (continued)
+
+    @Test("GraphValidator accepts parallel with custom merge (no arity constraint)")
+    func parallelCustomMergeNoConstraint() throws {
+        // Custom merge: branches can have different result counts
+        // Build manually since normalizer always uses equal arity from branches.
+        let param = ValueID(rawValue: 0)
+        let branch0 = Region(
+            parameters: [RegionParameter(id: ValueID(rawValue: 1))],
+            operations: [
+                Operation(
+                    key: OperationKey(rawValue: 0),
+                    kind: .linear(LinearAttributes(inputSize: 64, outputSize: 64)),
+                    operands: [Operand(value: ValueID(rawValue: 1))],
+                    results: [OperationResult(id: ValueID(rawValue: 2))]
+                ),
+            ],
+            results: [ValueUse(value: ValueID(rawValue: 2))]
+        )
+        let branch1 = Region(
+            parameters: [RegionParameter(id: ValueID(rawValue: 3))],
+            operations: [
+                Operation(
+                    key: OperationKey(rawValue: 1),
+                    kind: .linear(LinearAttributes(inputSize: 64, outputSize: 64)),
+                    operands: [Operand(value: ValueID(rawValue: 3))],
+                    results: [
+                        OperationResult(id: ValueID(rawValue: 4)),
+                        OperationResult(id: ValueID(rawValue: 5)),
+                    ]
+                ),
+            ],
+            results: [
+                ValueUse(value: ValueID(rawValue: 4)),
+                ValueUse(value: ValueID(rawValue: 5)),
+            ]
+        )
+        let graph = ModelGraph(rootRegion: Region(
+            operations: [
+                Operation(
+                    key: OperationKey(rawValue: 2),
+                    kind: .rmsNorm(RMSNormAttributes(dimension: 64)),
+                    results: [OperationResult(id: param)]
+                ),
+                Operation(
+                    key: OperationKey(rawValue: 3),
+                    kind: .parallel(merge: .custom("my-merge"), branches: [branch0, branch1]),
+                    operands: [Operand(value: param)],
+                    results: [OperationResult(id: ValueID(rawValue: 6))]
+                ),
+            ],
+            results: [ValueUse(value: ValueID(rawValue: 6))]
+        ))
+
+        // Custom merge allows mismatched branch arities — no error.
+        try GraphValidator.validate(graph)
+    }
+
+    // MARK: - Canonicalizer Branch Coverage
+
+    @Test("Canonicalization preserves RoPE attributes")
+    func canonicalizationRoPE() throws {
+        let decl: ModelDeclaration = .sequence([
+            .primitive(.rope(RoPEAttributes(
+                dimension: 128, base: 500_000.0,
+                scaling: RoPEScaling(kind: .yarn, factor: 4.0, originalMaxPositions: 8192)
+            ))),
+        ])
+
+        let graph = try normalize(decl).graph
+        let canon = canonicalize(graph)
+
+        if case .rope(let attrs) = canon.rootRegion.operations[0].kind {
+            #expect(attrs.dimension == 128)
+            #expect(attrs.base == 500_000.0)
+            #expect(attrs.scaling?.kind == .yarn)
+            #expect(attrs.scaling?.factor == 4.0)
+            #expect(attrs.scaling?.originalMaxPositions == 8192)
+        } else {
+            Issue.record("Expected rope operation")
+        }
+    }
+
+    @Test("Canonicalization preserves MLP attributes")
+    func canonicalizationMLP() throws {
+        let decl: ModelDeclaration = .primitive(
+            .mlp(MLPAttributes(
+                inputSize: 4096, outputSize: 4096,
+                intermediateSize: 11008,
+                activation: .gelu, gating: .geglu, bias: true
+            ))
+        )
+
+        let graph = try normalize(decl).graph
+        let canon = canonicalize(graph)
+
+        if case .mlp(let attrs) = canon.rootRegion.operations[0].kind {
+            #expect(attrs.inputSize == 4096)
+            #expect(attrs.intermediateSize == 11008)
+            #expect(attrs.activation == .gelu)
+            #expect(attrs.gating == .geglu)
+            #expect(attrs.bias == true)
+        } else {
+            Issue.record("Expected mlp operation")
+        }
+    }
+
+    @Test("Canonicalization preserves LayerNorm attributes")
+    func canonicalizationLayerNorm() throws {
+        let decl: ModelDeclaration = .primitive(
+            .layerNorm(LayerNormAttributes(dimension: 2048, epsilon: 1e-5, affine: false))
+        )
+
+        let graph = try normalize(decl).graph
+        let canon = canonicalize(graph)
+
+        if case .layerNorm(let attrs) = canon.rootRegion.operations[0].kind {
+            #expect(attrs.dimension == 2048)
+            #expect(attrs.epsilon == 1e-5)
+            #expect(attrs.affine == false)
+        } else {
+            Issue.record("Expected layerNorm operation")
+        }
+    }
+
+    @Test("Canonicalization passes through unhandled kinds unchanged")
+    func canonicalizationPassthrough() throws {
+        let decl: ModelDeclaration = .sequence([
+            .primitive(.tokenEmbedding(TokenEmbeddingAttributes(vocabSize: 100, embeddingSize: 64))),
+            .primitive(.stateSpace(StateSpaceAttributes(hiddenSize: 64, stateSize: 16, variant: "mamba"))),
+            .primitive(.custom(CustomNodeAttributes(domain: "test", name: "noop"))),
+            .primitive(.outputHead(OutputHeadAttributes(inputSize: 64, vocabSize: 100))),
+        ])
+
+        let graph = try normalize(decl).graph
+        let canon = canonicalize(graph)
+
+        // Pass-through kinds: tokenEmbedding, stateSpace, custom, outputHead
+        if case .tokenEmbedding(let a) = canon.rootRegion.operations[0].kind {
+            #expect(a.vocabSize == 100)
+        } else {
+            Issue.record("Expected tokenEmbedding")
+        }
+        if case .stateSpace(let a) = canon.rootRegion.operations[1].kind {
+            #expect(a.variant == "mamba")
+        } else {
+            Issue.record("Expected stateSpace")
+        }
+        if case .custom(let a) = canon.rootRegion.operations[2].kind {
+            #expect(a.domain == "test")
+        } else {
+            Issue.record("Expected custom")
+        }
+    }
+
+    @Test("Canonicalization recurses into residual body region")
+    func canonicalizationResidualBody() throws {
+        // Attention with hint inside residual — hint should be stripped.
+        let decl: ModelDeclaration = .residual(strategy: .add, body:
+            .primitive(.attention(AttentionAttributes(
+                hiddenSize: 64, headCount: 4, kvHeadCount: 4, headDimension: 16,
+                implementationHint: .fused
+            )))
+        )
+
+        let graph = try normalize(decl).graph
+        let canon = canonicalize(graph)
+
+        if case .residual(_, let body) = canon.rootRegion.operations[0].kind {
+            if case .attention(let attrs) = body.operations[0].kind {
+                #expect(attrs.implementationHint == nil)
+            } else {
+                Issue.record("Expected attention inside residual body")
+            }
+        } else {
+            Issue.record("Expected residual")
+        }
+    }
+
+    @Test("Canonicalization recurses into parallel branch regions")
+    func canonicalizationParallelBranches() throws {
+        let decl: ModelDeclaration = .parallel(merge: .add, branches: [
+            .primitive(.attention(AttentionAttributes(
+                hiddenSize: 64, headCount: 4, kvHeadCount: 4, headDimension: 16,
+                implementationHint: .unfused
+            ))),
+            .primitive(.mlp(MLPAttributes(
+                inputSize: 64, outputSize: 64, intermediateSize: 256,
+                activation: .silu, gating: .swiglu
+            ))),
+        ])
+
+        let graph = try normalize(decl).graph
+        let canon = canonicalize(graph)
+
+        if case .parallel(_, let branches) = canon.rootRegion.operations[0].kind {
+            if case .attention(let attrs) = branches[0].operations[0].kind {
+                #expect(attrs.implementationHint == nil)
+            } else {
+                Issue.record("Expected attention in branch 0")
+            }
+            if case .mlp(let attrs) = branches[1].operations[0].kind {
+                #expect(attrs.activation == .silu)
+            } else {
+                Issue.record("Expected mlp in branch 1")
+            }
+        } else {
+            Issue.record("Expected parallel")
+        }
+    }
+
+    @Test("Canonicalization recurses into repeating body region")
+    func canonicalizationRepeatingBody() throws {
+        let decl: ModelDeclaration = .sequence([
+            .primitive(.rmsNorm(RMSNormAttributes(dimension: 64))),
+            .repeating(count: 4, label: nil, body:
+                .primitive(.attention(AttentionAttributes(
+                    hiddenSize: 64, headCount: 4, kvHeadCount: 4, headDimension: 16,
+                    implementationHint: .pagedKVPreferred
+                )))
+            ),
+        ])
+
+        let graph = try normalize(decl).graph
+        let canon = canonicalize(graph)
+
+        if case .repeating(let count, let body) = canon.rootRegion.operations[1].kind {
+            #expect(count == 4)
+            if case .attention(let attrs) = body.operations[0].kind {
+                #expect(attrs.implementationHint == nil)
+            } else {
+                Issue.record("Expected attention inside repeating body")
+            }
+        } else {
+            Issue.record("Expected repeating")
+        }
+    }
+
+    // MARK: - LoweredGraph Structure
+
+    @Test("LoweredGraph node connections form valid DAG")
+    func loweredGraphDAG() throws {
+        let graph = LoweredGraph(
+            nodes: [
+                LoweredNode(id: 0, op: .gather),
+                LoweredNode(id: 1, op: .matmul, inputs: [0]),
+                LoweredNode(id: 2, op: .rmsNorm, inputs: [1]),
+                LoweredNode(id: 3, op: .matmul, inputs: [2]),
+                LoweredNode(id: 4, op: .add, inputs: [1, 3]),
+                LoweredNode(id: 5, op: .softmax, inputs: [4]),
+            ],
+            outputs: [5]
+        )
+
+        // Verify structure
+        #expect(graph.nodes.count == 6)
+        #expect(graph.outputs == [5])
+        #expect(graph.nodes[4].inputs == [1, 3])
+    }
+
+    @Test("LoweredNode with attributes preserves values")
+    func loweredNodeAttributes() throws {
+        let node = LoweredNode(
+            id: 0,
+            op: .rmsNorm,
+            attributes: LoweredAttributes(values: [
+                "dimension": .int(4096),
+                "epsilon": .float(1e-6),
+                "affine": .bool(true),
+                "variant": .string("pre"),
+                "shape": .ints([1, 128, 4096]),
+                "scales": .floats([1.0, 0.5, 0.25]),
+            ])
+        )
+
+        #expect(node.attributes.values["dimension"] == .int(4096))
+        #expect(node.attributes.values["epsilon"] == .float(1e-6))
+        #expect(node.attributes.values["affine"] == .bool(true))
+        #expect(node.attributes.values["variant"] == .string("pre"))
+        #expect(node.attributes.values["shape"] == .ints([1, 128, 4096]))
+        #expect(node.attributes.values["scales"] == .floats([1.0, 0.5, 0.25]))
+    }
+
+    @Test("LoweredOp activation variant roundtrips through JSON")
+    func loweredOpActivationCodable() throws {
+        let ops: [LoweredOp] = [
+            .activation(.gelu), .activation(.silu), .activation(.relu),
+            .activation(.custom("mish")), .custom("my-op"),
+        ]
+        for op in ops {
+            let data = try JSONEncoder().encode(op)
+            let decoded = try JSONDecoder().decode(LoweredOp.self, from: data)
+            #expect(op == decoded)
+        }
+    }
+
+    @Test("LoweredAttributeValue all cases roundtrip through JSON")
+    func loweredAttributeValueCodable() throws {
+        let values: [LoweredAttributeValue] = [
+            .int(42), .float(3.14), .bool(false),
+            .string("test"), .ints([1, 2, 3]), .floats([0.1, 0.2]),
+        ]
+        for value in values {
+            let data = try JSONEncoder().encode(value)
+            let decoded = try JSONDecoder().decode(LoweredAttributeValue.self, from: data)
+            #expect(value == decoded)
+        }
+    }
+
+    @Test("LoweredGraph with attributes roundtrips through JSON")
+    func loweredGraphWithAttributesCodable() throws {
+        let graph = LoweredGraph(
+            nodes: [
+                LoweredNode(id: 0, op: .gather),
+                LoweredNode(
+                    id: 1, op: .matmul, inputs: [0],
+                    attributes: LoweredAttributes(values: ["transpose": .bool(true)])
+                ),
+                LoweredNode(id: 2, op: .activation(.silu), inputs: [1]),
+            ],
+            outputs: [2]
+        )
+
+        let data = try JSONEncoder().encode(graph)
+        let decoded = try JSONDecoder().decode(LoweredGraph.self, from: data)
+        #expect(graph == decoded)
+    }
+
+    // MARK: - Metadata and StructuralPath Codable
+
+    @Test("ModelGraphMetadata roundtrips through JSON")
+    func metadataCodable() throws {
+        let metadata = ModelGraphMetadata(annotations: [
+            AnnotationEntry(
+                path: StructuralPath(components: [.operation(0)]),
+                annotation: OperationAnnotation(label: "embed")
+            ),
+            AnnotationEntry(
+                path: StructuralPath(components: [.operation(1), .regionBody, .operation(0)]),
+                annotation: OperationAnnotation(label: "attn_norm")
+            ),
+        ])
+
+        let data = try JSONEncoder().encode(metadata)
+        let decoded = try JSONDecoder().decode(ModelGraphMetadata.self, from: data)
+        #expect(metadata == decoded)
+        #expect(decoded.annotation(for: StructuralPath(components: [.operation(0)]))?.label == "embed")
+    }
+
+    @Test("StructuralPath with all component types roundtrips through JSON")
+    func structuralPathCodable() throws {
+        let path = StructuralPath(components: [
+            .operation(2),
+            .regionBody,
+            .regionBranch(1),
+            .parameter(0),
+            .operand(3),
+            .result(1),
+            .field("q_proj"),
+            .index(5),
+        ])
+
+        let data = try JSONEncoder().encode(path)
+        let decoded = try JSONDecoder().decode(StructuralPath.self, from: data)
+        #expect(path == decoded)
+    }
+
+    @Test("ModelGraphMetadata returns nil for absent path")
+    func metadataAbsentPath() {
+        let metadata = ModelGraphMetadata(annotations: [
+            AnnotationEntry(
+                path: StructuralPath(components: [.operation(0)]),
+                annotation: OperationAnnotation(label: "embed")
+            ),
+        ])
+
+        #expect(metadata.annotation(for: StructuralPath(components: [.operation(99)])) == nil)
+    }
+
+    // MARK: - ModelDeclaration Equatable
+
+    @Test("ModelDeclaration Equatable distinguishes different structures")
+    func declarationEquatable() {
+        let a: ModelDeclaration = .sequence([
+            .primitive(.rmsNorm(RMSNormAttributes(dimension: 64))),
+            .primitive(.linear(LinearAttributes(inputSize: 64, outputSize: 32))),
+        ])
+        let b: ModelDeclaration = .sequence([
+            .primitive(.rmsNorm(RMSNormAttributes(dimension: 128))),
+            .primitive(.linear(LinearAttributes(inputSize: 128, outputSize: 32))),
+        ])
+        let c: ModelDeclaration = .sequence([
+            .primitive(.rmsNorm(RMSNormAttributes(dimension: 64))),
+            .primitive(.linear(LinearAttributes(inputSize: 64, outputSize: 32))),
+        ])
+
+        #expect(a == c)
+        #expect(a != b)
+    }
+
+    @Test("ModelDeclaration Equatable handles nested structural cases")
+    func declarationEquatableNested() {
+        let a: ModelDeclaration = .residual(strategy: .add, body:
+            .primitive(.rmsNorm(RMSNormAttributes(dimension: 64)))
+        )
+        let b: ModelDeclaration = .residual(strategy: .weighted, body:
+            .primitive(.rmsNorm(RMSNormAttributes(dimension: 64)))
+        )
+
+        #expect(a != b)
+    }
+
+    @Test("PrimitiveDeclaration Equatable for all cases")
+    func primitiveDeclarationEquatable() {
+        let a = PrimitiveDeclaration.tokenEmbedding(TokenEmbeddingAttributes(vocabSize: 100, embeddingSize: 64))
+        let b = PrimitiveDeclaration.tokenEmbedding(TokenEmbeddingAttributes(vocabSize: 200, embeddingSize: 64))
+        let c = PrimitiveDeclaration.tokenEmbedding(TokenEmbeddingAttributes(vocabSize: 100, embeddingSize: 64))
+        let d = PrimitiveDeclaration.linear(LinearAttributes(inputSize: 100, outputSize: 64))
+
+        #expect(a == c)
+        #expect(a != b)
+        #expect(a != d)
+    }
+
+    // MARK: - OperationSignature Edge Cases
+
+    @Test("Custom primitive has variadic arity for both operands and results")
+    func customPrimitiveVariadicArity() {
+        let (_, sig) = primitiveInfo(from: .custom(CustomNodeAttributes(domain: "test", name: "multi-out")))
+        #expect(sig.operandArity == .variadic)
+        #expect(sig.resultArity == .variadic)
+
+        // Variadic resolves to fallback
+        #expect(resolveArity(sig.operandArity, fallback: 3) == 3)
+        #expect(resolveArity(sig.resultArity, fallback: 0) == 0)
+    }
+
+    @Test("Exact arity ignores fallback")
+    func exactArityIgnoresFallback() {
+        #expect(resolveArity(.exact(1), fallback: 99) == 1)
+        #expect(resolveArity(.exact(0), fallback: 5) == 0)
+    }
+
+    // MARK: - OperationKind Codable Roundtrip with Regions
+
+    @Test("OperationKind with nested region roundtrips through JSON")
+    func operationKindWithRegionCodable() throws {
+        let body = Region(
+            parameters: [RegionParameter(id: ValueID(rawValue: 0))],
+            operations: [
+                Operation(
+                    key: OperationKey(rawValue: 0),
+                    kind: .rmsNorm(RMSNormAttributes(dimension: 64)),
+                    operands: [Operand(value: ValueID(rawValue: 0))],
+                    results: [OperationResult(id: ValueID(rawValue: 1))]
+                ),
+            ],
+            results: [ValueUse(value: ValueID(rawValue: 1))]
+        )
+        let kinds: [OperationKind] = [
+            .residual(strategy: .add, body: body),
+            .parallel(merge: .concat, branches: [body, body]),
+            .repeating(count: 12, body: body),
+        ]
+
+        for kind in kinds {
+            let data = try JSONEncoder().encode(kind)
+            let decoded = try JSONDecoder().decode(OperationKind.self, from: data)
+            #expect(kind == decoded)
+        }
+    }
+
+    // MARK: - NormalizedModel Metadata Integration
+
+    @Test("Repeat label appears at correct structural path in metadata")
+    func repeatLabelMetadataPath() throws {
+        // Use explicit labeled Repeat declaration.
+        let decl: ModelDeclaration = .sequence([
+            .primitive(.tokenEmbedding(TokenEmbeddingAttributes(vocabSize: 100, embeddingSize: 64))),
+            .repeating(count: 2, label: "layers", body:
+                .primitive(.rmsNorm(RMSNormAttributes(dimension: 64)))
+            ),
+            .primitive(.outputHead(OutputHeadAttributes(inputSize: 64, vocabSize: 100))),
+        ])
+
+        let normalized = try normalize(decl)
+
+        // Repeat is the 2nd operation in root → operation(1)
+        let repeatPath = StructuralPath(components: [.operation(1)])
+        #expect(normalized.metadata.annotation(for: repeatPath)?.label == "layers")
+    }
+
+    @Test("Labels inside repeating body use correct structural path")
+    func labelsInsideRepeatingBody() throws {
+        let decl: ModelDeclaration = .repeating(count: 2, label: "layers", body:
+            .labeled("block",
+                .primitive(.rmsNorm(RMSNormAttributes(dimension: 64)))
+            )
+        )
+
+        let normalized = try normalize(decl)
+
+        // Repeat is operation(0), label "layers"
+        let repeatPath = StructuralPath(components: [.operation(0)])
+        #expect(normalized.metadata.annotation(for: repeatPath)?.label == "layers")
+
+        // Inner label is operation(0) → regionBody → operation(0), label "block"
+        let innerPath = StructuralPath(components: [.operation(0), .regionBody, .operation(0)])
+        #expect(normalized.metadata.annotation(for: innerPath)?.label == "block")
+    }
+
+    // MARK: - Graph Equatable Semantics
+
+    @Test("Graphs with same structure but different OperationKeys are not equal")
+    func graphDifferentKeysNotEqual() {
+        let graphA = ModelGraph(rootRegion: Region(
+            operations: [
+                Operation(
+                    key: OperationKey(rawValue: 0),
+                    kind: .rmsNorm(RMSNormAttributes(dimension: 64)),
+                    results: [OperationResult(id: ValueID(rawValue: 0))]
+                ),
+            ],
+            results: [ValueUse(value: ValueID(rawValue: 0))]
+        ))
+        let graphB = ModelGraph(rootRegion: Region(
+            operations: [
+                Operation(
+                    key: OperationKey(rawValue: 999),
+                    kind: .rmsNorm(RMSNormAttributes(dimension: 64)),
+                    results: [OperationResult(id: ValueID(rawValue: 0))]
+                ),
+            ],
+            results: [ValueUse(value: ValueID(rawValue: 0))]
+        ))
+
+        // Raw Equatable uses OperationKey, so they differ.
+        #expect(graphA != graphB)
+        // After canonicalization, they should be equal.
+        #expect(canonicalize(graphA) == canonicalize(graphB))
+    }
+
+    @Test("Graphs with different attributes on same kind are not equal")
+    func graphDifferentAttributesNotEqual() throws {
+        let declA: ModelDeclaration = .primitive(.rmsNorm(RMSNormAttributes(dimension: 64, epsilon: 1e-5)))
+        let declB: ModelDeclaration = .primitive(.rmsNorm(RMSNormAttributes(dimension: 64, epsilon: 1e-6)))
+
+        let graphA = try normalize(declA).graph
+        let graphB = try normalize(declB).graph
+
+        #expect(graphA != graphB)
+        #expect(canonicalize(graphA) != canonicalize(graphB))
+    }
 }

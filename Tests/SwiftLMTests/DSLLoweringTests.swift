@@ -13,10 +13,6 @@ struct TinyLlama: LanguageModel {
     let intermediateSize: Int
     let layerCount: Int
 
-    @WeightsBuilder var weights: some WeightsSpec {
-        WeightsDeclaration.random(seed: 42, scheme: .xavier)
-    }
-
     @ModelComponentBuilder var body: some ModelComponent {
         TokenEmbedding(vocabSize: vocabSize, embeddingSize: hiddenSize)
 
@@ -48,10 +44,6 @@ struct TinyCohere: LanguageModel {
     let kvHeadCount: Int
     let intermediateSize: Int
     let layerCount: Int
-
-    @WeightsBuilder var weights: some WeightsSpec {
-        WeightsDeclaration.random(seed: 42, scheme: .xavier)
-    }
 
     @ModelComponentBuilder var body: some ModelComponent {
         TokenEmbedding(vocabSize: vocabSize, embeddingSize: hiddenSize)
@@ -603,6 +595,171 @@ struct DSLLoweringTests {
 
         #expect(kindNames.count == 12)
     }
+
+    // MARK: - Normalizer Edge Cases
+
+    @Test("Empty sequence is identity (pass-through)")
+    func emptySequenceIdentity() throws {
+        // Inner empty sequence should not produce operations; upstream flows through.
+        let decl: ModelDeclaration = .sequence([
+            .primitive(.rmsNorm(RMSNormAttributes(dimension: 64))),
+            .sequence([]),
+            .primitive(.linear(LinearAttributes(inputSize: 64, outputSize: 32))),
+        ])
+
+        let graph = try normalize(decl).graph
+        // Empty sequence contributes no operations; only rmsNorm + linear.
+        #expect(graph.rootRegion.operations.count == 2)
+        // Value flow: linear's operand == rmsNorm's result.
+        let normResult = graph.rootRegion.operations[0].results[0].id
+        let linearOperand = graph.rootRegion.operations[1].operands[0].value
+        #expect(normResult == linearOperand)
+    }
+
+    @Test("Parallel with single branch normalizes correctly")
+    func singleBranchParallel() throws {
+        let decl: ModelDeclaration = .sequence([
+            .primitive(.rmsNorm(RMSNormAttributes(dimension: 64))),
+            .parallel(merge: .add, branches: [
+                .primitive(.linear(LinearAttributes(inputSize: 64, outputSize: 64))),
+            ]),
+        ])
+
+        let graph = try normalize(decl).graph
+        #expect(graph.rootRegion.operations.count == 2)
+
+        if case .parallel(_, let branches) = graph.rootRegion.operations[1].kind {
+            #expect(branches.count == 1)
+            #expect(branches[0].operations.count == 1)
+            #expect(branches[0].parameters.count == 1)
+            #expect(branches[0].results.count == 1)
+        } else {
+            Issue.record("Expected parallel operation")
+        }
+
+        try GraphValidator.validate(graph)
+    }
+
+    @Test("Repeat with count=1 normalizes correctly")
+    func repeatCountOne() throws {
+        let decl: ModelDeclaration = .sequence([
+            .primitive(.rmsNorm(RMSNormAttributes(dimension: 64))),
+            .repeating(count: 1, label: nil, body:
+                .primitive(.linear(LinearAttributes(inputSize: 64, outputSize: 64)))
+            ),
+        ])
+
+        let graph = try normalize(decl).graph
+        #expect(graph.rootRegion.operations.count == 2)
+
+        if case .repeating(let count, let body) = graph.rootRegion.operations[1].kind {
+            #expect(count == 1)
+            #expect(body.operations.count == 1)
+            #expect(body.parameters.count == 1)
+            #expect(body.results.count == 1)
+        } else {
+            Issue.record("Expected repeating operation")
+        }
+
+        try GraphValidator.validate(graph)
+    }
+
+    @Test("Labeled on structural operations places label on outer operation")
+    func labeledOnStructural() throws {
+        let decl: ModelDeclaration = .labeled("attn_block",
+            .residual(strategy: .add, body:
+                .primitive(.attention(AttentionAttributes(
+                    hiddenSize: 64, headCount: 4, kvHeadCount: 4, headDimension: 16
+                )))
+            )
+        )
+
+        let normalized = try normalize(decl)
+        #expect(normalized.graph.rootRegion.operations.count == 1)
+
+        let path = StructuralPath(components: [.operation(0)])
+        #expect(normalized.metadata.annotation(for: path)?.label == "attn_block")
+    }
+
+    @Test("Multiple labels on different operations are preserved")
+    func multipleLabelsDifferentOps() throws {
+        let decl: ModelDeclaration = .sequence([
+            .labeled("embed", .primitive(.tokenEmbedding(TokenEmbeddingAttributes(vocabSize: 100, embeddingSize: 64)))),
+            .labeled("norm", .primitive(.rmsNorm(RMSNormAttributes(dimension: 64)))),
+            .labeled("head", .primitive(.outputHead(OutputHeadAttributes(inputSize: 64, vocabSize: 100)))),
+        ])
+
+        let normalized = try normalize(decl)
+        #expect(normalized.metadata.annotation(for: StructuralPath(components: [.operation(0)]))?.label == "embed")
+        #expect(normalized.metadata.annotation(for: StructuralPath(components: [.operation(1)]))?.label == "norm")
+        #expect(normalized.metadata.annotation(for: StructuralPath(components: [.operation(2)]))?.label == "head")
+    }
+
+    @Test("Deeply nested sequence flattening preserves value chain")
+    func deeplyNestedSequences() throws {
+        let decl: ModelDeclaration = .sequence([
+            .sequence([
+                .sequence([
+                    .primitive(.rmsNorm(RMSNormAttributes(dimension: 64))),
+                ]),
+                .primitive(.linear(LinearAttributes(inputSize: 64, outputSize: 64))),
+            ]),
+            .sequence([
+                .primitive(.linear(LinearAttributes(inputSize: 64, outputSize: 32))),
+            ]),
+        ])
+
+        let graph = try normalize(decl).graph
+        // All nested sequences should be flattened to 3 operations.
+        #expect(graph.rootRegion.operations.count == 3)
+
+        // Value chain must be intact through all flattening.
+        let r0 = graph.rootRegion.operations[0].results[0].id
+        let o1 = graph.rootRegion.operations[1].operands[0].value
+        let r1 = graph.rootRegion.operations[1].results[0].id
+        let o2 = graph.rootRegion.operations[2].operands[0].value
+        #expect(r0 == o1)
+        #expect(r1 == o2)
+    }
+
+    @Test("Residual body with sequence produces flat operations in body region")
+    func residualBodyFlattenedSequence() throws {
+        let decl: ModelDeclaration = .sequence([
+            .primitive(.rmsNorm(RMSNormAttributes(dimension: 64))),
+            .residual(strategy: .add, body: .sequence([
+                .primitive(.rmsNorm(RMSNormAttributes(dimension: 64))),
+                .sequence([
+                    .primitive(.linear(LinearAttributes(inputSize: 64, outputSize: 64))),
+                    .primitive(.linear(LinearAttributes(inputSize: 64, outputSize: 64))),
+                ]),
+            ])),
+        ])
+
+        let graph = try normalize(decl).graph
+        if case .residual(_, let body) = graph.rootRegion.operations[1].kind {
+            // Inner sequence is flattened: rmsNorm + linear + linear = 3
+            #expect(body.operations.count == 3)
+        } else {
+            Issue.record("Expected residual")
+        }
+
+        try GraphValidator.validate(graph)
+    }
+
+    @Test("tokenEmbedding as source has zero operands after normalization")
+    func tokenEmbeddingSourceArity() throws {
+        let decl: ModelDeclaration = .primitive(
+            .tokenEmbedding(TokenEmbeddingAttributes(vocabSize: 100, embeddingSize: 64))
+        )
+
+        let graph = try normalize(decl).graph
+        #expect(graph.rootRegion.operations.count == 1)
+        // tokenEmbedding receives empty upstream → zero operands.
+        #expect(graph.rootRegion.operations[0].operands.isEmpty)
+        #expect(graph.rootRegion.operations[0].results.count == 1)
+    }
+
+    // MARK: - DSL Coverage (continued)
 
     @Test("All 3 structural OperationKind cases have DSL components")
     func allStructuralKindsDSLCoverage() throws {

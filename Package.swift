@@ -6,6 +6,7 @@ let package = Package(
     platforms: [.macOS(.v15), .iOS(.v18), .visionOS(.v2)],
     products: [
         .library(name: "SwiftLM", targets: ["SwiftLM"]),
+        .library(name: "Models", targets: ["Models"]),
         .library(name: "MLXLM", targets: ["MLXLM"]),
         .library(name: "GGUFParser", targets: ["GGUFParser"]),
         .library(name: "GGUFTokenizer", targets: ["GGUFTokenizer"]),
@@ -22,6 +23,7 @@ let package = Package(
                 .product(name: "JSONSchema", package: "JSONSchema"),
             ]
         ),
+        .target(name: "Models", dependencies: ["SwiftLM"]),
         .target(name: "GGUFParser"),
         .target(name: "GGUFTokenizer", dependencies: ["GGUFParser"]),
         .target(
@@ -36,6 +38,17 @@ let package = Package(
                 .product(name: "MLXLinalg", package: "mlx-swift"),
             ]
         ),
+        .target(
+            name: "MLXCompiler",
+            dependencies: [
+                "SwiftLM",
+                .product(name: "MLX", package: "mlx-swift"),
+                .product(name: "MLXNN", package: "mlx-swift"),
+                .product(name: "MLXFast", package: "mlx-swift"),
+            ]
+        ),
+        .testTarget(name: "MLXCompilerTests", dependencies: ["MLXCompiler", "SwiftLM", "Models"]),
+        .testTarget(name: "ModelsTests", dependencies: ["Models"]),
         .testTarget(name: "SwiftLMTests", dependencies: ["SwiftLM"]),
         .testTarget(name: "GGUFParserTests", dependencies: ["GGUFParser"]),
         .testTarget(name: "GGUFTokenizerTests", dependencies: ["GGUFTokenizer"]),
