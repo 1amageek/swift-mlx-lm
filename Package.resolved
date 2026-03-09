@@ -1,6 +1,15 @@
 {
-  "originHash" : "491f1e63fe5ce24e42d36ab331a90aeebf85d0f9309e15d270aaccd2298b81ca",
+  "originHash" : "2a2110ac9bbd72694b07f9a4fee682e3887bcf8f53142064196f370b334c3a83",
   "pins" : [
+    {
+      "identity" : "jsonschema",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/mattt/JSONSchema",
+      "state" : {
+        "revision" : "4c6f2467d5bc72b062c7a9b7e4cd77a09635ea8b",
+        "version" : "1.3.1"
+      }
+    },
     {
       "identity" : "mlx-swift",
       "kind" : "remoteSourceControl",
