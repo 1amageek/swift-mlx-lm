@@ -53,4 +53,12 @@ public enum ModelComponentBuilder {
     ) -> ConditionalComponent<First, Second> {
         ConditionalComponent(storage: .second(component))
     }
+
+    // MARK: - Array (for...in loops)
+
+    public static func buildArray<C: ModelComponent>(
+        _ components: [C]
+    ) -> ArrayComponent {
+        ArrayComponent(children: components.map { $0 as any ModelComponent })
+    }
 }

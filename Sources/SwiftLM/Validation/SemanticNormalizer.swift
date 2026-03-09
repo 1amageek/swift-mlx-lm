@@ -186,6 +186,24 @@ extension TupleComponent: _BranchExtractable {
     }
 }
 
+// MARK: - Built-in Conformances: ArrayComponent
+
+extension ArrayComponent: _BuiltinComponent {
+    fileprivate func _normalize(
+        upstream: [ValueID],
+        ctx: inout NormalizationContext
+    ) throws -> NormalizedRegionFragment {
+        var ops: [Operation] = []
+        var current = upstream
+        for child in children {
+            let fragment = try normalizeComponent(child, upstream: current, ctx: &ctx)
+            ops.append(contentsOf: fragment.operations)
+            current = fragment.results
+        }
+        return NormalizedRegionFragment(operations: ops, results: current)
+    }
+}
+
 // MARK: - Built-in Conformances: OptionalComponent
 
 extension OptionalComponent: _BuiltinComponent {
