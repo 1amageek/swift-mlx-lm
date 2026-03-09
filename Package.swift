@@ -50,7 +50,7 @@ let package = Package(
             ]
         ),
         .testTarget(name: "MLXCompilerTests", dependencies: ["MLXCompiler", "SwiftLM", "Models"]),
-        .testTarget(name: "ModelsTests", dependencies: ["Models"]),
+        .testTarget(name: "ModelsTests", dependencies: ["Models", "SwiftLM"]),
         .testTarget(name: "SwiftLMTests", dependencies: ["SwiftLM"]),
         .testTarget(name: "GGUFParserTests", dependencies: ["GGUFParser"]),
         .testTarget(name: "GGUFTokenizerTests", dependencies: ["GGUFTokenizer"]),

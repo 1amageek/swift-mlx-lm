@@ -1,5 +1,5 @@
 import Testing
-import SwiftLM
+@testable import SwiftLM
 @testable import Models
 
 @Suite("Model Declaration Tests")

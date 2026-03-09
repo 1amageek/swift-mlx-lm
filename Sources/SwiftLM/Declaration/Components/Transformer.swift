@@ -1,5 +1,3 @@
-import SwiftLM
-
 /// Standard pre-norm decoder-only transformer.
 ///
 /// Covers architectures: Llama, Qwen 2/2.5, Mistral, Phi, StarCoder2.
