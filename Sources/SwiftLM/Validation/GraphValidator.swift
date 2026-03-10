@@ -150,6 +150,11 @@ private func validateOperation(
     case .repeating(_, let body):
         try validateRegion(body)
 
+    case .layerStack(let layers):
+        for layer in layers {
+            try validateRegion(layer)
+        }
+
     default:
         break
     }
@@ -219,6 +224,34 @@ private func validateStructuralContract(_ op: Operation) throws {
                 bodyResultCount: body.results.count,
                 operationKey: op.key
             )
+        }
+        // results.count == operands.count
+        if op.results.count != op.operands.count {
+            throw GraphValidationError.repeatingResultArityMismatch(
+                operandCount: op.operands.count,
+                resultCount: op.results.count,
+                operationKey: op.key
+            )
+        }
+
+    case .layerStack(let layers):
+        // Each layer: parameters.count == operands.count
+        for layer in layers {
+            if layer.parameters.count != op.operands.count {
+                throw GraphValidationError.repeatingArityMismatch(
+                    operandCount: op.operands.count,
+                    bodyParameterCount: layer.parameters.count,
+                    operationKey: op.key
+                )
+            }
+            // Each layer: results.count == parameters.count (loop-carried)
+            if layer.results.count != layer.parameters.count {
+                throw GraphValidationError.repeatingLoopArityMismatch(
+                    bodyParameterCount: layer.parameters.count,
+                    bodyResultCount: layer.results.count,
+                    operationKey: op.key
+                )
+            }
         }
         // results.count == operands.count
         if op.results.count != op.operands.count {

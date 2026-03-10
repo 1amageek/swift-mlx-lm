@@ -103,8 +103,16 @@ struct RepetitionProcessor: LogitProcessor, Sendable {
         guard !recentTokens.isEmpty, penalty != 1.0 else {
             return logits
         }
-        let indices = MLXArray(recentTokens.map { Int32($0) })
-        let selected = logits.take(indices, axis: -1)
+
+        let originalShape = logits.shape
+        let flat = logits.reshaped(-1)
+        let vocabSize = flat.dim(0)
+
+        let validTokens = recentTokens.filter { $0 >= 0 && $0 < vocabSize }
+        guard !validTokens.isEmpty else { return logits }
+
+        let indices = MLXArray(validTokens.map { Int32($0) })
+        let selected = flat.take(indices, axis: 0)
 
         // Divide positive logits by penalty, multiply negative logits by penalty
         let penalized = MLX.where(
@@ -113,17 +121,14 @@ struct RepetitionProcessor: LogitProcessor, Sendable {
             selected * MLXArray(penalty)
         )
 
-        // Scatter penalized values back into logits
-        let result = logits
-        for (i, tokenID) in recentTokens.enumerated() {
-            guard tokenID >= 0 else { continue }
-            result[tokenID] = penalized[i]
-        }
-        return result
+        // Scatter penalized values back in one operation
+        let result = flat
+        result[indices] = penalized
+        return result.reshaped(originalShape)
     }
 
     mutating func didSample(token: MLXArray) {
-        eval(token)
+        // token is already materialized by the caller's .item() call
         let tokenID: Int32 = token.item()
         recentTokens.append(Int(tokenID))
         if recentTokens.count > contextSize {

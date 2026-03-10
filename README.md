@@ -1,17 +1,23 @@
 # swift-mlx-lm
 
-GGUF-first language model inference on Apple Silicon via MLX/Metal.
+Declarative LLM inference on Apple Silicon via MLX/Metal.
 
 ## Overview
 
-A Swift package that loads a single GGUF file and runs LLM inference entirely on Metal — no Python, no external tokenizer files, no config.json.
+A Swift package for LLM inference on Apple Silicon. Models are declared with the SwiftLM DSL, compiled to optimized MLX inference engines, and loaded from GGUF or safetensors.
 
 ```swift
 import MLXLM
 
 let loader = GGUFModelLoader()
+
+// Standard path — MLXNN Module tree
 let container = try await loader.load(repo: "Qwen/Qwen2.5-0.5B-Instruct-GGUF")
 
+// Compiled path — SwiftLM IR → MLXInferenceCompiler (compile-time kernel selection)
+let compiled = try await loader.loadCompiled(repo: "Qwen/Qwen2.5-0.5B-Instruct-GGUF")
+
+// Both paths produce identical ModelContainer API
 let input = UserInput(chat: [
     .system("You are a helpful assistant."),
     .user("What is 1+1?"),
@@ -39,15 +45,15 @@ for await generation in stream {
 | **GGUFTokenizer** | GGUFParser | BPE tokenizers restored from GGUF metadata. Merges-based and scores-based. |
 | **SwiftLM** | — | Declarative model description framework. DSL → IR → validation → canonicalization. |
 | **Models** | SwiftLM | Pure architecture declarations. No MLX dependency. |
-| **MLXCompiler** | SwiftLM, MLX | Compiles ModelGraph into executable MLX modules. |
-| **MLXLM** | GGUFParser, GGUFTokenizer, MLX | GGUF→MLX bridge, chat template rendering, streaming generation. |
+| **MLXCompiler** | SwiftLM, MLX | Compiles ModelGraph into optimized inference engines with compile-time kernel selection. |
+| **MLXLM** | GGUFParser, GGUFTokenizer, MLXCompiler, MLX | Weight loading (GGUF/safetensors), chat template rendering, streaming generation. |
 
 ```
-GGUFParser          SwiftLM
+GGUFParser          SwiftLM ─── Models
     │                  │
-GGUFTokenizer      Models    MLXCompiler
-    │                  │         │
-    └──── MLXLM ──────┴─────────┘
+GGUFTokenizer      MLXCompiler
+    │                  │
+    └──── MLXLM ──────┘
 ```
 
 ## Supported Architectures
@@ -94,33 +100,20 @@ MLX runtime re-quantization: 2-bit, 4-bit, 8-bit (auto-detected from GGUF).
 
 ## Features
 
+- **Declarative architecture** — models described with SwiftLM DSL, compiled to optimized MLX inference
+- **Two loading paths** — standard path (`loadContext`) via MLXNN Module, compiled path (`loadCompiledContext`) via MLXInferenceCompiler with compile-time kernel selection
 - **Single-file loading** — one GGUF file contains weights, tokenizer, and chat template
 - **Chat template** — Jinja2 evaluation via [swift-jinja](https://github.com/huggingface/swift-jinja), no hand-written formatters
 - **Streaming generation** — `AsyncStream<Generation>` with token-by-token output
 - **Tool calling** — JSON and XML tool call format detection
 - **LoRA/DoRA** — auto-detect from embedded GGUF tensors or load external adapters
-- **Prompt caching** — `PromptCacheSnapshot` for prefix reuse across turns
+- **Prompt caching** — `PrefixCachePool` for live cache reuse, `PromptCacheSnapshot` for serialized prefix restore
 - **Hybrid caching** — KV cache for attention layers, recurrent state for DeltaNet layers
 - **HuggingFace Hub** — download models directly with `GGUFModelLoader.load(repo:)`
 
 ## SwiftLM
 
 SwiftLM is a declarative model description framework for LLM architectures. It separates **what a model is** (structure and weights) from **how it runs** (backend, devices, caches).
-
-### Design
-
-SwiftLM follows the same paradigm as SwiftUI — models are declared, not constructed:
-
-| SwiftUI | SwiftLM |
-|---------|---------|
-| `View` protocol | `ModelComponent` protocol |
-| `body: some View` | `body: some ModelComponent` |
-| `@ViewBuilder` | `@ModelComponentBuilder` |
-| `TupleView` | `TupleComponent` (parameter packs) |
-| `ForEach` | `ForEach` |
-| View tree → render | `ModelComponent` → `ModelGraph` |
-
-A `ModelComponent` is a pure declaration. It is not a file loader, not a stateful runtime module, not a forward-pass executor.
 
 ### Declaring a Model
 
@@ -188,24 +181,11 @@ Available components:
 | `Residual` | Skip connection: `output = input + f(input)` |
 | `Parallel` | Multi-branch with merge strategy (add, concat, visionMerge) |
 | `Repeat` | Stack identical blocks N times |
-| `ForEach` | Data-driven iteration (type-safe, like SwiftUI's ForEach) |
+| `ForEach` | Data-driven iteration with type-safe content |
 | `Group` | Labeled grouping for metadata |
 | `Linear` | Raw linear projection |
 | `RoPE` | Standalone rotary position embedding |
 | `Custom` | Escape hatch for experimental ops |
-
-### Result Builder
-
-`@ModelComponentBuilder` follows the `@ViewBuilder` pattern with type-safe parameter packs:
-
-| Builder Feature | Return Type |
-|----------------|-------------|
-| Single expression | Identity (`C`) |
-| Multiple expressions | `TupleComponent<repeat each C>` |
-| `if` without `else` | `OptionalComponent<C>` |
-| `if` / `else` | `ConditionalComponent<First, Second>` |
-
-No type erasure — the builder returns concrete generic types, not `[any ModelComponent]`.
 
 ### VLM Support
 
@@ -250,9 +230,14 @@ NormalizedModel
       │
       ▼
 ModelGraph (validated)
-      │  canonicalize()
-      ▼
-ModelGraph (canonical form — for equivalence comparison)
+      │
+      ├── canonicalize() → canonical form (for equivalence comparison)
+      │
+      └── MLXInferenceCompiler.compile() → MLXLoweredInferenceModel
+              │                              (prefill/decode with FlatStep execution)
+              │
+              └── CompiledLanguageModel adapter → LanguageModel protocol
+                      → ModelContainer → generate()
 ```
 
 ### Semantic IR

@@ -24,6 +24,7 @@ public struct Attention: ModelComponent {
     public let qkNorm: QKNormKind?
     public let window: AttentionWindow?
     public let implementationHint: AttentionImplementationHint?
+    public let outputGate: AttentionGateKind?
 
     public init(
         hiddenSize: Int,
@@ -35,7 +36,8 @@ public struct Attention: ModelComponent {
         rope: RoPEAttributes? = nil,
         qkNorm: QKNormKind? = nil,
         window: AttentionWindow? = nil,
-        implementationHint: AttentionImplementationHint? = nil
+        implementationHint: AttentionImplementationHint? = nil,
+        outputGate: AttentionGateKind? = nil
     ) {
         precondition(hiddenSize > 0, "hiddenSize must be positive")
         precondition(headCount > 0, "headCount must be positive")
@@ -57,6 +59,7 @@ public struct Attention: ModelComponent {
         self.qkNorm = qkNorm
         self.window = window
         self.implementationHint = implementationHint
+        self.outputGate = outputGate
     }
 }
 
@@ -73,7 +76,8 @@ extension Attention: PrimitiveComponent {
             rope: rope,
             qkNorm: qkNorm,
             window: window,
-            implementationHint: implementationHint
+            implementationHint: implementationHint,
+            outputGate: outputGate
         ))
     }
 

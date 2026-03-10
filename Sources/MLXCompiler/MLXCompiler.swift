@@ -136,6 +136,18 @@ public struct MLXCompiler: ModelCompiler, Sendable {
                     )
                 }
 
+            case .layerStack(let layers):
+                for (i, layer) in layers.enumerated() {
+                    scanRegion(
+                        layer,
+                        pathComponents: opPath + [.regionBody, .index(i)],
+                        cacheDescriptors: &cacheDescriptors,
+                        cacheIndex: &cacheIndex,
+                        embeddingPaths: &embeddingPaths,
+                        hasTiedOutputHead: &hasTiedOutputHead
+                    )
+                }
+
             default:
                 break
             }

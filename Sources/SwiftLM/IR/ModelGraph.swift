@@ -236,6 +236,12 @@ public indirect enum OperationKind: Codable, Equatable, Sendable {
     /// The `body` region is the repeated block.
     case repeating(count: Int, body: Region)
 
+    /// Layer stack: heterogeneous layers with per-layer bodies.
+    /// Each `Region` in `layers` can have a different structure.
+    /// Used for models like Qwen 3.5 where layers alternate between
+    /// different attention/state-space mechanisms.
+    case layerStack(layers: [Region])
+
     // MARK: - Escape Hatch
 
     /// Custom operation: intentionally constrained escape hatch.

@@ -105,6 +105,9 @@ private func canonicalizeKind(_ kind: OperationKind, ctx: inout CanonContext) ->
     case .repeating(let count, let body):
         return .repeating(count: count, body: canonicalizeRegion(body, ctx: &ctx))
 
+    case .layerStack(let layers):
+        return .layerStack(layers: layers.map { canonicalizeRegion($0, ctx: &ctx) })
+
     default:
         return kind
     }

@@ -209,6 +209,9 @@ public final class MLXExecutor {
         case .repeating(let count, let body):
             return try executeRepeating(count: count, body: body, inputs: inputs)
 
+        case .layerStack(let layers):
+            return try executeLayerStack(layers: layers, inputs: inputs)
+
         case .visionEncoder:
             throw CompilerError.unsupportedOperation(
                 "visionEncoder is not yet implemented in MLXExecutor")
@@ -294,6 +297,20 @@ public final class MLXExecutor {
         for i in 0..<count {
             pathComponents.append(.index(i))
             current = try executeRegion(body, inputValues: current)
+            pathComponents.removeLast()
+        }
+        pathComponents.removeLast()
+        return current
+    }
+
+    private func executeLayerStack(
+        layers: [Region], inputs: [MLXArray]
+    ) throws -> [MLXArray] {
+        pathComponents.append(.regionBody)
+        var current = inputs
+        for (i, layer) in layers.enumerated() {
+            pathComponents.append(.index(i))
+            current = try executeRegion(layer, inputValues: current)
             pathComponents.removeLast()
         }
         pathComponents.removeLast()
@@ -601,32 +618,31 @@ public final class MLXExecutor {
             pathComponents.append(.field("experts"))
             pathComponents.append(.index(expertIdx))
 
+            // Accumulate combined weight across all topK slots (pure MLX, no item() sync)
+            var expertWeight = MLXArray.zeros([flat.dim(0), 1])
+            for k in 0..<attrs.expertsPerToken {
+                let kMask = topKIndices[0..., k..<(k + 1)] .== MLXArray(Int32(expertIdx))
+                let kMaskFloat = kMask.asType(.float32)
+                expertWeight = expertWeight + gateWeights[0..., k..<(k + 1)] * kMaskFloat
+            }
+
+            // Run expert MLP once with combined weight (skip if no tokens routed)
             let expertGateW = try weight(field: "gate_proj", role: .weight)
             let expertUpW = try weight(field: "up_proj", role: .weight)
             let expertDownW = try weight(field: "down_proj", role: .weight)
 
-            for k in 0..<attrs.expertsPerToken {
-                let kMask = topKIndices[0..., k..<(k + 1)] .== MLXArray(Int32(expertIdx))
-                let kMaskFloat = kMask.asType(.float32).squeezed(axis: -1)
-
-                let tokenCount = MLX.sum(kMaskFloat).item(Int.self)
-                guard tokenCount > 0 else { continue }
-
-                let activated: MLXArray
-                switch attrs.expertMLP.activation {
-                case .gelu: activated = gelu(MLX.matmul(flat, expertGateW.T))
-                default: activated = silu(MLX.matmul(flat, expertGateW.T))
-                }
-
-                let expertOut = MLX.matmul(
-                    activated * MLX.matmul(flat, expertUpW.T),
-                    expertDownW.T
-                )
-
-                let kWeight = gateWeights[0..., k..<(k + 1)]
-                output = output + expertOut * kWeight
-                    * kMaskFloat.expandedDimensions(axis: -1)
+            let activated: MLXArray
+            switch attrs.expertMLP.activation {
+            case .gelu: activated = gelu(MLX.matmul(flat, expertGateW.T))
+            default: activated = silu(MLX.matmul(flat, expertGateW.T))
             }
+
+            let expertOut = MLX.matmul(
+                activated * MLX.matmul(flat, expertUpW.T),
+                expertDownW.T
+            )
+
+            output = output + expertOut * expertWeight
 
             pathComponents.removeLast()
             pathComponents.removeLast()
@@ -739,6 +755,8 @@ public final class MLXExecutor {
     ///
     /// S_t = exp(g) * S_{t-1} + k_t ⊗ [β(v_t − exp(g)·S^T·k_t)]
     /// o_t = S_t^T · (q_t / √d_k)
+    ///
+    /// Pre-slices all timesteps before the loop to avoid repeated slice+squeeze overhead.
     private func deltaNetRecurrence(
         query: MLXArray, key: MLXArray, value: MLXArray,
         decay: MLXArray, beta: MLXArray, state: MLXArray?,
@@ -750,15 +768,23 @@ public final class MLXExecutor {
         let qN = l2Norm(query) * MLXArray(scale)
         let kN = l2Norm(key)
 
+        // Pre-slice all timesteps: split along axis=1 returns [B, 1, H, d] arrays
+        let qSlices = qN.split(parts: T, axis: 1)
+        let kSlices = kN.split(parts: T, axis: 1)
+        let vSlices = value.split(parts: T, axis: 1)
+        let gSlices = decay.split(parts: T, axis: 1)
+        let bSlices = beta.split(parts: T, axis: 1)
+
         var S = state ?? MLXArray.zeros([B, H, dk, dv])
         var outputs = [MLXArray]()
+        outputs.reserveCapacity(T)
 
         for t in 0..<T {
-            let qt = qN[0..., t..<(t + 1), 0..., 0...].squeezed(axis: 1)
-            let kt = kN[0..., t..<(t + 1), 0..., 0...].squeezed(axis: 1)
-            let vt = value[0..., t..<(t + 1), 0..., 0...].squeezed(axis: 1)
-            let gt = decay[0..., t..<(t + 1), 0...].squeezed(axis: 1)
-            let bt = beta[0..., t..<(t + 1), 0...].squeezed(axis: 1)
+            let qt = qSlices[t].squeezed(axis: 1)  // [B, H, dk]
+            let kt = kSlices[t].squeezed(axis: 1)  // [B, H, dk]
+            let vt = vSlices[t].squeezed(axis: 1)  // [B, H, dv]
+            let gt = gSlices[t].squeezed(axis: 1)  // [B, H]
+            let bt = bSlices[t].squeezed(axis: 1)  // [B, H]
 
             // Decay state
             let gE = gt.expandedDimensions(axes: [-1, -2])
@@ -788,17 +814,7 @@ public final class MLXExecutor {
         x / MLX.sqrt((x * x).sum(axis: -1, keepDims: true) + MLXArray(eps))
     }
 
-    /// LayerNorm as a free operation (not using MLXNN module).
-    private func layerNormOp(
-        _ x: MLXArray, weight: MLXArray, bias: MLXArray?, eps: Float = 1e-5
-    ) -> MLXArray {
-        let mean = x.mean(axis: -1, keepDims: true)
-        let variance = x.variance(axis: -1, keepDims: true)
-        var normalized = (x - mean) / (variance + MLXArray(eps)).sqrt()
-        normalized = normalized * weight
-        if let bias { normalized = normalized + bias }
-        return normalized
-    }
+    // layerNormOp is shared from LoweredNorm.swift
 
     /// Softplus activation: log(1 + exp(x)).
     private func softplus(_ x: MLXArray) -> MLXArray {

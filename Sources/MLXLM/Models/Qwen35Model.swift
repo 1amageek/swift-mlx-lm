@@ -163,6 +163,9 @@ final class DeltaNetCache: KVCache, @unchecked Sendable {
 
 /// RMSNorm with SiLU gating for DeltaNet output.
 ///
+/// RMSNorm with SiLU gating for DeltaNet output.
+///
+/// Matches LoweredDeltaNet convention: `rmsNorm(x, weight: 1+w) * silu(gate)`.
 /// Uses `(1 + weight)` scaling with zero-initialized weight (HuggingFace convention).
 class Qwen35GatedRMSNorm: Module {
 
@@ -190,6 +193,7 @@ class Qwen35GatedDeltaNet: Module {
 
     let config: Qwen35Configuration
     let scale: Float
+    let ssmDType: DType = .float32
 
     @ModuleInfo(key: "in_proj_qkv") var inProjQKV: Linear
     @ModuleInfo(key: "in_proj_z") var inProjZ: Linear
@@ -226,27 +230,29 @@ class Qwen35GatedDeltaNet: Module {
     }
 
     func callAsFunction(_ x: MLXArray, cache: DeltaNetCache?) -> MLXArray {
+        let outputDType = x.dtype
+        let workingInput = x.asType(ssmDType)
         let B = x.dim(0)
         let T = x.dim(1)
         let K = config.convKernelSize
 
         // Projections
-        let mixedQKV = inProjQKV(x)
-        let z = inProjZ(x)
-        let b = inProjB(x)
-        let a = inProjA(x)
+        let mixedQKV = inProjQKV(workingInput).asType(ssmDType)
+        let z = inProjZ(workingInput).asType(ssmDType)
+        let b = inProjB(workingInput).asType(ssmDType)
+        let a = inProjA(workingInput).asType(ssmDType)
 
         // Causal Conv1D: prepend state (or zeros), apply conv, take causal output
         let prefix: MLXArray
         if let existing = cache?.convState {
-            prefix = existing
+            prefix = existing.asType(ssmDType)
         } else {
-            prefix = MLXArray.zeros([B, K, config.convDim])
+            prefix = MLXArray.zeros([B, K, config.convDim], dtype: ssmDType)
         }
         let convInput = concatenated([prefix, mixedQKV], axis: 1)  // [B, K+T, C]
-        cache?.convState = convInput[0..., (convInput.dim(1) - K)..., 0...]
+        cache?.convState = convInput[0..., (convInput.dim(1) - K)..., 0...].asType(ssmDType)
 
-        let rawConv = conv(convInput)                  // [B, T+1, C]
+        let rawConv = conv(convInput).asType(ssmDType)  // [B, T+1, C]
         let activated = silu(rawConv[0..., 1..., 0...])  // [B, T, C] skip warmup
 
         // Split Q, K, V
@@ -265,10 +271,11 @@ class Qwen35GatedDeltaNet: Module {
         let (attnOut, newState) = recurrence(
             query: query, key: key, value: value,
             decay: decay, beta: beta, state: cache?.recurrentState)
-        cache?.recurrentState = newState
+        cache?.recurrentState = newState.asType(ssmDType)
         cache?.incrementOffset(by: T)
 
-        // Gated output norm: applied per-head on the last dimension (dv)
+        // Gated output norm: applied per-head on the last dimension (dv).
+        // GGUF stores norm weight as [dv] (per-head), shared across all heads.
         // attnOut: [B, T, H, dv], z: [B, T, H*dv]
         let numHeads = config.linearValueHeads
         let dv = config.linearValueHeadDim
@@ -276,8 +283,11 @@ class Qwen35GatedDeltaNet: Module {
         let zFlat = z.reshaped(B, T, numHeads, dv).reshaped(B * T * numHeads, dv)
         let gated = gatedNorm(flat, gate: zFlat).reshaped(B, T, config.valueDim)
 
-        return outProj(gated)
+        return outProj(gated).asType(outputDType)
     }
+
+    /// Evaluate interval for recurrence loop to bound computation graph size.
+    private static let recurrenceEvalInterval = 64
 
     private func recurrence(
         query: MLXArray, key: MLXArray, value: MLXArray,
@@ -289,7 +299,7 @@ class Qwen35GatedDeltaNet: Module {
         let qN = l2Norm(query) * MLXArray(scale)
         let kN = l2Norm(key)
 
-        var S = state ?? MLXArray.zeros([B, H, dk, dv])
+        var S = state?.asType(ssmDType) ?? MLXArray.zeros([B, H, dk, dv], dtype: ssmDType)
         var outputs = [MLXArray]()
 
         for t in 0..<T {
@@ -310,6 +320,11 @@ class Qwen35GatedDeltaNet: Module {
             let qE = qt.expandedDimensions(axis: -1)
             let ot = (S * qE).sum(axis: -2)
             outputs.append(ot.expandedDimensions(axis: 1))
+
+            // Periodically evaluate to prevent graph explosion during long prefills
+            if T > 1 && (t + 1) % Self.recurrenceEvalInterval == 0 {
+                eval(S)
+            }
         }
 
         return (concatenated(outputs, axis: 1), S)
@@ -505,11 +520,13 @@ class Qwen35DecoderLayer: Module {
     init(_ config: Qwen35Configuration, layerIndex: Int) {
         self.isFullAttention = config.isFullAttentionLayer(layerIndex)
 
-        if isFullAttention {
-            self._fullAttn.wrappedValue = Qwen35FullAttention(config)
-        } else {
-            self._deltaNet.wrappedValue = Qwen35GatedDeltaNet(config)
-        }
+        // Always initialize both modules so all layers share a uniform Module structure.
+        // MLXNN's update(parameters:) traverses arrays expecting identical submodule keys;
+        // Optional-nil entries create heterogeneous structure → mismatchedContainers crash.
+        // Only the relevant module receives GGUF weights; the other keeps its init values
+        // and is never called in the forward pass.
+        self._fullAttn.wrappedValue = Qwen35FullAttention(config)
+        self._deltaNet.wrappedValue = Qwen35GatedDeltaNet(config)
 
         self._mlp.wrappedValue = Qwen35MLP(config)
         self._inputLayerNorm.wrappedValue = RMSNorm(

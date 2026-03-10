@@ -90,6 +90,10 @@ private func validateRegionPrimitiveArity(_ region: Region) throws {
             }
         case .repeating(_, let body):
             try validateRegionPrimitiveArity(body)
+        case .layerStack(let layers):
+            for layer in layers {
+                try validateRegionPrimitiveArity(layer)
+            }
         default:
             break
         }

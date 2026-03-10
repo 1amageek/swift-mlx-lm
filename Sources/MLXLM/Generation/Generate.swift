@@ -37,7 +37,8 @@ public func generate(
     // This is safe because ModelContainer actor serializes all model access.
     let state = GenerationTaskState(
         iterator: iterator,
-        detokenizer: StreamingDetokenizer(tokenizer: tokenizer)
+        detokenizer: StreamingDetokenizer(tokenizer: tokenizer),
+        rawTokenLogger: RawTokenTraceLogger(tokenizer: tokenizer)
     )
 
     let maxTokens = parameters.maxTokens
@@ -50,14 +51,24 @@ public func generate(
             var generateStart = promptStart
             var stopReason: GenerateStopReason = .stop
 
+            print("[generate] prefill starting promptTokens=\(promptTokenCount)")
             while let token = s.iterator.next() {
                 if generationTokenCount == 0 {
                     generateStart = Date()
+                    let prefillTime = generateStart.timeIntervalSince(promptStart)
+                    print("[generate] first token latency=\(String(format: "%.2f", prefillTime))s")
                 }
 
                 generationTokenCount += 1
 
-                if let text = s.detokenizer.append(token: token) {
+                let text = s.detokenizer.append(token: token)
+                s.rawTokenLogger.logOutputToken(
+                    step: generationTokenCount,
+                    token: token,
+                    chunk: text
+                )
+
+                if let text {
                     continuation.yield(.chunk(text))
                 }
 
@@ -72,6 +83,9 @@ public func generate(
                 }
             }
 
+            // Synchronize pending asyncEval operations before measuring final time
+            Stream().synchronize()
+
             let now = Date()
             let promptTime = generateStart.timeIntervalSince(promptStart)
             let generateTime = now.timeIntervalSince(generateStart)
@@ -83,6 +97,7 @@ public func generate(
                 generateTime: generateTime,
                 stopReason: stopReason
             )
+            print("[generate] done tokens=\(generationTokenCount) prefill=\(String(format: "%.2f", promptTime))s generate=\(String(format: "%.2f", generateTime))s stop=\(stopReason)")
             continuation.yield(.info(info))
             continuation.finish()
         }
@@ -100,4 +115,5 @@ public func generate(
 private struct GenerationTaskState: @unchecked Sendable {
     var iterator: TokenIterator
     var detokenizer: StreamingDetokenizer
+    var rawTokenLogger: RawTokenTraceLogger
 }

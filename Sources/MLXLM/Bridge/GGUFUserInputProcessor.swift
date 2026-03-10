@@ -36,7 +36,10 @@ struct GGUFUserInputProcessor: UserInputProcessor {
                     eosToken: eosToken
                 )
             } catch {
-                // Template parsing failed; fall back to simple formatting.
+                let preview = String(template.prefix(200)).replacingOccurrences(of: "\n", with: "\\n")
+                print(
+                    "[GGUFUserInputProcessor] chat_template parse failed: \(error). Falling back to plain prompt formatting. templatePreview=\"\(preview)\""
+                )
                 self.renderer = nil
             }
         } else {
@@ -106,6 +109,7 @@ struct GGUFUserInputProcessor: UserInputProcessor {
 
     private func tokenize(_ text: String) -> LMInput {
         let tokenIDs = tokenizer.encode(text: text)
+        RawTokenTraceLogger(tokenizer: tokenizer).logPrompt(prompt: text, tokens: tokenIDs)
         let tokenArray = MLXArray(tokenIDs.map { Int32($0) }).reshaped([1, tokenIDs.count])
         return LMInput(tokens: tokenArray)
     }

@@ -1,4 +1,5 @@
 import MLX
+import MLXCompiler
 
 /// Snapshot of KV cache state for prefix reuse across generations.
 public struct PromptCacheSnapshot: @unchecked Sendable {
@@ -81,6 +82,8 @@ public func materializePromptCache(
 
 private func cacheClassName(_ cache: KVCache) -> String {
     switch cache {
+    case is CompiledKVCache:
+        return "CompiledKVCache"
     case is KVCacheSimple:
         return "KVCacheSimple"
     case is RotatingKVCache:
@@ -94,6 +97,32 @@ private func cacheClassName(_ cache: KVCache) -> String {
 
 private func instantiateCache(className: String, metaState: [String]) -> KVCache {
     switch className {
+    case "CompiledKVCache":
+        // Reconstruct InferenceState from metaState
+        // Format: [nextPosition, cacheCount, type0, offset0, step0, ...]
+        let nextPos = metaState.count >= 1 ? (Int(metaState[0]) ?? 0) : 0
+        let cacheCount = metaState.count >= 2 ? (Int(metaState[1]) ?? 0) : 0
+        var caches: [LoweredCacheState] = []
+        var idx = 2
+        for _ in 0..<cacheCount {
+            guard idx < metaState.count else { break }
+            let type = metaState[idx]
+            let offset = idx + 1 < metaState.count ? (Int(metaState[idx + 1]) ?? 0) : 0
+            let step = idx + 2 < metaState.count ? (Int(metaState[idx + 2]) ?? 256) : 256
+            idx += 3
+            switch type {
+            case "kv":
+                var kv = LoweredKVCache(step: step)
+                kv.offset = offset
+                caches.append(.kv(kv))
+            case "recurrent":
+                caches.append(.recurrent(LoweredRecurrentCache(offset: offset)))
+            default:
+                caches.append(.empty)
+            }
+        }
+        let state = InferenceState(caches: caches, nextPosition: nextPos)
+        return CompiledKVCache(inferenceState: state)
     case "RotatingKVCache":
         let maxSize = metaState.count >= 2 ? (Int(metaState[1]) ?? 4096) : 4096
         let keep = metaState.count >= 1 ? (Int(metaState[0]) ?? 0) : 0

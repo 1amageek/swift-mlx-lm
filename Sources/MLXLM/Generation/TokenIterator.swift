@@ -3,7 +3,8 @@ import MLX
 /// Iterates over generated tokens from a language model.
 ///
 /// Handles prefill (prompt processing) and autoregressive decoding.
-/// Each call to `next()` performs one forward pass and samples a token.
+/// Uses asyncEval pipelining: each `next()` returns the previous token
+/// while GPU computes the next one in parallel.
 struct TokenIterator: Sequence, IteratorProtocol {
 
     private let model: any LanguageModel
@@ -18,6 +19,9 @@ struct TokenIterator: Sequence, IteratorProtocol {
     private var inputText: LMInput.Text
     private var prefillComplete: Bool = false
     private var tokenCount: Int = 0
+
+    /// Pending token from the previous step, already submitted via asyncEval.
+    private var pendingToken: MLXArray?
 
     /// Create a token iterator.
     ///
@@ -48,16 +52,31 @@ struct TokenIterator: Sequence, IteratorProtocol {
         self.processor?.prompt(input.text.tokens)
     }
 
+    /// Sample a token from model output logits.
+    private mutating func sampleToken(from output: LMOutput) -> MLXArray {
+        var logits = output.logits[0..., (-1)..., 0...]
+        logits = logits.squeezed(axis: 0)
+        if let proc = processor {
+            logits = proc.process(logits: logits)
+        }
+        return sampler.sample(logits: logits)
+    }
+
+    /// Run one forward pass on the current inputText and sample.
+    private mutating func step() -> MLXArray {
+        let output = model.callAsFunction(inputText, cache: cache, state: nil)
+        return sampleToken(from: output)
+    }
+
     mutating func next() -> Int? {
         if let max = maxTokens, tokenCount >= max {
             return nil
         }
 
         do {
-            let output: LMOutput
-
+            // Prefill: process prompt chunks, then sample first token
             if !prefillComplete {
-                // Iterative prefill: process chunks until we get logits
+                let output: LMOutput
                 while true {
                     let result = try model.prepare(
                         fullInput,
@@ -71,42 +90,43 @@ struct TokenIterator: Sequence, IteratorProtocol {
                         continue
                     case .logits(let logits):
                         output = logits
-                        prefillComplete = true
                         break
                     }
                     break
                 }
-            } else {
-                output = model.callAsFunction(inputText, cache: cache, state: nil)
+
+                let token = sampleToken(from: output)
+                pendingToken = token
+                asyncEval(token)
+                prefillComplete = true
             }
 
-            // Sample from logits
-            var logits = output.logits[0..., (-1)..., 0...]
-            logits = logits.squeezed(axis: 0)
+            guard let previousToken = pendingToken else { return nil }
 
-            if let proc = processor {
-                logits = proc.process(logits: logits)
-            }
-
-            let tokenArray = sampler.sample(logits: logits)
-            eval(tokenArray)
-
-            let tokenID: Int32 = tokenArray.item()
+            // Extract the previous token value (blocks until asyncEval completes)
+            let tokenID: Int32 = previousToken.item()
             let token = Int(tokenID)
 
-            processor?.didSample(token: tokenArray)
+            // Update processor state with the materialized token
+            processor?.didSample(token: previousToken)
 
             // Check EOS
             if eosTokenIds.contains(token) {
+                pendingToken = nil
                 return nil
             }
 
-            // Prepare next input
+            // Build computation graph for the next token (lazy, no GPU wait)
             inputText = LMInput.Text(tokens: MLXArray([tokenID]).reshaped([1, 1]))
-            tokenCount += 1
+            let nextToken = step()
+            pendingToken = nextToken
+            // Submit next token to GPU — computation runs in parallel with caller's CPU work
+            asyncEval(nextToken)
 
+            tokenCount += 1
             return token
         } catch {
+            print("[TokenIterator] error during generation: \(error)")
             return nil
         }
     }

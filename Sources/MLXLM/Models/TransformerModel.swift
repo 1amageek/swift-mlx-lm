@@ -341,6 +341,8 @@ class TransformerAttention: Module {
             let maskMode: MLXFast.ScaledDotProductAttentionMaskMode
             if let mask {
                 maskMode = .array(mask)
+            } else if L > 1 {
+                maskMode = .causal
             } else {
                 maskMode = .none
             }

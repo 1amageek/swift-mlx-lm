@@ -5,7 +5,6 @@ import SwiftLM
 /// Key differences from standard transformer:
 /// - Uses LayerNorm instead of RMSNorm
 /// - QK normalization in attention
-/// - Optional logit scaling on output head
 ///
 /// ```swift
 /// let cohere = Cohere(config: .init(

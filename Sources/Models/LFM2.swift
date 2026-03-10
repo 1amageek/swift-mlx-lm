@@ -89,6 +89,29 @@ public struct LFM2: ModelComponent {
         public var convKernelSize: Int { convLCache + 1 }
         public var isMoE: Bool { moe != nil }
 
+        /// Expands sections into a flat list of layer descriptors,
+        /// applying `numDenseLayers` to determine dense MLP vs MoE per layer.
+        public var layerDescriptors: [LFM2.LayerDescriptor] {
+            var result: [LFM2.LayerDescriptor] = []
+            for section in sections {
+                for _ in 0..<section.groupCount {
+                    for _ in 0..<section.convsPerGroup {
+                        result.append(LayerDescriptor(
+                            isConvolution: true,
+                            useMoE: moe != nil && result.count >= numDenseLayers
+                        ))
+                    }
+                    if section.hasAttention {
+                        result.append(LayerDescriptor(
+                            isConvolution: false,
+                            useMoE: moe != nil && result.count >= numDenseLayers
+                        ))
+                    }
+                }
+            }
+            return result
+        }
+
         public init(
             hiddenSize: Int,
             hiddenLayers: Int,
@@ -145,6 +168,25 @@ public struct LFM2: ModelComponent {
         }
     }
 
+    /// Per-layer descriptor expanded from sections and `numDenseLayers`.
+    ///
+    /// Each entry carries the layer type (conv vs attention) and whether
+    /// MoE replaces the dense MLP. This is the single source of truth
+    /// for layer-level FFN variant selection.
+    public struct LayerDescriptor: Sendable {
+
+        /// Whether this layer uses short convolution (true) or full attention (false).
+        public let isConvolution: Bool
+
+        /// Whether this layer uses MoE (true) or dense MLP (false).
+        public let useMoE: Bool
+
+        public init(isConvolution: Bool, useMoE: Bool) {
+            self.isConvolution = isConvolution
+            self.useMoE = useMoE
+        }
+    }
+
     public let config: Config
 
     public init(config: Config) {
@@ -155,20 +197,11 @@ public struct LFM2: ModelComponent {
     public var body: some ModelComponent {
         TokenEmbedding(vocabSize: config.vocabularySize, embeddingSize: config.hiddenSize)
 
-        ForEach(config.sections) { section in
-            if section.hasAttention {
-                Repeat(count: section.groupCount) {
-                    Repeat(count: section.convsPerGroup) {
-                        LFM2ConvDecoderLayer(config: config)
-                    }
-                    LFM2AttnDecoderLayer(config: config)
-                }
+        ForEach(config.layerDescriptors) { layer in
+            if layer.isConvolution {
+                LFM2ConvDecoderLayer(config: config, useMoE: layer.useMoE)
             } else {
-                Repeat(count: section.groupCount) {
-                    Repeat(count: section.convsPerGroup) {
-                        LFM2ConvDecoderLayer(config: config)
-                    }
-                }
+                LFM2AttnDecoderLayer(config: config, useMoE: layer.useMoE)
             }
         }
 
@@ -190,6 +223,7 @@ public struct LFM2: ModelComponent {
 struct LFM2ConvDecoderLayer: ModelComponent {
 
     let config: LFM2.Config
+    let useMoE: Bool
 
     @ModelComponentBuilder
     var body: some ModelComponent {
@@ -203,7 +237,7 @@ struct LFM2ConvDecoderLayer: ModelComponent {
         }
         Residual {
             RMSNorm(dimension: config.hiddenSize, epsilon: config.normEps)
-            if let moe = config.moe {
+            if useMoE, let moe = config.moe {
                 MoE(
                     expertCount: moe.expertCount,
                     expertsPerToken: moe.expertsPerToken,
@@ -222,6 +256,7 @@ struct LFM2ConvDecoderLayer: ModelComponent {
 struct LFM2AttnDecoderLayer: ModelComponent {
 
     let config: LFM2.Config
+    let useMoE: Bool
 
     @ModelComponentBuilder
     var body: some ModelComponent {
@@ -240,7 +275,7 @@ struct LFM2AttnDecoderLayer: ModelComponent {
         }
         Residual {
             RMSNorm(dimension: config.hiddenSize, epsilon: config.normEps)
-            if let moe = config.moe {
+            if useMoE, let moe = config.moe {
                 MoE(
                     expertCount: moe.expertCount,
                     expertsPerToken: moe.expertsPerToken,
@@ -327,7 +362,8 @@ extension LFM2.Config {
             .init(groupCount: 1, convsPerGroup: 2),
             .init(groupCount: 1, convsPerGroup: 2, hasAttention: false),
         ],
-        moe: .init(expertCount: 32, expertsPerToken: 4, moeIntermediateSize: 1792)
+        moe: .init(expertCount: 32, expertsPerToken: 4, moeIntermediateSize: 1792),
+        numDenseLayers: 2
     )
 
     /// LFM2 24B-A2B (MoE: 64 experts, 4 active per token)

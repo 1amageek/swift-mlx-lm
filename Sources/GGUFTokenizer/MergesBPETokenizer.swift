@@ -29,6 +29,12 @@ struct MergesBPETokenizer: Tokenizer, Sendable {
     /// Set of control/added token strings for special handling.
     let controlTokens: Set<String>
 
+    /// Exact-match special/control tokens that must bypass BPE splitting.
+    let specialTokenIDs: [String: Int]
+
+    /// Special/control tokens sorted longest-first for greedy matching.
+    let specialTokenLiterals: [String]
+
     var bosTokenID: Int? { specialTokens.bosTokenID }
     var eosTokenID: Int? { specialTokens.eosTokenID }
     var vocabularySize: Int { vocabulary.count }
@@ -75,13 +81,37 @@ struct MergesBPETokenizer: Tokenizer, Sendable {
 
         // Build control token set
         var control = Set<String>()
+        var specialIDs: [String: Int] = [:]
         let types = tokenTypes.isEmpty ? Array(repeating: 1, count: vocabulary.count) : tokenTypes
         for (id, tokenType) in types.enumerated() where id < vocabulary.count {
             if tokenType == 3 || tokenType == 4 {
-                control.insert(vocabulary[id])
+                let token = vocabulary[id]
+                control.insert(token)
+                specialIDs[token] = id
             }
         }
         self.controlTokens = control
+
+        for specialID in [
+            specialTokens.bosTokenID,
+            specialTokens.eosTokenID,
+            specialTokens.unknownTokenID,
+            specialTokens.paddingTokenID,
+        ] {
+            guard let specialID,
+                  specialID >= 0,
+                  specialID < vocabulary.count
+            else { continue }
+            specialIDs[vocabulary[specialID]] = specialID
+        }
+
+        self.specialTokenIDs = specialIDs
+        self.specialTokenLiterals = specialIDs.keys.sorted { lhs, rhs in
+            if lhs.count != rhs.count {
+                return lhs.count > rhs.count
+            }
+            return lhs < rhs
+        }
     }
 
     // MARK: - Tokenizer
@@ -100,6 +130,44 @@ struct MergesBPETokenizer: Tokenizer, Sendable {
             return result
         }
 
+        encodeTextWithSpecialTokens(text, into: &result)
+
+        if specialTokens.addEosToken, let eos = specialTokens.eosTokenID {
+            result.append(eos)
+        }
+
+        return result
+    }
+
+    private func encodeTextWithSpecialTokens(_ text: String, into result: inout [Int]) {
+        guard !specialTokenLiterals.isEmpty else {
+            encodeRegularText(text, into: &result)
+            return
+        }
+
+        var regularStart = text.startIndex
+        var current = text.startIndex
+
+        while current < text.endIndex {
+            if let match = specialTokenMatch(in: text, at: current) {
+                if regularStart < current {
+                    encodeRegularText(String(text[regularStart..<current]), into: &result)
+                }
+                result.append(match.id)
+                current = match.range.upperBound
+                regularStart = current
+            } else {
+                current = text.index(after: current)
+            }
+        }
+
+        if regularStart < text.endIndex {
+            encodeRegularText(String(text[regularStart...]), into: &result)
+        }
+    }
+
+    private func encodeRegularText(_ text: String, into result: inout [Int]) {
+        guard !text.isEmpty else { return }
         let words = preTokenizer.split(text: text)
         for word in words {
             let byteEncoded = ByteEncoder.encode(Array(word.utf8))
@@ -112,12 +180,20 @@ struct MergesBPETokenizer: Tokenizer, Sendable {
                 // This matches GPT-2 behavior for unknown sub-tokens.
             }
         }
+    }
 
-        if specialTokens.addEosToken, let eos = specialTokens.eosTokenID {
-            result.append(eos)
+    private func specialTokenMatch(
+        in text: String,
+        at index: String.Index
+    ) -> (range: Range<String.Index>, id: Int)? {
+        let suffix = text[index...]
+        for literal in specialTokenLiterals {
+            guard suffix.hasPrefix(literal),
+                  let id = specialTokenIDs[literal]
+            else { continue }
+            return (index..<text.index(index, offsetBy: literal.count), id)
         }
-
-        return result
+        return nil
     }
 
     func decode(tokens: [Int]) -> String {

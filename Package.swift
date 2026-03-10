@@ -32,6 +32,7 @@ let package = Package(
             dependencies: [
                 "GGUFParser",
                 "GGUFTokenizer",
+                "MLXCompiler",
                 .product(name: "Jinja", package: "swift-jinja"),
                 .product(name: "OrderedCollections", package: "swift-collections"),
                 .product(name: "MLX", package: "mlx-swift"),
@@ -54,6 +55,9 @@ let package = Package(
         .testTarget(name: "SwiftLMTests", dependencies: ["SwiftLM"]),
         .testTarget(name: "GGUFParserTests", dependencies: ["GGUFParser"]),
         .testTarget(name: "GGUFTokenizerTests", dependencies: ["GGUFTokenizer"]),
-        .testTarget(name: "MLXLMTests", dependencies: ["MLXLM"]),
+        .testTarget(name: "MLXLMTests", dependencies: [
+            "MLXLM",
+            .product(name: "MLXNN", package: "mlx-swift"),
+        ]),
     ]
 )

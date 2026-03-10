@@ -35,6 +35,9 @@ public struct AttentionAttributes: Codable, Equatable, Sendable {
     /// Optional hint for the executor about preferred implementation.
     public let implementationHint: AttentionImplementationHint?
 
+    /// Optional output gate applied after SDPA + output projection.
+    public let outputGate: AttentionGateKind?
+
     public init(
         hiddenSize: Int,
         headCount: Int,
@@ -45,7 +48,8 @@ public struct AttentionAttributes: Codable, Equatable, Sendable {
         rope: RoPEAttributes? = nil,
         qkNorm: QKNormKind? = nil,
         window: AttentionWindow? = nil,
-        implementationHint: AttentionImplementationHint? = nil
+        implementationHint: AttentionImplementationHint? = nil,
+        outputGate: AttentionGateKind? = nil
     ) {
         self.hiddenSize = hiddenSize
         self.headCount = headCount
@@ -57,6 +61,7 @@ public struct AttentionAttributes: Codable, Equatable, Sendable {
         self.qkNorm = qkNorm
         self.window = window
         self.implementationHint = implementationHint
+        self.outputGate = outputGate
     }
 }
 
@@ -92,4 +97,19 @@ public enum AttentionImplementationHint: Codable, Equatable, Sendable {
     case unfused
     case pagedKVPreferred
     case custom(String)
+}
+
+/// Output gate kind for gated attention mechanisms.
+///
+/// Some architectures (e.g., Qwen 3.5 full attention layers) apply a
+/// sigmoid gate to the attention output. The gate values are packed
+/// into the Q projection output (2x dimension).
+public enum AttentionGateKind: Codable, Equatable, Sendable {
+
+    /// Sigmoid gate packed in Q projection output.
+    ///
+    /// The Q projection outputs `2 * headCount * headDimension` values.
+    /// The first half is queries, the second half is gate values.
+    /// Gate is applied as: `output = sigmoid(gate) * attn_output`.
+    case sigmoidPackedInQProj
 }

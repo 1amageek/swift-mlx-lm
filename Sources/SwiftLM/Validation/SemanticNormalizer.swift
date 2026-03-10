@@ -354,6 +354,43 @@ extension Group: _BuiltinComponent {
     }
 }
 
+// MARK: - Built-in Conformances: LayerStack
+
+extension LayerStack: _BuiltinComponent {
+    fileprivate func _normalize(
+        upstream: [ValueID],
+        ctx: inout NormalizationContext
+    ) throws -> NormalizedRegionFragment {
+        var layerRegions: [Region] = []
+        layerRegions.reserveCapacity(children.count)
+
+        for child in children {
+            let bodyParams = upstream.map { _ in ctx.freshValue() }
+            let bodyFragment = try normalizeComponent(
+                child, upstream: bodyParams, ctx: &ctx
+            )
+            let bodyRegion = Region(
+                parameters: bodyParams.map { RegionParameter(id: $0) },
+                operations: bodyFragment.operations,
+                results: bodyFragment.results.map { ValueUse(value: $0) }
+            )
+            layerRegions.append(bodyRegion)
+        }
+
+        let key = ctx.freshKey()
+        let resultValues = upstream.map { _ in ctx.freshValue() }
+        let operands = upstream.map { Operand(value: $0) }
+        let op = Operation(
+            key: key,
+            kind: .layerStack(layers: layerRegions),
+            operands: operands,
+            results: resultValues.map { OperationResult(id: $0) }
+        )
+
+        return NormalizedRegionFragment(operations: [op], results: resultValues)
+    }
+}
+
 // MARK: - Metadata Construction
 
 /// Walk the graph to build StructuralPath-based metadata from key-based labels.
@@ -393,6 +430,10 @@ private func walkRegion(
             }
         case .repeating(_, let body):
             walkRegion(body, basePath: opPath.appending(.regionBody), keyLabels: keyLabels, entries: &entries)
+        case .layerStack(let layers):
+            for (j, layer) in layers.enumerated() {
+                walkRegion(layer, basePath: opPath.appending(.regionBody).appending(.index(j)), keyLabels: keyLabels, entries: &entries)
+            }
         default:
             break
         }

@@ -1,3 +1,4 @@
+import Foundation
 import MLX
 import MLXNN
 import MLXFast
@@ -44,9 +45,16 @@ extension LanguageModel {
         let prefillOffset = cache.first?.offset ?? 0
 
         if prefillOffset + windowSize < tokenCount {
+            let chunkStart = Date()
             let chunk = tokens[0..., prefillOffset..<(prefillOffset + windowSize)]
             let chunkInput = LMInput.Text(tokens: chunk)
-            _ = callAsFunction(chunkInput, cache: cache, state: nil)
+            let output = callAsFunction(chunkInput, cache: cache, state: nil)
+            // Force evaluation per chunk to prevent computation graph accumulation.
+            // Critical for recurrent layers (DeltaNet) where per-token loops create
+            // O(T * layers) graph nodes per chunk.
+            eval(output.logits)
+            let chunkTime = Date().timeIntervalSince(chunkStart)
+            print("[prepare] prefill chunk offset=\(prefillOffset)/\(tokenCount) window=\(windowSize) time=\(String(format: "%.2f", chunkTime))s")
             return .tokens(LMInput.Text(tokens: tokens))
         }
 

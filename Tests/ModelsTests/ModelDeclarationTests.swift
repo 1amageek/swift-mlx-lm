@@ -268,6 +268,79 @@ struct ModelDeclarationTests {
         #expect(canonical1 == canonical2)
     }
 
+    @Test("LFM2 24B-A2B numDenseLayers splits dense and MoE layers")
+    func lfm2NumDenseLayers() throws {
+        let config = LFM2.Config.lfm2_24B_A2B
+        let descriptors = config.layerDescriptors
+
+        // 40 total layers
+        #expect(descriptors.count == 40)
+
+        // numDenseLayers=2: first 2 layers use dense MLP
+        #expect(descriptors[0].useMoE == false)
+        #expect(descriptors[0].isConvolution == true)
+        #expect(descriptors[1].useMoE == false)
+        #expect(descriptors[1].isConvolution == true)
+
+        // Layer 2 onwards use MoE
+        for i in 2..<40 {
+            #expect(descriptors[i].useMoE == true, "Layer \(i) should use MoE")
+        }
+    }
+
+    @Test("LFM2 non-MoE configs have all dense layers")
+    func lfm2NonMoEDescriptors() throws {
+        let descriptors = LFM2.Config.lfm25_1_2B.layerDescriptors
+        #expect(descriptors.count == 16)
+        for descriptor in descriptors {
+            #expect(descriptor.useMoE == false)
+        }
+    }
+
+    @Test("LFM2 8B-A1B has 2 dense + 22 MoE (numDenseLayers=2)")
+    func lfm2_8B_A1B_DenseLayerDescriptors() throws {
+        let descriptors = LFM2.Config.lfm2_8B_A1B.layerDescriptors
+        #expect(descriptors.count == 24)
+
+        // numDenseLayers=2: first 2 layers use dense MLP
+        #expect(descriptors[0].useMoE == false)
+        #expect(descriptors[1].useMoE == false)
+
+        // Layer 2 onwards use MoE
+        for i in 2..<24 {
+            #expect(descriptors[i].useMoE == true, "Layer \(i) should use MoE")
+        }
+    }
+
+    @Test("LFM2 layer descriptor conv/attn pattern matches sections")
+    func lfm2DescriptorPattern() throws {
+        // lfm2_350M: (conv×2+attn)×3, (conv+attn)×3, conv×1
+        let descriptors = LFM2.Config.lfm2_350M.layerDescriptors
+        #expect(descriptors.count == 16)
+
+        // Section 0: 3 groups of [conv, conv, attn]
+        #expect(descriptors[0].isConvolution == true)
+        #expect(descriptors[1].isConvolution == true)
+        #expect(descriptors[2].isConvolution == false) // attn
+        #expect(descriptors[3].isConvolution == true)
+        #expect(descriptors[4].isConvolution == true)
+        #expect(descriptors[5].isConvolution == false) // attn
+        #expect(descriptors[6].isConvolution == true)
+        #expect(descriptors[7].isConvolution == true)
+        #expect(descriptors[8].isConvolution == false) // attn
+
+        // Section 1: 3 groups of [conv, attn]
+        #expect(descriptors[9].isConvolution == true)
+        #expect(descriptors[10].isConvolution == false) // attn
+        #expect(descriptors[11].isConvolution == true)
+        #expect(descriptors[12].isConvolution == false) // attn
+        #expect(descriptors[13].isConvolution == true)
+        #expect(descriptors[14].isConvolution == false) // attn
+
+        // Section 2: 1 conv (no attn)
+        #expect(descriptors[15].isConvolution == true)
+    }
+
     @Test("LFM2 custom config with arbitrary sections")
     func lfm2CustomSections() throws {
         // 2*(3+1) + 1*2 = 10 layers
@@ -335,6 +408,141 @@ struct ModelDeclarationTests {
         let canonMoE = canonicalize(moe)
         #expect(canonDense != canonMoE)
     }
+
+    // MARK: - Graph-level numDenseLayers Verification
+
+    @Test("LFM2 24B-A2B graph contains exactly 2 MLP and 38 MoE ops")
+    func lfm2NumDenseLayersInGraph() throws {
+        let graph = try LFM2(config: .lfm2_24B_A2B).makeModelGraph()
+
+        let mlpCount = countOperations(in: graph.rootRegion) { kind in
+            if case .mlp = kind { return true }
+            return false
+        }
+        let moeCount = countOperations(in: graph.rootRegion) { kind in
+            if case .moe = kind { return true }
+            return false
+        }
+
+        // numDenseLayers=2 → 2 layers with MLP, 38 layers with MoE
+        #expect(mlpCount == 2, "Expected 2 dense MLP layers, got \(mlpCount)")
+        #expect(moeCount == 38, "Expected 38 MoE layers, got \(moeCount)")
+    }
+
+    @Test("LFM2 8B-A1B graph has 2 MLP and 22 MoE (numDenseLayers=2)")
+    func lfm2_8B_A1B_DenseLayersInGraph() throws {
+        let graph = try LFM2(config: .lfm2_8B_A1B).makeModelGraph()
+
+        let mlpCount = countOperations(in: graph.rootRegion) { kind in
+            if case .mlp = kind { return true }
+            return false
+        }
+        let moeCount = countOperations(in: graph.rootRegion) { kind in
+            if case .moe = kind { return true }
+            return false
+        }
+
+        // numDenseLayers=2 → 2 layers with MLP, 22 layers with MoE
+        #expect(mlpCount == 2, "Expected 2 MLP layers, got \(mlpCount)")
+        #expect(moeCount == 22, "Expected 22 MoE layers, got \(moeCount)")
+    }
+
+    @Test("LFM2 non-MoE graph has all MLP, no MoE")
+    func lfm2AllMLPInGraph() throws {
+        let graph = try LFM2(config: .lfm25_1_2B).makeModelGraph()
+
+        let mlpCount = countOperations(in: graph.rootRegion) { kind in
+            if case .mlp = kind { return true }
+            return false
+        }
+        let moeCount = countOperations(in: graph.rootRegion) { kind in
+            if case .moe = kind { return true }
+            return false
+        }
+
+        #expect(mlpCount == 16, "Expected 16 MLP layers, got \(mlpCount)")
+        #expect(moeCount == 0, "Expected 0 MoE layers, got \(moeCount)")
+    }
+
+    @Test("LFM2 custom MoE with numDenseLayers boundary within section")
+    func lfm2CustomNumDenseLayers() throws {
+        // 3 layers: conv, conv, attn — numDenseLayers=1 → layer 0 is dense
+        let config = LFM2.Config(
+            hiddenSize: 1024,
+            hiddenLayers: 3,
+            intermediateSize: 4096,
+            vocabularySize: 32000,
+            attentionHeads: 16,
+            kvHeads: 4,
+            sections: [
+                .init(groupCount: 1, convsPerGroup: 2),
+            ],
+            moe: .init(expertCount: 8, expertsPerToken: 2, moeIntermediateSize: 1024),
+            numDenseLayers: 1
+        )
+
+        let descriptors = config.layerDescriptors
+        #expect(descriptors.count == 3)
+        #expect(descriptors[0].useMoE == false) // layer 0: dense
+        #expect(descriptors[1].useMoE == true)  // layer 1: MoE
+        #expect(descriptors[2].useMoE == true)  // layer 2: MoE
+
+        let graph = try LFM2(config: config).makeModelGraph()
+        let mlpCount = countOperations(in: graph.rootRegion) { kind in
+            if case .mlp = kind { return true }
+            return false
+        }
+        let moeCount = countOperations(in: graph.rootRegion) { kind in
+            if case .moe = kind { return true }
+            return false
+        }
+        #expect(mlpCount == 1)
+        #expect(moeCount == 2)
+    }
+
+    // MARK: - Graph-level Layer Type Verification
+
+    @Test("LFM2 graph conv/attn op count matches sections")
+    func lfm2GraphLayerTypes() throws {
+        let graph = try LFM2(config: .lfm2_350M).makeModelGraph()
+
+        let convCount = countOperations(in: graph.rootRegion) { kind in
+            if case .stateSpace = kind { return true }
+            return false
+        }
+        let attnCount = countOperations(in: graph.rootRegion) { kind in
+            if case .attention = kind { return true }
+            return false
+        }
+
+        // lfm2_350M: (conv×2+attn)×3, (conv+attn)×3, conv×1
+        // 10 conv layers, 6 attn layers
+        #expect(convCount == 10, "Expected 10 conv layers, got \(convCount)")
+        #expect(attnCount == 6, "Expected 6 attn layers, got \(attnCount)")
+    }
+
+    @Test("Qwen35 graph has correct DeltaNet and Attention layer counts")
+    func qwen35GraphLayerCounts() throws {
+        let config = Qwen35.Config.qwen35_0_8B
+        let graph = try Qwen35(config: config).makeModelGraph()
+
+        // Qwen35 uses Repeat, so ops are inside the repeating body.
+        // Count within the repeating body and multiply by repeat count.
+        let deltaNetInBody = countOperations(inRepeatingBody: graph.rootRegion) { kind in
+            if case .stateSpace = kind { return true }
+            return false
+        }
+        let attnInBody = countOperations(inRepeatingBody: graph.rootRegion) { kind in
+            if case .attention = kind { return true }
+            return false
+        }
+
+        // hybridGroupCount=6 groups, each with 3 DeltaNet + 1 Attention
+        // The outer Repeat body contains an inner Repeat (DeltaNet) + 1 Attn residual
+        // Inner Repeat body has 1 DeltaNet op
+        #expect(deltaNetInBody >= 1, "Expected DeltaNet ops in repeating body")
+        #expect(attnInBody >= 1, "Expected Attention ops in repeating body")
+    }
 }
 
 // MARK: - Helpers
@@ -366,4 +574,52 @@ private func findFirstOperation(
         }
     }
     return nil
+}
+
+/// Count all operations matching a predicate, recursing into all nested regions.
+private func countOperations(
+    in region: Region,
+    matching predicate: (OperationKind) -> Bool
+) -> Int {
+    var count = 0
+    for op in region.operations {
+        if predicate(op.kind) { count += 1 }
+        switch op.kind {
+        case .residual(_, let body):
+            count += countOperations(in: body, matching: predicate)
+        case .parallel(_, let branches):
+            for branch in branches {
+                count += countOperations(in: branch, matching: predicate)
+            }
+        case .repeating(_, let body):
+            count += countOperations(in: body, matching: predicate)
+        default:
+            break
+        }
+    }
+    return count
+}
+
+/// Count operations inside the first repeating body found (for Repeat-based models).
+private func countOperations(
+    inRepeatingBody region: Region,
+    matching predicate: (OperationKind) -> Bool
+) -> Int {
+    for op in region.operations {
+        switch op.kind {
+        case .repeating(_, let body):
+            return countOperations(in: body, matching: predicate)
+        case .residual(_, let body):
+            let result = countOperations(inRepeatingBody: body, matching: predicate)
+            if result > 0 { return result }
+        case .parallel(_, let branches):
+            for branch in branches {
+                let result = countOperations(inRepeatingBody: branch, matching: predicate)
+                if result > 0 { return result }
+            }
+        default:
+            break
+        }
+    }
+    return 0
 }

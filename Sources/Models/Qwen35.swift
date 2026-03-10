@@ -131,6 +131,10 @@ public struct Qwen35: ModelComponent {
             tieWordEmbeddings: Bool = true
         ) {
             precondition(
+                fullAttentionInterval > 0,
+                "fullAttentionInterval must be positive"
+            )
+            precondition(
                 hiddenLayers % fullAttentionInterval == 0,
                 "hiddenLayers must be divisible by fullAttentionInterval"
             )

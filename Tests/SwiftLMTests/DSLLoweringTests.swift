@@ -582,6 +582,7 @@ struct DSLLoweringTests {
                 case .residual(_, let body): collectKinds(from: body)
                 case .parallel(_, let branches): branches.forEach { collectKinds(from: $0) }
                 case .repeating(_, let body): collectKinds(from: body)
+                case .layerStack(let layers): layers.forEach { collectKinds(from: $0) }
                 }
             }
         }
@@ -946,6 +947,79 @@ struct DSLLoweringTests {
         } else {
             Issue.record("Expected mlp when useAttention is false")
         }
+    }
+
+    // MARK: - Dump Tests
+
+    @Test("ModelGraph dump produces readable output for TinyLlama")
+    func dumpTinyLlama() throws {
+        let model = TinyLlama(
+            vocabSize: 32000,
+            hiddenSize: 4096,
+            headCount: 32,
+            kvHeadCount: 8,
+            intermediateSize: 11008,
+            layerCount: 32
+        )
+
+        let normalized = try model.makeNormalizedModel()
+        let output = normalized.dump()
+        print(output)
+
+        #expect(output.contains("tokenEmbedding"))
+        #expect(output.contains("repeating(32x)"))
+        #expect(output.contains("residual(add)"))
+        #expect(output.contains("attention"))
+        #expect(output.contains("heads=32"))
+        #expect(output.contains("kvHeads=8"))
+        #expect(output.contains("mlp"))
+        #expect(output.contains("rmsNorm"))
+        #expect(output.contains("outputHead"))
+    }
+
+    @Test("ModelGraph dump produces readable output for Cohere")
+    func dumpTinyCohere() throws {
+        let model = TinyCohere(
+            vocabSize: 256000,
+            hiddenSize: 8192,
+            headCount: 64,
+            kvHeadCount: 8,
+            intermediateSize: 22528,
+            layerCount: 40
+        )
+
+        let normalized = try model.makeNormalizedModel()
+        let output = normalized.dump()
+        print(output)
+
+        #expect(output.contains("parallel(add)"))
+        #expect(output.contains("branch[0]"))
+        #expect(output.contains("branch[1]"))
+        #expect(output.contains("layerNorm"))
+    }
+
+    @Test("ModelGraph dump verbose mode shows extra details")
+    func dumpVerbose() throws {
+        let model = TinyLlama(
+            vocabSize: 100,
+            hiddenSize: 64,
+            headCount: 4,
+            kvHeadCount: 2,
+            intermediateSize: 256,
+            layerCount: 1
+        )
+
+        let normalized = try model.makeNormalizedModel()
+        let compact = normalized.dump(verbose: false)
+        let verbose = normalized.dump(verbose: true)
+        print("--- compact ---")
+        print(compact)
+        print("--- verbose ---")
+        print(verbose)
+
+        // Both should be non-empty
+        #expect(!compact.isEmpty)
+        #expect(!verbose.isEmpty)
     }
 
     @Test("ConditionalComponent preserves value flow for both branches")

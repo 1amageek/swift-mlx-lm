@@ -2844,3 +2844,182 @@ private func miniCohereWeights(graph: ModelGraph, layerCount: Int) -> BoundWeigh
 
     return bind(dict)
 }
+
+// MARK: - Module Compiler Tests
+
+@Suite("MLXModuleCompiler")
+struct ModuleCompilerTests {
+
+    @Test("Compile Llama-style model into Module tree")
+    func compileLlama() throws {
+        let model = MiniLlama(layerCount: 2)
+        let graph = try model.makeModelGraph()
+        let weights = miniLlamaWeights(graph: graph, layerCount: 2)
+
+        let compiled = try MLXModuleCompiler().compile(graph: graph, weights: weights)
+
+        // Should produce a valid GraphModel
+        let tokens = MLXArray([1, 2, 3])
+        let logits = try compiled.forward(tokenIDs: tokens)
+
+        // Output shape: [seqLen, vocabSize]
+        #expect(logits.ndim == 2)
+        #expect(logits.dim(0) == 3)
+        #expect(logits.dim(1) == 8)
+    }
+
+    @Test("Compile Llama-style model with batch dimension")
+    func compileLlamaBatch() throws {
+        let model = MiniLlama(layerCount: 1)
+        let graph = try model.makeModelGraph()
+        let weights = miniLlamaWeights(graph: graph, layerCount: 1)
+
+        let compiled = try MLXModuleCompiler().compile(graph: graph, weights: weights)
+
+        // 2D input: [B, L]
+        let tokens = MLXArray([1, 2, 3]).expandedDimensions(axis: 0)
+        let logits = try compiled.forward(tokenIDs: tokens)
+
+        // Output shape: [B, L, vocabSize]
+        #expect(logits.ndim == 3)
+        #expect(logits.dim(0) == 1)
+        #expect(logits.dim(1) == 3)
+        #expect(logits.dim(2) == 8)
+    }
+
+    @Test("Module tree output matches MLXExecutor output")
+    func moduleOutputMatchesExecutor() throws {
+        let model = MiniLlama(layerCount: 1)
+        let graph = try model.makeModelGraph()
+        let weights = miniLlamaWeights(graph: graph, layerCount: 1)
+
+        // Compile with both compilers
+        let executorModel = try MLXCompiler().compile(graph: graph, weights: weights)
+        let moduleModel = try MLXModuleCompiler().compile(graph: graph, weights: weights)
+
+        let executor = MLXExecutor(compiledModel: executorModel)
+
+        let tokens = MLXArray([1, 2, 3])
+        let executorLogits = try executor.forward(tokenIDs: tokens)
+        let moduleLogits = try moduleModel.forward(tokenIDs: tokens)
+
+        // Should produce identical shapes
+        #expect(executorLogits.shape == moduleLogits.shape)
+
+        // Values should be numerically close (same weights, same operations)
+        let diff = MLX.abs(executorLogits - moduleLogits).max().item(Float.self)
+        #expect(diff < 1e-4, "Max diff between executor and module: \(diff)")
+    }
+
+    @Test("Cache persistence across forward calls")
+    func cachePersistence() throws {
+        let model = MiniLlama(layerCount: 1)
+        let graph = try model.makeModelGraph()
+        let weights = miniLlamaWeights(graph: graph, layerCount: 1)
+
+        let compiled = try MLXModuleCompiler().compile(graph: graph, weights: weights)
+
+        // First forward
+        let logits1 = try compiled.forward(tokenIDs: MLXArray([1, 2, 3]))
+        #expect(logits1.dim(0) == 3)
+
+        // Second forward (single token, cache should have 3 tokens)
+        let logits2 = try compiled.forward(tokenIDs: MLXArray([4]))
+        #expect(logits2.dim(0) == 1)
+
+        // After reset, cache is cleared
+        compiled.resetCaches()
+        let logits3 = try compiled.forward(tokenIDs: MLXArray([1, 2, 3]))
+        #expect(logits3.dim(0) == 3)
+
+        // Should match first forward (same input, fresh cache)
+        let diff = MLX.abs(logits1 - logits3).max().item(Float.self)
+        #expect(diff < 1e-6, "After reset, output should match: diff=\(diff)")
+    }
+
+    @Test("Compile Cohere-style model with parallel branches")
+    func compileCohere() throws {
+        let model = MiniCohere(layerCount: 1)
+        let graph = try model.makeModelGraph()
+        let weights = miniCohereWeights(graph: graph, layerCount: 1)
+
+        let compiled = try MLXModuleCompiler().compile(graph: graph, weights: weights)
+
+        let tokens = MLXArray([1, 2, 3])
+        let logits = try compiled.forward(tokenIDs: tokens)
+
+        #expect(logits.ndim == 2)
+        #expect(logits.dim(0) == 3)
+        #expect(logits.dim(1) == 8)
+    }
+
+    @Test("Module tree exposes Linear layers for quantization")
+    func quantizableLinearLayers() throws {
+        let model = MiniLlama(layerCount: 1)
+        let graph = try model.makeModelGraph()
+        let weights = miniLlamaWeights(graph: graph, layerCount: 1)
+
+        let compiled = try MLXModuleCompiler().compile(graph: graph, weights: weights)
+
+        // Count Linear layers discoverable by MLXNN's quantize() infrastructure
+        let leafMods = compiled.leafModules().flattened()
+        let linearCount = leafMods.filter { $0.1 is MLXNN.Linear }.count
+
+        // 1 layer: q_proj + k_proj + v_proj + o_proj + gate_proj + up_proj + down_proj + output_head = 8
+        // (output head is tied to embedding, so it has a Linear too)
+        #expect(linearCount >= 7, "Should have at least 7 Linear layers, got \(linearCount)")
+
+        // All are Quantizable
+        let quantizableCount = leafMods.filter { $0.1 is Quantizable }.count
+        #expect(quantizableCount >= 7, "Linear layers should be Quantizable")
+    }
+
+    @Test("Simple norm-only model compiles")
+    func normOnlyModel() throws {
+        struct NormOnly: ModelComponent {
+            @ModelComponentBuilder var body: some ModelComponent {
+                TokenEmbedding(vocabSize: 8, embeddingSize: 4)
+                RMSNorm(dimension: 4)
+                OutputHead(inputSize: 4, vocabSize: 8, tiedToEmbedding: true)
+            }
+        }
+
+        let model = NormOnly()
+        let graph = try model.makeModelGraph()
+        let weights = bind([
+            slot([.operation(0)], role: .embeddingTable): MLXRandom.normal([8, 4]) * 0.1,
+            slot([.operation(1)], role: .scale): MLXArray.zeros([4]),
+        ])
+
+        let compiled = try MLXModuleCompiler().compile(graph: graph, weights: weights)
+        let logits = try compiled.forward(tokenIDs: MLXArray([0, 1, 2]))
+
+        #expect(logits.dim(0) == 3)
+        #expect(logits.dim(1) == 8)
+    }
+}
+
+@Suite("ModuleCompiler Cohere Parallel Match")
+struct ModuleCompilerCohereMatchTests {
+
+    @Test("Cohere module output matches executor output")
+    func cohereModuleMatchesExecutor() throws {
+        let model = MiniCohere(layerCount: 1)
+        let graph = try model.makeModelGraph()
+        let weights = miniCohereWeights(graph: graph, layerCount: 1)
+
+        let executorModel = try MLXCompiler().compile(graph: graph, weights: weights)
+        let moduleModel = try MLXModuleCompiler().compile(graph: graph, weights: weights)
+
+        let executor = MLXExecutor(compiledModel: executorModel)
+
+        let tokens = MLXArray([1, 2])
+        let executorLogits = try executor.forward(tokenIDs: tokens)
+        let moduleLogits = try moduleModel.forward(tokenIDs: tokens)
+
+        #expect(executorLogits.shape == moduleLogits.shape)
+
+        let diff = MLX.abs(executorLogits - moduleLogits).max().item(Float.self)
+        #expect(diff < 1e-4, "Cohere max diff: \(diff)")
+    }
+}
