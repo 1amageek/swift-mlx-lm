@@ -102,4 +102,5 @@ enum GGUFLoadError: Error {
     case unsupportedQuantization(UInt32)
     case tensorNotFound(String)
     case dimensionMismatch(String)
+    case invalidData(String)
 }

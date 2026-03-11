@@ -325,44 +325,44 @@ struct GGUFTensorBridge {
         var scales = [Float](repeating: 0, count: totalElements / 32)
         var biases = [Float](repeating: 0, count: totalElements / 32)
 
+        var subScales = [Float](repeating: 0, count: 8)
+        var subMins = [Float](repeating: 0, count: 8)
+
         data.withUnsafeBytes { buffer in
             let bytes = buffer.bindMemory(to: UInt8.self)
-            for sb in 0..<superBlockCount {
-                let offset = sb * 144
-                let d = readFloat16(bytes, offset)
-                let dmin = readFloat16(bytes, offset + 2)
-                let scOffset = offset + 4
+            packed.withUnsafeMutableBufferPointer { packedBuf in
+                let packedPtr = packedBuf.baseAddress!
+                for sb in 0..<superBlockCount {
+                    let offset = sb * 144
+                    let d = readFloat16(bytes, offset)
+                    let dmin = readFloat16(bytes, offset + 2)
+                    let scOffset = offset + 4
 
-                // Extract 8 sub-block scales and mins (get_scale_min_k4)
-                var subScales = [Float](repeating: 0, count: 8)
-                var subMins = [Float](repeating: 0, count: 8)
-                extractScaleMinK4(bytes: bytes, offset: scOffset, d: d, dmin: dmin,
-                                  scales: &subScales, mins: &subMins)
+                    extractScaleMinK4(bytes: bytes, offset: scOffset, d: d, dmin: dmin,
+                                      scales: &subScales, mins: &subMins)
 
-                let qsBase = offset + 16
-                // 4 chunks of 32 bytes, each encoding 64 elements
-                for chunk in 0..<4 {
-                    let qs = qsBase + chunk * 32
+                    let qsBase = offset + 16
+                    for chunk in 0..<4 {
+                        let qs = qsBase + chunk * 32
 
-                    // Low nibbles → group (chunk*2): 32 elements
-                    let groupLow = sb * 8 + chunk * 2
-                    scales[groupLow] = subScales[chunk * 2]
-                    biases[groupLow] = -subMins[chunk * 2]
-                    let packedLow = sb * 32 + (chunk * 2) * 4
-                    packed[packedLow + 0] = packLowNibbles8(bytes, qs, 0)
-                    packed[packedLow + 1] = packLowNibbles8(bytes, qs, 8)
-                    packed[packedLow + 2] = packLowNibbles8(bytes, qs, 16)
-                    packed[packedLow + 3] = packLowNibbles8(bytes, qs, 24)
+                        let groupLow = sb * 8 + chunk * 2
+                        scales[groupLow] = subScales[chunk * 2]
+                        biases[groupLow] = -subMins[chunk * 2]
+                        let packedLow = sb * 32 + (chunk * 2) * 4
+                        packedPtr[packedLow + 0] = packLowNibbles8(bytes, qs, 0)
+                        packedPtr[packedLow + 1] = packLowNibbles8(bytes, qs, 8)
+                        packedPtr[packedLow + 2] = packLowNibbles8(bytes, qs, 16)
+                        packedPtr[packedLow + 3] = packLowNibbles8(bytes, qs, 24)
 
-                    // High nibbles → group (chunk*2+1): 32 elements
-                    let groupHigh = sb * 8 + chunk * 2 + 1
-                    scales[groupHigh] = subScales[chunk * 2 + 1]
-                    biases[groupHigh] = -subMins[chunk * 2 + 1]
-                    let packedHigh = sb * 32 + (chunk * 2 + 1) * 4
-                    packed[packedHigh + 0] = packHighNibbles8(bytes, qs, 0)
-                    packed[packedHigh + 1] = packHighNibbles8(bytes, qs, 8)
-                    packed[packedHigh + 2] = packHighNibbles8(bytes, qs, 16)
-                    packed[packedHigh + 3] = packHighNibbles8(bytes, qs, 24)
+                        let groupHigh = sb * 8 + chunk * 2 + 1
+                        scales[groupHigh] = subScales[chunk * 2 + 1]
+                        biases[groupHigh] = -subMins[chunk * 2 + 1]
+                        let packedHigh = sb * 32 + (chunk * 2 + 1) * 4
+                        packedPtr[packedHigh + 0] = packHighNibbles8(bytes, qs, 0)
+                        packedPtr[packedHigh + 1] = packHighNibbles8(bytes, qs, 8)
+                        packedPtr[packedHigh + 2] = packHighNibbles8(bytes, qs, 16)
+                        packedPtr[packedHigh + 3] = packHighNibbles8(bytes, qs, 24)
+                    }
                 }
             }
         }
@@ -436,6 +436,23 @@ struct GGUFTensorBridge {
         return v
     }
 
+    /// Emit a single N-bit unsigned value at a given position into packed UInt32 words.
+    ///
+    /// Uses wrapping arithmetic for speed. Caller must ensure buffer bounds.
+    @inline(__always)
+    private func emitBits(
+        _ value: UInt32, at position: Int, bits: Int,
+        into ptr: UnsafeMutablePointer<UInt32>
+    ) {
+        let bitIndex = position &* bits
+        let wordIndex = bitIndex >> 5
+        let bitOffset = bitIndex & 31
+        ptr[wordIndex] |= value << bitOffset
+        if bitOffset &+ bits > 32 {
+            ptr[wordIndex &+ 1] |= value >> (32 &- bitOffset)
+        }
+    }
+
     /// Pack quantized unsigned values into UInt32 words, LSB-first.
     ///
     /// MLX expects quantized weights packed little-endian within each UInt32:
@@ -495,51 +512,50 @@ struct GGUFTensorBridge {
         var scales = [Float](repeating: 0, count: groupCount)
         var biases = [Float](repeating: 0, count: groupCount)
 
+        var blockScales = [Float](repeating: 0, count: 8)
+        var blockMins = [Float](repeating: 0, count: 8)
+
         data.withUnsafeBytes { buffer in
             let bytes = buffer.bindMemory(to: UInt8.self)
-            for block in 0..<superBlockCount {
-                let offset = block * 176
-                let d = readFloat16(bytes, offset)
-                let dmin = readFloat16(bytes, offset + 2)
-                let qOffset = offset + 4
-                let qhOffset = offset + 16
-                let qsOffset = offset + 48
+            packed.withUnsafeMutableBufferPointer { packedBuf in
+                let packedPtr = packedBuf.baseAddress!
+                for block in 0..<superBlockCount {
+                    let offset = block * 176
+                    let d = readFloat16(bytes, offset)
+                    let dmin = readFloat16(bytes, offset + 2)
+                    let qOffset = offset + 4
+                    let qhOffset = offset + 16
+                    let qsOffset = offset + 48
 
-                var blockScales = [Float](repeating: 0, count: 8)
-                var blockMins = [Float](repeating: 0, count: 8)
-                extractScaleMinK4(
-                    bytes: bytes, offset: qOffset, d: d, dmin: dmin,
-                    scales: &blockScales, mins: &blockMins
-                )
+                    extractScaleMinK4(
+                        bytes: bytes, offset: qOffset, d: d, dmin: dmin,
+                        scales: &blockScales, mins: &blockMins
+                    )
 
-                for chunk in 0..<4 {
-                    let qsBase = qsOffset + chunk * 32
-                    var lowValues = [UInt8](repeating: 0, count: 32)
-                    var highValues = [UInt8](repeating: 0, count: 32)
+                    for chunk in 0..<4 {
+                        let qsBase = qsOffset + chunk * 32
+                        let group0 = block * 8 + chunk * 2
+                        let group1 = group0 + 1
 
-                    for l in 0..<32 {
-                        let byte = bytes[qsBase + l]
-                        let qh = bytes[qhOffset + l]
+                        scales[group0] = blockScales[chunk * 2]
+                        biases[group0] = -blockMins[chunk * 2]
+                        scales[group1] = blockScales[chunk * 2 + 1]
+                        biases[group1] = -blockMins[chunk * 2 + 1]
 
-                        let low = Int(byte & 0x0F) | (Int((qh >> (chunk * 2)) & 1) << 4)
-                        let high = Int((byte >> 4) & 0x0F) | (Int((qh >> (chunk * 2 + 1)) & 1) << 4)
+                        let pBase0 = group0 * 5
+                        let pBase1 = group1 * 5
 
-                        lowValues[l] = UInt8(low)
-                        highValues[l] = UInt8(high)
+                        for l in 0..<32 {
+                            let byte = bytes[qsBase + l]
+                            let qh = bytes[qhOffset + l]
+
+                            let low = UInt32(byte & 0x0F) | (UInt32((qh >> (chunk * 2)) & 1) << 4)
+                            let high = UInt32((byte >> 4) & 0x0F) | (UInt32((qh >> (chunk * 2 + 1)) & 1) << 4)
+
+                            emitBits(low, at: l, bits: 5, into: packedPtr + pBase0)
+                            emitBits(high, at: l, bits: 5, into: packedPtr + pBase1)
+                        }
                     }
-
-                    let group0 = block * 8 + chunk * 2
-                    let group1 = group0 + 1
-
-                    scales[group0] = blockScales[chunk * 2]
-                    biases[group0] = -blockMins[chunk * 2]
-                    scales[group1] = blockScales[chunk * 2 + 1]
-                    biases[group1] = -blockMins[chunk * 2 + 1]
-
-                    let packedLow = packUnsignedValues(lowValues, bits: 5)
-                    let packedHigh = packUnsignedValues(highValues, bits: 5)
-                    packed.replaceSubrange(group0 * 5..<(group0 * 5 + 5), with: packedLow)
-                    packed.replaceSubrange(group1 * 5..<(group1 * 5 + 5), with: packedHigh)
                 }
             }
         }
@@ -565,39 +581,47 @@ struct GGUFTensorBridge {
 
         data.withUnsafeBytes { buffer in
             let bytes = buffer.bindMemory(to: UInt8.self)
-            for block in 0..<superBlockCount {
-                let offset = block * 210
-                let scalesOffset = offset + 192
-                let d = readFloat16(bytes, offset + 208)
+            packed.withUnsafeMutableBufferPointer { packedBuf in
+                let packedPtr = packedBuf.baseAddress!
+                for block in 0..<superBlockCount {
+                    let offset = block * 210
+                    let scalesOffset = offset + 192
+                    let d = readFloat16(bytes, offset + 208)
 
-                for half in 0..<2 {
-                    let qlBase = offset + half * 64
-                    let qhBase = offset + 128 + half * 32
-                    let scBase = scalesOffset + half * 8
-                    var groups = Array(repeating: [UInt8](repeating: 0, count: 16), count: 8)
+                    for half in 0..<2 {
+                        let qlBase = offset + half * 64
+                        let qhBase = offset + 128 + half * 32
+                        let scBase = scalesOffset + half * 8
 
-                    for l in 0..<32 {
-                        let q1 = Int(bytes[qlBase + l] & 0x0F) | (Int((bytes[qhBase + l] >> 0) & 3) << 4)
-                        let q2 = Int(bytes[qlBase + l + 32] & 0x0F) | (Int((bytes[qhBase + l] >> 2) & 3) << 4)
-                        let q3 = Int(bytes[qlBase + l] >> 4) | (Int((bytes[qhBase + l] >> 4) & 3) << 4)
-                        let q4 = Int(bytes[qlBase + l + 32] >> 4) | (Int((bytes[qhBase + l] >> 6) & 3) << 4)
+                        // 8 groups of 16 elements per half.
+                        // Group mapping (lStart, qlAdd, useLowNibble, qhShift):
+                        //   g0: l=0..15,  ql[l]&0xF,     qh>>0  g1: l=16..31, ql[l]&0xF,     qh>>0
+                        //   g2: l=0..15,  ql[l+32]&0xF,  qh>>2  g3: l=16..31, ql[l+32]&0xF,  qh>>2
+                        //   g4: l=0..15,  ql[l]>>4,       qh>>4  g5: l=16..31, ql[l]>>4,       qh>>4
+                        //   g6: l=0..15,  ql[l+32]>>4,    qh>>6  g7: l=16..31, ql[l+32]>>4,    qh>>6
+                        for localGroup in 0..<8 {
+                            let groupIndex = block * 16 + half * 8 + localGroup
+                            let scale = d * Float(Int8(bitPattern: bytes[scBase + localGroup]))
+                            scales[groupIndex] = scale
+                            biases[groupIndex] = -32.0 * scale
 
-                        let groupIndex = l / 16
-                        let elementIndex = l % 16
-                        groups[groupIndex][elementIndex] = UInt8(q1)
-                        groups[groupIndex + 2][elementIndex] = UInt8(q2)
-                        groups[groupIndex + 4][elementIndex] = UInt8(q3)
-                        groups[groupIndex + 6][elementIndex] = UInt8(q4)
-                    }
+                            let lStart = (localGroup & 1) << 4
+                            let qlAdd = ((localGroup >> 1) & 1) << 5
+                            let useLow = (localGroup & 4) == 0
+                            let qhShift = localGroup & 6
 
-                    for localGroup in 0..<8 {
-                        let groupIndex = block * 16 + half * 8 + localGroup
-                        let scale = d * Float(Int8(bitPattern: bytes[scBase + localGroup]))
-                        scales[groupIndex] = scale
-                        biases[groupIndex] = -32.0 * scale
+                            let pBase = groupIndex * 3
 
-                        let packedGroup = packUnsignedValues(groups[localGroup], bits: 6)
-                        packed.replaceSubrange(groupIndex * 3..<(groupIndex * 3 + 3), with: packedGroup)
+                            for i in 0..<16 {
+                                let l = lStart + i
+                                let qlByte = bytes[qlBase + qlAdd + l]
+                                let ql = useLow ? UInt32(qlByte & 0x0F) : UInt32(qlByte >> 4)
+                                let qh = UInt32((bytes[qhBase + l] >> qhShift) & 3) << 4
+                                let q = ql | qh
+
+                                emitBits(q, at: i, bits: 6, into: packedPtr + pBase)
+                            }
+                        }
                     }
                 }
             }
@@ -647,29 +671,28 @@ struct GGUFTensorBridge {
 
         data.withUnsafeBytes { buffer in
             let bytes = buffer.bindMemory(to: UInt8.self)
-            for block in 0..<blockCount {
-                let offset = block * 22
-                let d = readFloat16(bytes, offset)
-                scales[block] = d
-                biases[block] = -16.0 * d
+            packed.withUnsafeMutableBufferPointer { packedBuf in
+                let packedPtr = packedBuf.baseAddress!
+                for block in 0..<blockCount {
+                    let offset = block * 22
+                    let d = readFloat16(bytes, offset)
+                    scales[block] = d
+                    biases[block] = -16.0 * d
 
-                // Read qh as uint32 (little-endian)
-                let qh = UInt32(bytes[offset + 2])
-                    | (UInt32(bytes[offset + 3]) << 8)
-                    | (UInt32(bytes[offset + 4]) << 16)
-                    | (UInt32(bytes[offset + 5]) << 24)
+                    let qh = UInt32(bytes[offset + 2])
+                        | (UInt32(bytes[offset + 3]) << 8)
+                        | (UInt32(bytes[offset + 4]) << 16)
+                        | (UInt32(bytes[offset + 5]) << 24)
 
-                var values = [UInt8](repeating: 0, count: 32)
-                for j in 0..<16 {
-                    let byte = bytes[offset + 6 + j]
-                    let x0 = (Int(byte) & 0x0F) | (Int((qh >> UInt32(j)) & 1) << 4)
-                    let x1 = (Int(byte >> 4) & 0x0F) | (Int((qh >> UInt32(j + 16)) & 1) << 4)
-                    values[j] = UInt8(x0)
-                    values[j + 16] = UInt8(x1)
+                    let pBase = block * 5
+                    for j in 0..<16 {
+                        let byte = bytes[offset + 6 + j]
+                        let x0 = UInt32(byte & 0x0F) | (((qh >> j) & 1) << 4)
+                        let x1 = UInt32((byte >> 4) & 0x0F) | (((qh >> (j + 16)) & 1) << 4)
+                        emitBits(x0, at: j, bits: 5, into: packedPtr + pBase)
+                        emitBits(x1, at: j + 16, bits: 5, into: packedPtr + pBase)
+                    }
                 }
-
-                let packedGroup = packUnsignedValues(values, bits: 5)
-                packed.replaceSubrange(block * 5..<(block * 5 + 5), with: packedGroup)
             }
         }
 
@@ -695,30 +718,29 @@ struct GGUFTensorBridge {
 
         data.withUnsafeBytes { buffer in
             let bytes = buffer.bindMemory(to: UInt8.self)
-            for block in 0..<blockCount {
-                let offset = block * 24
-                let d = readFloat16(bytes, offset)
-                let m = readFloat16(bytes, offset + 2)
-                scales[block] = d
-                biases[block] = m
+            packed.withUnsafeMutableBufferPointer { packedBuf in
+                let packedPtr = packedBuf.baseAddress!
+                for block in 0..<blockCount {
+                    let offset = block * 24
+                    let d = readFloat16(bytes, offset)
+                    let m = readFloat16(bytes, offset + 2)
+                    scales[block] = d
+                    biases[block] = m
 
-                // qh starts at offset+4
-                let qh = UInt32(bytes[offset + 4])
-                    | (UInt32(bytes[offset + 5]) << 8)
-                    | (UInt32(bytes[offset + 6]) << 16)
-                    | (UInt32(bytes[offset + 7]) << 24)
+                    let qh = UInt32(bytes[offset + 4])
+                        | (UInt32(bytes[offset + 5]) << 8)
+                        | (UInt32(bytes[offset + 6]) << 16)
+                        | (UInt32(bytes[offset + 7]) << 24)
 
-                var values = [UInt8](repeating: 0, count: 32)
-                for j in 0..<16 {
-                    let byte = bytes[offset + 8 + j]
-                    let x0 = (Int(byte) & 0x0F) | (Int((qh >> UInt32(j)) & 1) << 4)
-                    let x1 = (Int(byte >> 4) & 0x0F) | (Int((qh >> UInt32(j + 16)) & 1) << 4)
-                    values[j] = UInt8(x0)
-                    values[j + 16] = UInt8(x1)
+                    let pBase = block * 5
+                    for j in 0..<16 {
+                        let byte = bytes[offset + 8 + j]
+                        let x0 = UInt32(byte & 0x0F) | (((qh >> j) & 1) << 4)
+                        let x1 = UInt32((byte >> 4) & 0x0F) | (((qh >> (j + 16)) & 1) << 4)
+                        emitBits(x0, at: j, bits: 5, into: packedPtr + pBase)
+                        emitBits(x1, at: j + 16, bits: 5, into: packedPtr + pBase)
+                    }
                 }
-
-                let packedGroup = packUnsignedValues(values, bits: 5)
-                packed.replaceSubrange(block * 5..<(block * 5 + 5), with: packedGroup)
             }
         }
 

@@ -1,10 +1,27 @@
 import Foundation
-import MLX
+@preconcurrency import MLX
 import MLXNN
 import MLXCompiler
 import GGUFParser
 import GGUFTokenizer
 import SwiftLM
+import Synchronization
+
+/// Work item for parallel tensor conversion.
+private struct TensorWorkItem: Sendable {
+    let mlxName: String
+    let tensor: GGUFTensorInfo
+    let data: Data
+    let isWeight: Bool
+}
+
+/// Accumulated results from parallel tensor conversion.
+/// Guarded by Mutex — each MLXArray is independently created per thread.
+private struct ConversionState: Sendable {
+    var weights: [String: MLXArray] = [:]
+    var directQuantInfo: [String: (groupSize: Int, bits: Int)] = [:]
+    var errorMessage: String?
+}
 
 /// Loads a complete model pipeline from a single GGUF file.
 ///
@@ -114,14 +131,19 @@ public struct GGUFModelLoader {
         adapterDirectory: URL? = nil,
         configOverride: ModelConfigurationOverride? = nil
     ) throws -> ModelContext {
+        let loadStart = CFAbsoluteTimeGetCurrent()
+
         // 1. Parse GGUF
         let fileSize = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int64) ?? 0
         print("[GGUFModelLoader] loading \(url.lastPathComponent) (\(ByteCountFormatter.string(fromByteCount: fileSize, countStyle: .file)))")
+        var t0 = CFAbsoluteTimeGetCurrent()
         let file = try GGUFFile.parse(url: url)
-        print("[GGUFModelLoader] parsed: architecture=\(file.architecture ?? "unknown") name=\(file.name ?? "unknown") tensors=\(file.tensors.count)")
+        print("[GGUFModelLoader] parsed: architecture=\(file.architecture ?? "unknown") name=\(file.name ?? "unknown") tensors=\(file.tensors.count) [\(String(format: "%.3f", CFAbsoluteTimeGetCurrent() - t0))s]")
 
         // 2. Create tokenizer early (needed for VLM token ID resolution)
+        t0 = CFAbsoluteTimeGetCurrent()
         let tokenizer = try GGUFTokenizerFactory.create(from: file)
+        print("[GGUFModelLoader] tokenizer created [\(String(format: "%.3f", CFAbsoluteTimeGetCurrent() - t0))s]")
 
         // 3. Build loading context
         let loadContext = GGUFLoadContext(tokenizer: tokenizer, mmprojURL: mmprojURL)
@@ -149,12 +171,17 @@ public struct GGUFModelLoader {
         )
 
         // 5. Model self-construction (config + empty model + mapper + processor factory)
+        t0 = CFAbsoluteTimeGetCurrent()
         let result = try modelType.load(from: file, context: loadContext)
+        print("[GGUFModelLoader] model constructed [\(String(format: "%.3f", CFAbsoluteTimeGetCurrent() - t0))s]")
 
         // 6. Load weights (shared for all models)
+        t0 = CFAbsoluteTimeGetCurrent()
         let weightReport = try loadWeightsWithLoRA(
             into: result.model, from: file, mapper: result.mapper,
             quantization: quantization)
+        print("[GGUFModelLoader] weights loaded [\(String(format: "%.3f", CFAbsoluteTimeGetCurrent() - t0))s]")
+        print("[GGUFModelLoader] total loadContext [\(String(format: "%.3f", CFAbsoluteTimeGetCurrent() - loadStart))s]")
 
         // 7. Load vision encoder if VLM
         if let visionLoader = result.visionLoader, let mmprojURL {
@@ -248,6 +275,8 @@ public struct GGUFModelLoader {
         mapper: some GGUFTensorNameMapper,
         quantization: QuantizationConfiguration?
     ) throws -> WeightLoadingResult {
+        var t0 = CFAbsoluteTimeGetCurrent()
+
         let bridge = GGUFTensorBridge()
         var weights: [String: MLXArray] = [:]
         var skippedTensors: [String] = []
@@ -256,38 +285,69 @@ public struct GGUFModelLoader {
         // Track per-module quantization info for modules that were directly packed.
         var directQuantInfo: [String: (groupSize: Int, bits: Int)] = [:]
 
+        // Phase 1: Collect work items (sequential — name mapping + data slicing)
+        var workItems: [TensorWorkItem] = []
         for tensor in file.tensors {
             guard let mlxName = mapper.mlxName(for: tensor.name) else {
                 skippedTensors.append(tensor.name)
                 continue
             }
-
             let data = try file.tensorData(for: tensor)
+            let isWeight = mlxName.hasSuffix(".weight") && !preserveDenseWeights
+            workItems.append(TensorWorkItem(
+                mlxName: mlxName, tensor: tensor, data: data, isWeight: isWeight))
+        }
 
-            // Weight tensors preserve GGUF-native quantization unless the caller explicitly
-            // requested `.disabled`, which is the documented escape hatch for a dense/F16 baseline.
-            // Non-weight tensors (bias, norm) always dequantize to F16.
-            if mlxName.hasSuffix(".weight") && !preserveDenseWeights {
-                let result = try bridge.convertDirect(tensor: tensor, data: data)
-                switch result {
-                case .float16(let array):
-                    weights[mlxName] = array
-                case .quantized(let weight, let scales, let biases, let groupSize, let bits):
-                    let modulePath = String(mlxName.dropLast(".weight".count))
-                    weights[mlxName] = weight
-                    weights[modulePath + ".scales"] = scales
-                    weights[modulePath + ".biases"] = biases
-                    directQuantInfo[modulePath] = (groupSize: groupSize, bits: bits)
+        // Phase 2: Convert tensors in parallel across CPU cores
+        let count = workItems.count
+
+        let state = Mutex<ConversionState>(.init())
+
+        DispatchQueue.concurrentPerform(iterations: count) { i in
+            let item = workItems[i]
+            do {
+                let result: ConvertedTensor
+                if item.isWeight {
+                    result = try bridge.convertDirect(
+                        tensor: item.tensor, data: item.data)
+                } else {
+                    result = .float16(
+                        try bridge.convert(tensor: item.tensor, data: item.data))
                 }
-            } else {
-                weights[mlxName] = try bridge.convert(tensor: tensor, data: data)
+                state.withLock { s in
+                    switch result {
+                    case .float16(let array):
+                        s.weights[item.mlxName] = array
+                    case .quantized(let weight, let scales, let biases, let groupSize, let bits):
+                        let modulePath = String(item.mlxName.dropLast(".weight".count))
+                        s.weights[item.mlxName] = weight
+                        s.weights[modulePath + ".scales"] = scales
+                        s.weights[modulePath + ".biases"] = biases
+                        s.directQuantInfo[modulePath] = (groupSize: groupSize, bits: bits)
+                    }
+                }
+            } catch {
+                state.withLock { s in
+                    if s.errorMessage == nil { s.errorMessage = "\(error)" }
+                }
             }
         }
+
+        let merged = state.withLock { $0 }
+        if let msg = merged.errorMessage {
+            throw GGUFLoadError.invalidData(msg)
+        }
+        weights = merged.weights
+        directQuantInfo = merged.directQuantInfo
+
+        print("[loadWeights] convertDirect loop: \(weights.count) weights, \(directQuantInfo.count) quantized [\(String(format: "%.3f", CFAbsoluteTimeGetCurrent() - t0))s]")
 
         let mappedCount = weights.count - directQuantInfo.count * 2 // scales+biases are extra
 
         // Apply model-specific weight sanitization
+        t0 = CFAbsoluteTimeGetCurrent()
         let sanitized = model.sanitize(weights: weights)
+        print("[loadWeights] sanitize [\(String(format: "%.3f", CFAbsoluteTimeGetCurrent() - t0))s]")
 
         // Check for embedded LoRA tensors
         let hasLoRA = sanitized.keys.contains { $0.contains("lora_a") }
@@ -299,6 +359,7 @@ public struct GGUFModelLoader {
         // This avoids calling `MLX.quantized()` as a placeholder-construction step, which
         // would re-quantize from dense weights and rejects GGUF-native layouts like Q6_K
         // (`groupSize = 16`).
+        t0 = CFAbsoluteTimeGetCurrent()
         if !directQuantInfo.isEmpty {
             let moduleUpdates = try makeDirectQuantizedModuleUpdates(
                 model: model,
@@ -309,7 +370,9 @@ public struct GGUFModelLoader {
                 try model.update(modules: ModuleChildren.unflattened(moduleUpdates), verify: .none)
             }
         }
+        print("[loadWeights] directQuant module updates [\(String(format: "%.3f", CFAbsoluteTimeGetCurrent() - t0))s]")
 
+        t0 = CFAbsoluteTimeGetCurrent()
         if hasLoRA {
             // Split base weights and LoRA weights
             var baseWeights: [String: MLXArray] = [:]
@@ -350,6 +413,7 @@ public struct GGUFModelLoader {
             let parameters = ModuleParameters.unflattened(sanitized)
             try model.update(parameters: parameters, verify: .noUnusedKeys)
         }
+        print("[loadWeights] model.update(parameters:) [\(String(format: "%.3f", CFAbsoluteTimeGetCurrent() - t0))s]")
 
         // Determine effective quantization for remaining (non-directly-packed) Linear modules.
         // Automatic GGUF-type detection is intentionally not used here: mixed GGUF models
@@ -390,7 +454,9 @@ public struct GGUFModelLoader {
             )
         }
 
+        t0 = CFAbsoluteTimeGetCurrent()
         eval(model)
+        print("[loadWeights] eval(model) [\(String(format: "%.3f", CFAbsoluteTimeGetCurrent() - t0))s]")
 
         return WeightLoadingResult(
             weightLoading: LoadReport.WeightLoading(
