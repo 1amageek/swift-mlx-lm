@@ -348,7 +348,7 @@ extension Qwen25VLModel: GGUFLoadableModel {
         let kv = file[.headCountKV] ?? heads
         let normEps = file[.attentionLayerNormRMSEpsilon] ?? 1e-5
         let ropeTheta = file[.ropeFreqBase] ?? 10_000.0
-        let vocabSize = file[.tokens]?.count ?? file[.vocabularyLength] ?? 0
+        let vocabSize = file.vocabularySize ?? 0
         let tieWordEmbeddings = detectTieWordEmbeddings(from: file)
 
         let textConfig = Qwen25VLConfiguration.TextConfiguration(

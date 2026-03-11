@@ -17,6 +17,11 @@ struct GGUFReader {
 
     var remainingBytes: Int { data.count - offset }
 
+    /// Set the read offset (for deferred array reading).
+    mutating func setOffset(_ newOffset: Int) {
+        offset = newOffset
+    }
+
     // MARK: - Primitives
 
     mutating func readUInt8() throws -> UInt8 {
@@ -146,6 +151,94 @@ struct GGUFReader {
             quantizationType: quantizationType,
             offset: dataOffset
         )
+    }
+
+    // MARK: - Skip (for deferred parsing)
+
+    /// Skip a metadata value without allocating any Swift objects.
+    /// Advances the read offset past the value.
+    mutating func skipMetadataValue() throws {
+        let rawType = try readUInt32()
+        guard let valueType = GGUFMetadataValueType(rawValue: rawType) else {
+            throw GGUFError.invalidMetadataValueType(rawType)
+        }
+        try skipMetadataValue(type: valueType)
+    }
+
+    mutating func skipMetadataValue(type: GGUFMetadataValueType) throws {
+        switch type {
+        case .uint8, .int8, .bool: offset += 1
+        case .uint16, .int16: offset += 2
+        case .uint32, .int32, .float32: offset += 4
+        case .uint64, .int64, .float64: offset += 8
+        case .string:
+            let length: Int
+            if version >= 3 {
+                length = Int(try readUInt64())
+            } else {
+                length = Int(try readUInt32())
+            }
+            try ensureAvailable(length, context: "skip string")
+            offset += length
+        case .array:
+            let rawElementType = try readUInt32()
+            guard let elementType = GGUFMetadataValueType(rawValue: rawElementType) else {
+                throw GGUFError.invalidMetadataValueType(rawElementType)
+            }
+            let count: Int
+            if version >= 3 {
+                count = Int(try readUInt64())
+            } else {
+                count = Int(try readUInt32())
+            }
+            for _ in 0..<count {
+                try skipMetadataValue(type: elementType)
+            }
+        }
+    }
+
+    // MARK: - Bulk readers (single-pass, no enum wrapping)
+
+    /// Read a string array and build a [String: Int] dictionary in one pass.
+    /// Index is the position in the array (0-based).
+    mutating func readStringArrayAsDictionary(count: Int) throws -> [String: Int] {
+        var dict: [String: Int] = [:]
+        dict.reserveCapacity(count)
+        for i in 0..<count {
+            let s = try readString()
+            dict[s] = i
+        }
+        return dict
+    }
+
+    /// Read a string array into [String] without enum wrapping.
+    mutating func readStringArrayDirect(count: Int) throws -> [String] {
+        var result: [String] = []
+        result.reserveCapacity(count)
+        for _ in 0..<count {
+            result.append(try readString())
+        }
+        return result
+    }
+
+    /// Read a float32 array into [Float] without enum wrapping.
+    mutating func readFloat32ArrayDirect(count: Int) throws -> [Float] {
+        var result: [Float] = []
+        result.reserveCapacity(count)
+        for _ in 0..<count {
+            result.append(try readFloat32())
+        }
+        return result
+    }
+
+    /// Read an int32 array into [Int] without enum wrapping.
+    mutating func readInt32ArrayDirect(count: Int) throws -> [Int] {
+        var result: [Int] = []
+        result.reserveCapacity(count)
+        for _ in 0..<count {
+            result.append(Int(try readInt32()))
+        }
+        return result
     }
 
     // MARK: - Helpers

@@ -53,10 +53,36 @@ extension GGUFFile {
 
     /// Look up a typed metadata value. Returns `nil` if the key is missing
     /// or the value cannot be extracted as the expected type.
+    ///
+    /// For deferred arrays, materializes the array from stored byte offsets
+    /// and runs the extract closure on it.
     package subscript<T>(key: GGUFMetadataKey<T>) -> T? {
         let fullKey = resolvedKey(for: key)
-        guard let value = metadata[fullKey] else { return nil }
-        return key.extract(value)
+        if let value = metadata[fullKey] {
+            return key.extract(value)
+        }
+        // Check deferred arrays — materialize on demand
+        if let da = deferredArrays[fullKey] {
+            let materialized = materializeDeferredArray(da)
+            return key.extract(.array(materialized))
+        }
+        return nil
+    }
+
+    /// Materialize a deferred array into [GGUFMetadataValue].
+    /// This is the slow fallback path — prefer direct deferred readers.
+    private func materializeDeferredArray(_ da: DeferredArray) -> [GGUFMetadataValue] {
+        var reader = GGUFReader(data: data)
+        reader.version = version
+        reader.setOffset(da.offset)
+        var elements: [GGUFMetadataValue] = []
+        elements.reserveCapacity(da.count)
+        for _ in 0..<da.count {
+            if let val = try? reader.readMetadataValue(type: da.elementType) {
+                elements.append(val)
+            }
+        }
+        return elements
     }
 
     /// Look up a required metadata value. Throws if missing or wrong type.

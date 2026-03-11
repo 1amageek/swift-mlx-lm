@@ -73,7 +73,7 @@ struct CohereConfiguration: Sendable {
         let normEps = file[.attentionLayerNormEpsilon]
             ?? file[.attentionLayerNormRMSEpsilon] ?? 1e-5
         let ropeTheta = file[.ropeFreqBase] ?? 10_000.0
-        let vocabSize = file[.tokens]?.count ?? file[.vocabularyLength] ?? 0
+        let vocabSize = file.vocabularySize ?? 0
         let tieWordEmbeddings = detectTieWordEmbeddings(from: file)
         let ropeScaling = extractRopeScaling(from: file)
         let hasQKNorm = file.tensors.contains { $0.name == "blk.0.attn_q_norm.weight" }

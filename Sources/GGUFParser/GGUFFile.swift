@@ -14,6 +14,7 @@ public struct GGUFFile: Sendable {
     public let version: UInt32
 
     /// All metadata key-value pairs.
+    /// Large tokenizer arrays are deferred (not in this dictionary).
     public let metadata: [String: GGUFMetadataValue]
 
     /// Tensor descriptors (name, shape, type, offset).
@@ -24,6 +25,18 @@ public struct GGUFFile: Sendable {
 
     /// Raw file data (memory-mapped).
     public let data: Data
+
+    /// Byte offsets for large arrays that were skipped during parsing.
+    /// Key is the metadata key, value describes how to read the array.
+    public struct DeferredArray: Sendable {
+        public let elementType: GGUFMetadataValueType
+        public let count: Int
+        /// Byte offset in `data` where the first element starts.
+        public let offset: Int
+    }
+
+    /// Deferred arrays (large tokenizer data skipped during parse).
+    public let deferredArrays: [String: DeferredArray]
 
     // MARK: - Parsing
 
@@ -36,6 +49,15 @@ public struct GGUFFile: Sendable {
         let data = try Data(contentsOf: url, options: .mappedIfSafe)
         return try parse(data: data)
     }
+
+    /// Keys whose arrays are large enough to justify deferred parsing.
+    /// These are skipped during parse() and read on demand.
+    private static let deferredKeys: Set<String> = [
+        "tokenizer.ggml.tokens",
+        "tokenizer.ggml.scores",
+        "tokenizer.ggml.token_type",
+        "tokenizer.ggml.merges",
+    ]
 
     /// Parse a GGUF file from raw data.
     public static func parse(data: Data) throws -> GGUFFile {
@@ -63,13 +85,41 @@ public struct GGUFFile: Sendable {
             metadataKVCount = Int(try reader.readUInt32())
         }
 
-        // Metadata
+        // Metadata — defer large tokenizer arrays
         var metadata: [String: GGUFMetadataValue] = [:]
         metadata.reserveCapacity(metadataKVCount)
+        var deferred: [String: DeferredArray] = [:]
+
         for _ in 0..<metadataKVCount {
             let key = try reader.readString()
-            let value = try reader.readMetadataValue()
-            metadata[key] = value
+
+            if deferredKeys.contains(key) {
+                // Read array header but skip element data
+                let rawType = try reader.readUInt32()
+                guard rawType == GGUFMetadataValueType.array.rawValue else {
+                    throw GGUFError.invalidMetadataValueType(rawType)
+                }
+                let rawElementType = try reader.readUInt32()
+                guard let elementType = GGUFMetadataValueType(rawValue: rawElementType) else {
+                    throw GGUFError.invalidMetadataValueType(rawElementType)
+                }
+                let count: Int
+                if version >= 3 {
+                    count = Int(try reader.readUInt64())
+                } else {
+                    count = Int(try reader.readUInt32())
+                }
+                let elementOffset = reader.offset
+                // Skip all elements without allocating
+                for _ in 0..<count {
+                    try reader.skipMetadataValue(type: elementType)
+                }
+                deferred[key] = DeferredArray(
+                    elementType: elementType, count: count, offset: elementOffset)
+            } else {
+                let value = try reader.readMetadataValue()
+                metadata[key] = value
+            }
         }
 
         // Tensor directory
@@ -96,7 +146,8 @@ public struct GGUFFile: Sendable {
             metadata: metadata,
             tensors: tensors,
             tensorDataOffset: tensorDataOffset,
-            data: data
+            data: data,
+            deferredArrays: deferred
         )
     }
 
@@ -115,6 +166,74 @@ public struct GGUFFile: Sendable {
             throw GGUFError.unexpectedEndOfData(context: "tensor data out of bounds for \(tensor.name)")
         }
         return data[data.startIndex + start ..< data.startIndex + end]
+    }
+}
+
+// MARK: - Deferred Array Readers
+
+extension GGUFFile {
+
+    /// Read a deferred string array directly into [String].
+    /// Single pass, no enum wrapping.
+    public func readDeferredStringArray(_ key: String) -> [String]? {
+        guard let da = deferredArrays[key], da.elementType == .string else { return nil }
+        var reader = GGUFReader(data: data)
+        reader.version = version
+        reader.setOffset(da.offset)
+        return try? reader.readStringArrayDirect(count: da.count)
+    }
+
+    /// Read a deferred string array and build [String: Int] dictionary in one pass.
+    /// Index = position in array.
+    public func readDeferredStringDictionary(_ key: String) -> [String: Int]? {
+        guard let da = deferredArrays[key], da.elementType == .string else { return nil }
+        var reader = GGUFReader(data: data)
+        reader.version = version
+        reader.setOffset(da.offset)
+        return try? reader.readStringArrayAsDictionary(count: da.count)
+    }
+
+    /// Read a deferred float32 array directly into [Float].
+    public func readDeferredFloat32Array(_ key: String) -> [Float]? {
+        guard let da = deferredArrays[key], da.elementType == .float32 else { return nil }
+        var reader = GGUFReader(data: data)
+        reader.version = version
+        reader.setOffset(da.offset)
+        return try? reader.readFloat32ArrayDirect(count: da.count)
+    }
+
+    /// Read a deferred int32 array directly into [Int].
+    public func readDeferredInt32Array(_ key: String) -> [Int]? {
+        guard let da = deferredArrays[key],
+              da.elementType == .int32 || da.elementType == .uint32 else { return nil }
+        var reader = GGUFReader(data: data)
+        reader.version = version
+        reader.setOffset(da.offset)
+        return try? reader.readInt32ArrayDirect(count: da.count)
+    }
+
+    /// Read a deferred string array and produce BOTH [String] and [String: Int]
+    /// in a single pass (avoids reading the bytes twice).
+    public func readDeferredVocabulary(_ key: String) -> (vocabulary: [String], tokenToID: [String: Int])? {
+        guard let da = deferredArrays[key], da.elementType == .string else { return nil }
+        var reader = GGUFReader(data: data)
+        reader.version = version
+        reader.setOffset(da.offset)
+        var vocab: [String] = []
+        var dict: [String: Int] = [:]
+        vocab.reserveCapacity(da.count)
+        dict.reserveCapacity(da.count)
+        for i in 0..<da.count {
+            guard let s = try? reader.readString() else { break }
+            vocab.append(s)
+            dict[s] = i
+        }
+        return (vocab, dict)
+    }
+
+    /// Count of elements in a deferred array, or nil if not deferred.
+    public func deferredArrayCount(_ key: String) -> Int? {
+        deferredArrays[key]?.count
     }
 }
 

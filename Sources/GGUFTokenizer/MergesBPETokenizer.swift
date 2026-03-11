@@ -114,6 +114,58 @@ struct MergesBPETokenizer: Tokenizer, Sendable {
         }
     }
 
+    /// Fast init with pre-built dictionaries (avoids redundant iteration).
+    /// Used by GGUFTokenizerFactory when deferred arrays are available.
+    init(
+        vocabulary: [String],
+        tokenToID: [String: Int],
+        mergeRanks: [String: Int],
+        preTokenizer: PreTokenizer,
+        specialTokens: SpecialTokens,
+        tokenTypes: [Int] = []
+    ) {
+        self.vocabulary = vocabulary
+        self.tokenToID = tokenToID
+        self.mergeRanks = mergeRanks
+        self.preTokenizer = preTokenizer
+        self.specialTokens = specialTokens
+        self.tokenTypes = tokenTypes
+
+        // Build control token set (same logic as primary init)
+        var control = Set<String>()
+        var specialIDs: [String: Int] = [:]
+        let types = tokenTypes.isEmpty ? Array(repeating: 1, count: vocabulary.count) : tokenTypes
+        for (id, tokenType) in types.enumerated() where id < vocabulary.count {
+            if tokenType == 3 || tokenType == 4 {
+                let token = vocabulary[id]
+                control.insert(token)
+                specialIDs[token] = id
+            }
+        }
+        self.controlTokens = control
+
+        for specialID in [
+            specialTokens.bosTokenID,
+            specialTokens.eosTokenID,
+            specialTokens.unknownTokenID,
+            specialTokens.paddingTokenID,
+        ] {
+            guard let specialID,
+                  specialID >= 0,
+                  specialID < vocabulary.count
+            else { continue }
+            specialIDs[vocabulary[specialID]] = specialID
+        }
+
+        self.specialTokenIDs = specialIDs
+        self.specialTokenLiterals = specialIDs.keys.sorted { lhs, rhs in
+            if lhs.count != rhs.count {
+                return lhs.count > rhs.count
+            }
+            return lhs < rhs
+        }
+    }
+
     // MARK: - Tokenizer
 
     func encode(text: String) -> [Int] {

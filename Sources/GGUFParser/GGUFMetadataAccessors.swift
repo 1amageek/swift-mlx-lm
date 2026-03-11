@@ -108,23 +108,39 @@ extension GGUFFile {
     }
 
     /// Token vocabulary as an array of strings.
+    /// Uses deferred array path for fast single-pass reading.
     public var tokens: [String]? {
-        metadata["tokenizer.ggml.tokens"]?.arrayValue?.compactMap(\.stringValue)
+        if let deferred = readDeferredStringArray("tokenizer.ggml.tokens") {
+            return deferred
+        }
+        return metadata["tokenizer.ggml.tokens"]?.arrayValue?.compactMap(\.stringValue)
     }
 
     /// Token scores (SentencePiece).
+    /// Uses deferred array path for fast single-pass reading.
     public var tokenScores: [Float]? {
-        metadata["tokenizer.ggml.scores"]?.arrayValue?.compactMap(\.float32Value)
+        if let deferred = readDeferredFloat32Array("tokenizer.ggml.scores") {
+            return deferred
+        }
+        return metadata["tokenizer.ggml.scores"]?.arrayValue?.compactMap(\.float32Value)
     }
 
     /// Token types.
+    /// Uses deferred array path for fast single-pass reading.
     public var tokenTypes: [Int]? {
-        metadata["tokenizer.ggml.token_type"]?.arrayValue?.compactMap(\.intValue)
+        if let deferred = readDeferredInt32Array("tokenizer.ggml.token_type") {
+            return deferred
+        }
+        return metadata["tokenizer.ggml.token_type"]?.arrayValue?.compactMap(\.intValue)
     }
 
     /// BPE merge rules.
+    /// Uses deferred array path for fast single-pass reading.
     public var merges: [String]? {
-        metadata["tokenizer.ggml.merges"]?.arrayValue?.compactMap(\.stringValue)
+        if let deferred = readDeferredStringArray("tokenizer.ggml.merges") {
+            return deferred
+        }
+        return metadata["tokenizer.ggml.merges"]?.arrayValue?.compactMap(\.stringValue)
     }
 
     /// Pre-tokenizer type.
@@ -316,7 +332,9 @@ extension GGUFFile {
     // MARK: - Vocabulary Size
 
     /// Vocabulary size derived from token list or architecture metadata.
+    /// Uses deferred array count to avoid materializing the full token list.
     public var vocabularySize: Int? {
+        if let count = deferredArrayCount("tokenizer.ggml.tokens") { return count }
         if let count = tokens?.count { return count }
         return vocabularyLength
     }
