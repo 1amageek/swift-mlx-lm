@@ -398,6 +398,52 @@ struct InferenceCompilerTests {
         // Allow small numerical differences
         #expect(maxDiff < 1e-4, "Max diff \(maxDiff) exceeds threshold 1e-4")
     }
+
+    @Test("CompilationStats: all projections packed for dense weights")
+    func compilationStatsDense() throws {
+        let model = TinyLlama(layerCount: 4)
+        let graph = try model.makeModelGraph()
+        let weights = tinyLlamaWeights(layerCount: 4)
+
+        let compiled = try MLXInferenceCompiler().compile(graph: graph, weights: weights)
+        let stats = compiled.metadata.compilationStats
+
+        // 4 layers × 1 attention = 4 packed, 0 unpacked
+        #expect(stats.packedAttentionCount == 4)
+        #expect(stats.unpackedAttentionCount == 0)
+
+        // 4 layers × 1 MLP (gated) = 4 packed, 0 unpacked
+        #expect(stats.packedMLPCount == 4)
+        #expect(stats.unpackedMLPCount == 0)
+        #expect(stats.ungatedMLPCount == 0)
+
+        // All sub-layers should be fused (4 attn + 4 mlp = 8 fused)
+        #expect(stats.fusedSubLayerCount == 8)
+        #expect(stats.unfusedResidualCount == 0)
+    }
+
+    @Test("CompilationStats: scaling with layer count")
+    func compilationStatsScaling() throws {
+        for layerCount in [1, 2, 8] {
+            let model = TinyLlama(layerCount: layerCount)
+            let graph = try model.makeModelGraph()
+            let weights = tinyLlamaWeights(layerCount: layerCount)
+
+            let compiled = try MLXInferenceCompiler().compile(graph: graph, weights: weights)
+            let stats = compiled.metadata.compilationStats
+
+            #expect(
+                stats.packedAttentionCount == layerCount,
+                "Expected \(layerCount) packed attention, got \(stats.packedAttentionCount)"
+            )
+            #expect(
+                stats.packedMLPCount == layerCount,
+                "Expected \(layerCount) packed MLP, got \(stats.packedMLPCount)"
+            )
+            #expect(stats.unpackedAttentionCount == 0)
+            #expect(stats.unpackedMLPCount == 0)
+        }
+    }
 }
 
 // MARK: - Position Tracking Tests

@@ -45,6 +45,40 @@ public struct DecodePlan: @unchecked Sendable {
     }
 }
 
+// MARK: - Compilation Statistics
+
+/// Statistics about projection packing decisions made during compilation.
+///
+/// Use these counters to verify that the compiler is packing projections
+/// as expected. Any non-zero `unpacked` count indicates a fallback to
+/// individual matmuls — typically caused by mixed kernel variants or
+/// incompatible quantization parameters across projections.
+public struct CompilationStats: Sendable, Equatable {
+
+    /// Number of attention layers where QKV packing succeeded.
+    public var packedAttentionCount: Int = 0
+
+    /// Number of attention layers where QKV packing failed (fallback).
+    public var unpackedAttentionCount: Int = 0
+
+    /// Number of MLP layers where gate+up packing succeeded.
+    public var packedMLPCount: Int = 0
+
+    /// Number of MLP layers where gate+up packing failed (fallback).
+    public var unpackedMLPCount: Int = 0
+
+    /// Number of MLP layers where gating is disabled (packing not applicable).
+    public var ungatedMLPCount: Int = 0
+
+    /// Number of fused sub-layers produced during step flattening.
+    public var fusedSubLayerCount: Int = 0
+
+    /// Number of unfused residual blocks (fallback).
+    public var unfusedResidualCount: Int = 0
+
+    public init() {}
+}
+
 // MARK: - Metadata
 
 /// Metadata about the compiled inference model.
@@ -59,14 +93,19 @@ public struct InferenceMetadata: Sendable {
     /// Whether the output head is tied to the embedding.
     public let hasTiedOutputHead: Bool
 
+    /// Statistics about compiler optimizations applied.
+    public let compilationStats: CompilationStats
+
     public init(
         cacheSlotCount: Int,
         cacheDescriptors: [CacheDescriptor],
-        hasTiedOutputHead: Bool
+        hasTiedOutputHead: Bool,
+        compilationStats: CompilationStats = CompilationStats()
     ) {
         self.cacheSlotCount = cacheSlotCount
         self.cacheDescriptors = cacheDescriptors
         self.hasTiedOutputHead = hasTiedOutputHead
+        self.compilationStats = compilationStats
     }
 }
 

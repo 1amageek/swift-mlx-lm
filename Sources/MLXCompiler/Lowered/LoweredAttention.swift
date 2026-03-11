@@ -4,19 +4,22 @@ import SwiftLM
 
 /// Lowered attention operation with compile-time kernel selection.
 ///
-/// Contains 4 lowered projections (Q, K, V, O), optional QK normalization,
-/// optional RoPE, and SDPA. Cache slot is resolved at compile time.
+/// Uses packed QKV projection (single matmul + split) when all three projections
+/// share the same kernel variant. Falls back to individual projections otherwise.
 ///
 /// Reference: `MLXExecutor.executeAttention()` in `MLXExecutor.swift:410-527`.
 public struct LoweredAttention: @unchecked Sendable {
 
-    /// Query projection.
-    public let qProj: LoweredProjection
-    /// Key projection.
-    public let kProj: LoweredProjection
-    /// Value projection.
-    public let vProj: LoweredProjection
-    /// Output projection.
+    /// Packed Q/K/V projection (single matmul + split).
+    /// Non-nil when packing succeeded at compile time.
+    public let qkvPacked: PackedProjection?
+
+    /// Individual Q/K/V projections (fallback when packing is not possible).
+    public let qProj: LoweredProjection?
+    public let kProj: LoweredProjection?
+    public let vProj: LoweredProjection?
+
+    /// Output projection (never packed — different input than QKV).
     public let oProj: LoweredProjection
 
     /// Attention attributes (head count, KV head count, head dimension, etc.).
@@ -32,6 +35,31 @@ public struct LoweredAttention: @unchecked Sendable {
     /// Compile-time resolved cache slot index.
     public let cacheSlotIndex: Int
 
+    /// Initialize with packed QKV projection.
+    public init(
+        qkvPacked: PackedProjection,
+        oProj: LoweredProjection,
+        attrs: AttentionAttributes,
+        qNormWeight: MLXArray?,
+        kNormWeight: MLXArray?,
+        qNormBias: MLXArray?,
+        kNormBias: MLXArray?,
+        cacheSlotIndex: Int
+    ) {
+        self.qkvPacked = qkvPacked
+        self.qProj = nil
+        self.kProj = nil
+        self.vProj = nil
+        self.oProj = oProj
+        self.attrs = attrs
+        self.qNormWeight = qNormWeight
+        self.kNormWeight = kNormWeight
+        self.qNormBias = qNormBias
+        self.kNormBias = kNormBias
+        self.cacheSlotIndex = cacheSlotIndex
+    }
+
+    /// Initialize with individual Q/K/V projections (fallback).
     public init(
         qProj: LoweredProjection,
         kProj: LoweredProjection,
@@ -44,6 +72,7 @@ public struct LoweredAttention: @unchecked Sendable {
         kNormBias: MLXArray?,
         cacheSlotIndex: Int
     ) {
+        self.qkvPacked = nil
         self.qProj = qProj
         self.kProj = kProj
         self.vProj = vProj
@@ -62,10 +91,21 @@ public struct LoweredAttention: @unchecked Sendable {
         let headDim = attrs.headDimension
         let scale = 1.0 / Float(headDim).squareRoot()
 
-        // Project Q, K, V
-        var queries = qProj.apply(x)
-        var keys = kProj.apply(x)
-        var values = vProj.apply(x)
+        // Project Q, K, V — packed or individual
+        var queries: MLXArray
+        var keys: MLXArray
+        var values: MLXArray
+
+        if let qkvPacked {
+            let qkv = qkvPacked.apply(x)
+            queries = qkv[0]
+            keys = qkv[1]
+            values = qkv[2]
+        } else {
+            queries = qProj!.apply(x)
+            keys = kProj!.apply(x)
+            values = vProj!.apply(x)
+        }
 
         // Output gate: extract gate from packed Q projection
         var gateValues: MLXArray? = nil

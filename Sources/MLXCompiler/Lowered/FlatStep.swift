@@ -4,6 +4,8 @@ import SwiftLM
 /// Flattened execution step — no recursion needed.
 ///
 /// Residual connections use save/add markers instead of recursive nesting.
+/// Fused sub-layers replace `[saveResidual, op(norm), op(X), addResidual]`
+/// with a single step when the pattern is detected during flattening.
 /// Parallel branches are preserved as-is (rare, used only in MoE/hybrid models).
 public enum FlatStep: @unchecked Sendable {
 
@@ -15,6 +17,10 @@ public enum FlatStep: @unchecked Sendable {
 
     /// Add saved residual to current hidden state.
     case addResidual
+
+    /// Fused sub-layer: pre-norm + operation + residual add in one step.
+    /// Replaces [saveResidual, op(norm), op(X), addResidual] pattern.
+    case fusedSubLayer(FusedSubLayer)
 
     /// Parallel branches (kept recursive — rare in practice).
     case parallel(merge: ParallelMergeStrategy, branches: [[FlatStep]])
@@ -34,9 +40,14 @@ func flattenSteps(_ steps: [LoweredStep]) -> [FlatStep] {
             result.append(.op(op))
 
         case .residual(let body):
-            result.append(.saveResidual)
-            result.append(contentsOf: flattenSteps(body))
-            result.append(.addResidual)
+            // Try to fuse [norm, op] residual into a single step
+            if let fused = tryFuseResidual(body) {
+                result.append(.fusedSubLayer(fused))
+            } else {
+                result.append(.saveResidual)
+                result.append(contentsOf: flattenSteps(body))
+                result.append(.addResidual)
+            }
 
         case .parallel(let merge, let branches):
             let flatBranches = branches.map { flattenSteps($0) }
@@ -68,6 +79,9 @@ func executeFlatSteps(
 
         case .addResidual:
             h = residualStack.removeLast() + h
+
+        case .fusedSubLayer(let fused):
+            h = fused.apply(h, state: &state)
 
         case .parallel(let merge, let branches):
             let results = branches.map { branch in

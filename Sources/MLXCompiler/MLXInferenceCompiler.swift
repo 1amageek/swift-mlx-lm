@@ -89,10 +89,25 @@ public struct MLXInferenceCompiler: Sendable {
         let prefillPlan = PrefillPlan(steps: steps)
         let decodePlan = DecodePlan(steps: steps)
 
+        // Collect fusion stats from decode plan flattening
+        var stats = context.stats
+        for step in decodePlan.steps {
+            switch step {
+            case .fusedSubLayer:
+                stats.fusedSubLayerCount += 1
+            case .saveResidual:
+                // Each saveResidual marks an unfused residual block
+                stats.unfusedResidualCount += 1
+            default:
+                break
+            }
+        }
+
         let metadata = InferenceMetadata(
             cacheSlotCount: cacheDescriptors.count,
             cacheDescriptors: cacheDescriptors,
-            hasTiedOutputHead: hasTiedOutputHead
+            hasTiedOutputHead: hasTiedOutputHead,
+            compilationStats: stats
         )
 
         return MLXLoweredInferenceModel(
@@ -196,6 +211,7 @@ public struct MLXInferenceCompiler: Sendable {
         let store: InferenceWeightStore
         let cacheSlotByPath: [StructuralPath: Int]
         let embeddingTable: MLXArray?
+        var stats: CompilationStats = CompilationStats()
     }
 
     /// Lower a region into a sequence of `LoweredStep`s.
@@ -352,6 +368,10 @@ public struct MLXInferenceCompiler: Sendable {
     // MARK: - Operation Lowering Helpers
 
     /// Lower an attention operation.
+    ///
+    /// Attempts to pack Q/K/V projections into a single matmul + split.
+    /// Falls back to individual projections if packing is not possible
+    /// (e.g., mixed kernel variants or incompatible quantization parameters).
     private func lowerAttention(
         _ attrs: AttentionAttributes,
         path: StructuralPath,
@@ -381,6 +401,20 @@ public struct MLXInferenceCompiler: Sendable {
                 "No cache slot found for attention at \(path.components)")
         }
 
+        // Try to pack Q/K/V into a single matmul
+        if let packed = PackedProjection.pack([qProj, kProj, vProj]) {
+            context.stats.packedAttentionCount += 1
+            return LoweredAttention(
+                qkvPacked: packed, oProj: oProj,
+                attrs: attrs,
+                qNormWeight: qNormWeight, kNormWeight: kNormWeight,
+                qNormBias: qNormBias, kNormBias: kNormBias,
+                cacheSlotIndex: slotIndex
+            )
+        }
+
+        // Fallback to individual projections
+        context.stats.unpackedAttentionCount += 1
         return LoweredAttention(
             qProj: qProj, kProj: kProj, vProj: vProj, oProj: oProj,
             attrs: attrs,
@@ -391,6 +425,9 @@ public struct MLXInferenceCompiler: Sendable {
     }
 
     /// Lower an MLP operation.
+    ///
+    /// For gated variants, attempts to pack gate+up projections into a single
+    /// matmul + split. Falls back to individual projections if packing fails.
     private func lowerMLP(
         _ attrs: MLPAttributes,
         path: StructuralPath,
@@ -411,6 +448,22 @@ public struct MLXInferenceCompiler: Sendable {
                 store: context.store, path: path, field: "up_proj", hasBias: attrs.bias)
         }
 
+        // Try to pack gate+up into a single matmul (gated variants only)
+        if let upProj,
+           let packed = PackedProjection.pack([gateProj, upProj]) {
+            context.stats.packedMLPCount += 1
+            return LoweredMLP(
+                gateUpPacked: packed,
+                downProj: downProj,
+                activation: attrs.activation
+            )
+        }
+
+        if upProj == nil {
+            context.stats.ungatedMLPCount += 1
+        } else {
+            context.stats.unpackedMLPCount += 1
+        }
         return LoweredMLP(
             gateProj: gateProj, downProj: downProj,
             upProj: upProj, activation: attrs.activation
