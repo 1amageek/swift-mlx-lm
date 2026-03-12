@@ -1,4 +1,5 @@
 import Testing
+import TestHeartbeat
 import Foundation
 import GGUFParser
 import GGUFTokenizer
@@ -8,7 +9,7 @@ import GGUFTokenizer
 ///
 /// Uses the built-in timing instrumentation in GGUFModelLoader to capture
 /// per-stage durations. Results are printed to stdout for analysis.
-@Suite("GGUFModelLoader Profiling", .tags(.diagnostic), .serialized)
+@Suite("GGUFModelLoader Profiling", .tags(.diagnostic), .serialized, .heartbeat)
 struct LoaderProfilingTests {
 
     private static let cachedModelURL: URL = {

@@ -1,4 +1,5 @@
 import Testing
+import TestHeartbeat
 import Foundation
 @testable import SwiftLM
 
@@ -73,7 +74,7 @@ private func makeTransformer(hiddenLayers: Int, moe: Transformer.MoEConfig? = ni
 
 // MARK: - Primitive Component Normalization
 
-@Suite("Performance: Primitive Normalization", .tags(.performance))
+@Suite("Performance: Primitive Normalization", .tags(.performance), .heartbeat)
 struct PrimitiveNormalizationPerformanceTests {
 
     @Test("TokenEmbedding normalization")
@@ -188,25 +189,11 @@ struct PrimitiveNormalizationPerformanceTests {
         #expect(d < .milliseconds(10))
     }
 
-    @Test("VisionEncoder normalization")
-    func visionEncoder() throws {
-        let comp = VisionEncoder(
-            hiddenSize: 1280,
-            outputSize: 3584,
-            depth: 32,
-            headCount: 16,
-            patchSize: 14,
-            intermediateSize: 5120
-        )
-        let d = try measure { _ = try normalize(comp) }
-        print("[perf] VisionEncoder normalize: \(d)")
-        #expect(d < .milliseconds(10))
-    }
 }
 
 // MARK: - Structural Component Normalization
 
-@Suite("Performance: Structural Normalization", .tags(.performance))
+@Suite("Performance: Structural Normalization", .tags(.performance), .heartbeat)
 struct StructuralNormalizationPerformanceTests {
 
     @Test("Residual normalization")
@@ -276,7 +263,7 @@ struct StructuralNormalizationPerformanceTests {
 
 // MARK: - End-to-End Model Normalization
 
-@Suite("Performance: Model Normalization", .tags(.performance))
+@Suite("Performance: Model Normalization", .tags(.performance), .heartbeat)
 struct ModelNormalizationPerformanceTests {
 
     @Test("TinyLlama 2 layers normalization")
@@ -357,7 +344,7 @@ struct ModelNormalizationPerformanceTests {
 
 // MARK: - Canonicalization Performance
 
-@Suite("Performance: Canonicalization", .tags(.performance))
+@Suite("Performance: Canonicalization", .tags(.performance), .heartbeat)
 struct CanonicalizationPerformanceTests {
 
     @Test("Canonicalize small graph (2 layers)")
@@ -409,7 +396,7 @@ struct CanonicalizationPerformanceTests {
 
 // MARK: - Validation Performance
 
-@Suite("Performance: Validation", .tags(.performance))
+@Suite("Performance: Validation", .tags(.performance), .heartbeat)
 struct ValidationPerformanceTests {
 
     @Test("GraphValidator small graph (2 layers)")
@@ -458,7 +445,7 @@ struct ValidationPerformanceTests {
 
 // MARK: - Codable Roundtrip Performance
 
-@Suite("Performance: Codable Roundtrip", .tags(.performance))
+@Suite("Performance: Codable Roundtrip", .tags(.performance), .heartbeat)
 struct CodablePerformanceTests {
 
     @Test("JSON encode small graph (2 layers)")
@@ -524,7 +511,7 @@ struct CodablePerformanceTests {
 
 // MARK: - Scaling Performance
 
-@Suite("Performance: Scaling", .tags(.performance))
+@Suite("Performance: Scaling", .tags(.performance), .heartbeat)
 struct ScalingPerformanceTests {
 
     @Test("Normalization scales linearly with non-repeated operations")
@@ -605,7 +592,7 @@ struct ScalingPerformanceTests {
 
 // MARK: - Equality Comparison Performance
 
-@Suite("Performance: Equality", .tags(.performance))
+@Suite("Performance: Equality", .tags(.performance), .heartbeat)
 struct EqualityPerformanceTests {
 
     @Test("Graph equality comparison (identical, 32 layers)")
@@ -642,7 +629,7 @@ struct EqualityPerformanceTests {
 
 // MARK: - Full Pipeline Performance
 
-@Suite("Performance: Full Pipeline", .tags(.performance))
+@Suite("Performance: Full Pipeline", .tags(.performance), .heartbeat)
 struct FullPipelinePerformanceTests {
 
     @Test("Full pipeline: normalize → canonicalize → validate → encode (32 layers)")

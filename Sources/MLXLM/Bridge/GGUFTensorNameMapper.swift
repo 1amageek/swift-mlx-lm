@@ -4,11 +4,11 @@ public protocol GGUFTensorNameMapper {
     func mlxName(for ggufName: String) -> String?
 }
 
-/// Tensor name mapper for Llama / Qwen2 / Mistral / Phi-3 / StarCoder2 architectures.
+/// Tensor name mapper for standard transformer decoders.
 ///
 /// Maps GGUF tensor names (e.g. `blk.0.attn_q.weight`) to
 /// MLX model weight paths (e.g. `model.layers.0.self_attn.q_proj.weight`).
-struct LlamaTensorNameMapper: GGUFTensorNameMapper {
+struct TransformerTensorNameMapper: GGUFTensorNameMapper {
 
     init() {}
 
@@ -110,12 +110,12 @@ struct LlamaTensorNameMapper: GGUFTensorNameMapper {
     }
 }
 
-/// Tensor name mapper for Gemma 2 architecture.
+/// Tensor name mapper for post-normalized transformer decoders.
 ///
-/// Extends Llama mapping with post-normalization weights.
-struct Gemma2TensorNameMapper: GGUFTensorNameMapper {
+/// Extends the standard transformer mapping with post-normalization weights.
+struct PostNormTransformerTensorNameMapper: GGUFTensorNameMapper {
 
-    private let base = LlamaTensorNameMapper()
+    private let base = TransformerTensorNameMapper()
 
     func mlxName(for ggufName: String) -> String? {
         // Check Gemma 2 specific tensors first
@@ -144,12 +144,12 @@ struct Gemma2TensorNameMapper: GGUFTensorNameMapper {
     }
 }
 
-/// Tensor name mapper for Cohere / Command-R architecture.
+/// Tensor name mapper for shared-norm parallel attention/MLP transformers.
 ///
 /// Adds QK normalization weight mappings.
-struct CohereTensorNameMapper: GGUFTensorNameMapper {
+struct ParallelAttentionMLPTensorNameMapper: GGUFTensorNameMapper {
 
-    private let base = LlamaTensorNameMapper()
+    private let base = TransformerTensorNameMapper()
 
     func mlxName(for ggufName: String) -> String? {
         if ggufName.hasPrefix("blk.") {
@@ -179,13 +179,13 @@ struct CohereTensorNameMapper: GGUFTensorNameMapper {
     }
 }
 
-/// Tensor name mapper for Mixtral MoE architecture.
+/// Tensor name mapper for MoE transformer decoders.
 ///
 /// Maps expert weights (ffn_gate_exps, ffn_up_exps, ffn_down_exps) and
 /// the router gate (ffn_gate_inp) to MLX model paths.
-struct MixtralTensorNameMapper: GGUFTensorNameMapper {
+struct MoETensorNameMapper: GGUFTensorNameMapper {
 
-    private let base = LlamaTensorNameMapper()
+    private let base = TransformerTensorNameMapper()
 
     func mlxName(for ggufName: String) -> String? {
         if ggufName.hasPrefix("blk.") {
@@ -237,13 +237,13 @@ struct MixtralTensorNameMapper: GGUFTensorNameMapper {
     }
 }
 
-/// Tensor name mapper for Qwen 3.5 hybrid DeltaNet architecture.
+/// Tensor name mapper for the hybrid DeltaNet / full-attention architecture.
 ///
 /// Maps both DeltaNet layer tensors (linear_attn.*) and full attention layer tensors (self_attn.*).
-/// GGUF tensor names are provisional — will need updates when llama.cpp adds Qwen 3.5 support.
-struct Qwen35TensorNameMapper: GGUFTensorNameMapper {
+/// GGUF tensor names are provisional and derived from the current hybrid GGUF layout.
+struct HybridDeltaNetAttentionTensorNameMapper: GGUFTensorNameMapper {
 
-    private let base = LlamaTensorNameMapper()
+    private let base = TransformerTensorNameMapper()
 
     func mlxName(for ggufName: String) -> String? {
         // Global tensors handled by base mapper
@@ -294,7 +294,7 @@ struct Qwen35TensorNameMapper: GGUFTensorNameMapper {
             break
         }
 
-        // Fall back to standard Llama mapping for shared tensors
+        // Fall back to standard transformer mapping for shared tensors
         return base.mlxName(for: ggufName)
     }
 }

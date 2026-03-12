@@ -96,7 +96,7 @@ final class GraphParallel: Module, UnaryLayer {
             return concatenated(results, axis: -1)
         case .stack:
             return stacked(results)
-        case .visionMerge, .custom:
+        case .custom:
             fatalError("Unsupported parallel merge strategy: \(merge)")
         }
     }

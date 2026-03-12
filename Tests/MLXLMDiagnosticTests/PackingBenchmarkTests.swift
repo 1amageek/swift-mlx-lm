@@ -1,11 +1,12 @@
 import Testing
+import TestHeartbeat
 import Foundation
 import MLX
 import GGUFParser
 @testable import MLXLM
 
 /// Benchmark weight packing speed on real GGUF model.
-@Suite("Packing Benchmark", .tags(.diagnostic))
+@Suite("Packing Benchmark", .tags(.diagnostic), .heartbeat)
 struct PackingBenchmarkTests {
 
     private static let cachedModelPath: String = {

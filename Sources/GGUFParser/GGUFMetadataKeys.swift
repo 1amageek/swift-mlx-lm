@@ -150,4 +150,9 @@ extension GGUFMetadataKey where T == [Int] {
     package static let tokenTypes = Self(
         path: "token_type", scope: .tokenizer
     ) { $0.arrayValue?.compactMap(\.intValue) }
+
+    /// M-RoPE section sizes (e.g. [16,24,24] for Qwen 2.5-VL).
+    package static let ropeScalingSections = Self(
+        path: "rope.scaling.sections", scope: .architecture
+    ) { $0.arrayValue?.compactMap(\.intValue) }
 }

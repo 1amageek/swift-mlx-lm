@@ -3,6 +3,7 @@ import GGUFParser
 import MLX
 import MLXNN
 import Testing
+import TestHeartbeat
 @testable import MLXLM
 
 /// Step 3: Verify the gated RMS norm weight convention.
@@ -18,7 +19,7 @@ import Testing
 /// - Ours: (1 + weight) * rms_norm(x) ≈ 2 * rms_norm(x) ← WRONG
 ///
 /// This test checks what values the loaded norm weights actually have.
-@Suite("Qwen3.5 Norm Convention Verification", .tags(.diagnostic))
+@Suite("Qwen3.5 Norm Convention Verification", .tags(.diagnostic), .heartbeat)
 struct Qwen35NormConventionTests {
 
     private static let repo = "unsloth/Qwen3.5-0.8B-GGUF"

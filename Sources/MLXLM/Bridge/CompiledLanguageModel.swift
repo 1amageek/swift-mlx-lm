@@ -1,4 +1,4 @@
-import MLX
+@preconcurrency import MLX
 import MLXFast
 import MLXNN
 import MLXCompiler
@@ -214,13 +214,38 @@ final class CompiledKVCache: KVCache, Updatable, @unchecked Sendable {
     }
 }
 
+// MARK: - VLM Configuration
+
+/// Vision-language model configuration for CompiledLanguageModel.
+///
+/// When present, enables sequential chunk processing: text chunks use
+/// token embedding lookup, vision chunks use pre-computed embeddings
+/// from the external vision encoder. M-RoPE position IDs are computed
+/// for the full sequence and sliced per chunk.
+struct VLMConfig: @unchecked Sendable {
+
+    /// External vision encoder: pixels + grid THW → embeddings.
+    let visionEncoder: @Sendable (MLXArray, [(t: Int, h: Int, w: Int)]) -> MLXArray
+
+    /// Token ID for `<|image_pad|>` placeholder tokens.
+    let imageTokenId: Int
+
+    /// Token ID for `<|video_pad|>` placeholder tokens (nil if unsupported).
+    let videoTokenId: Int?
+
+    /// Spatial merge factor for vision patches (typically 2).
+    let spatialMergeSize: Int
+}
+
 // MARK: - CompiledLanguageModel
 
 /// Adapts `MLXLoweredInferenceModel` to the `LanguageModel` protocol.
 ///
-/// This wrapper enables compiled models to be used through the standard
-/// `ModelContext` → `TokenIterator` → `generate()` pipeline without changes
-/// to the generation infrastructure.
+/// Handles both text-only and VLM (vision-language) models through the
+/// same lowered inference path. For VLM:
+/// - Vision encoder runs separately (not in the IR graph)
+/// - Text decoder IR is identical to text-only (with M-RoPE axes configured)
+/// - Sequential chunk processing: text → vision → text, each updating KV cache
 ///
 /// The compiled model uses `InferenceState` (value-type) internally, which is
 /// wrapped in a `CompiledKVCache` (reference-type) for `KVCache` protocol
@@ -230,10 +255,21 @@ class CompiledLanguageModel: Module, LanguageModel, @unchecked Sendable {
 
     let lowered: MLXLoweredInferenceModel
 
-    init(lowered: MLXLoweredInferenceModel) {
+    /// Optional VLM configuration. When set, enables vision-language processing.
+    let vlmConfig: VLMConfig?
+
+    /// Tracks the M-RoPE text position for VLM decode steps.
+    /// Only used when `vlmConfig` is non-nil.
+    var mropeNextPosition: Int = 0
+
+    init(lowered: MLXLoweredInferenceModel, vlmConfig: VLMConfig? = nil) {
         self.lowered = lowered
+        self.vlmConfig = vlmConfig
         super.init()
     }
+
+    /// Whether this model has VLM capabilities.
+    var isVLM: Bool { vlmConfig != nil }
 
     // MARK: - LanguageModel Protocol
 
@@ -243,32 +279,47 @@ class CompiledLanguageModel: Module, LanguageModel, @unchecked Sendable {
         guard let compiledCache = cache?.first as? CompiledKVCache else {
             let freshState = lowered.makeState()
             let (logits, _) = lowered.prefill(
-                tokenIDs: input.tokens, state: freshState)
+                tokenIDs: input.tokens,
+                embeddings: input.embeddings,
+                positionIds: input.positionIds,
+                state: freshState)
             return LMOutput(logits: logits)
         }
 
-        let tokenCount = input.tokens.dim(input.tokens.ndim - 1)
+        let tokenCount: Int
+        if let embeddings = input.embeddings {
+            tokenCount = embeddings.dim(1)
+        } else {
+            tokenCount = input.tokens.dim(input.tokens.ndim - 1)
+        }
 
         if tokenCount > 1 {
-            // Prefill — processes the full prompt sequence
+            // Prefill — processes a prompt chunk (text or vision embeddings)
             let (logits, newState) = lowered.prefill(
-                tokenIDs: input.tokens, state: compiledCache.inferenceState)
+                tokenIDs: input.tokens,
+                embeddings: input.embeddings,
+                positionIds: input.positionIds,
+                state: compiledCache.inferenceState)
             compiledCache.inferenceState = newState
             return LMOutput(logits: logits)
         } else {
             // Decode — single token via optimized lowered path
-            // (PackedProjection + FusedBlock optimizations provide the speedup)
             //
-            // Note: MLX.compile() is NOT used here because InferenceState is a
-            // value type. lowered.decode() returns a new state rather than mutating
-            // in place. MLX.compile() tracks state via Updatable.innerState() which
-            // requires the same MLXArray references to persist across calls.
-            // The standard path works because KVCacheSimple mutates self.keys/values
-            // in place (reference type). To support MLX.compile() here, the lowered
-            // execution engine would need to be restructured to use reference-type
-            // cache state with in-place mutation.
+            // For VLM: generate sequential M-RoPE position IDs if not provided.
+            let positionIds: MLXArray?
+            if vlmConfig != nil {
+                positionIds = input.positionIds ?? makeSequentialPositionIds(
+                    batchSize: input.tokens.dim(0), seqLen: 1,
+                    startPosition: mropeNextPosition)
+                mropeNextPosition += 1
+            } else {
+                positionIds = input.positionIds
+            }
+
             let (logits, newState) = lowered.decode(
-                tokenIDs: input.tokens, state: compiledCache.inferenceState)
+                tokenIDs: input.tokens,
+                positionIds: positionIds,
+                state: compiledCache.inferenceState)
             compiledCache.inferenceState = newState
             return LMOutput(logits: logits)
         }
@@ -281,6 +332,7 @@ class CompiledLanguageModel: Module, LanguageModel, @unchecked Sendable {
 
     func newCache(parameters: GenerateParameters?) -> [KVCache] {
         let state = lowered.makeState()
+        mropeNextPosition = 0
         return [CompiledKVCache(inferenceState: state)]
     }
 
@@ -313,22 +365,279 @@ class CompiledLanguageModel: Module, LanguageModel, @unchecked Sendable {
         }
 
         let prefillOffset = compiledCache.offset
+
+        // VLM first prefill with image: sequential chunk processing
+        if let vlmConfig, prefillOffset == 0, let image = input.image {
+            let output = processVLMPrefill(
+                tokens: tokens, image: image, video: input.video,
+                vlmConfig: vlmConfig, compiledCache: compiledCache)
+            return .logits(output)
+        }
+
+        // VLM text-only first prefill: compute M-RoPE positions
+        if vlmConfig != nil, prefillOffset == 0 {
+            let (positionIds, nextTextPos) = computeMRoPEPositionIds(
+                inputIds: tokens, image: nil, video: nil)
+            self.mropeNextPosition = nextTextPos
+
+            let (logits, newState) = lowered.prefill(
+                tokenIDs: tokens, positionIds: positionIds,
+                state: compiledCache.inferenceState)
+            compiledCache.inferenceState = newState
+            return .logits(LMOutput(logits: logits))
+        }
+
+        // Standard text prefill (with windowing)
         let windowSize = windowSize ?? tokenCount
 
         if prefillOffset + windowSize < tokenCount {
             let chunk = tokens[0..., prefillOffset..<(prefillOffset + windowSize)]
-            let chunkInput = LMInput.Text(tokens: chunk)
+
+            // For VLM windowed prefill, generate sequential M-RoPE positions
+            let positionIds: MLXArray?
+            if vlmConfig != nil {
+                positionIds = makeSequentialPositionIds(
+                    batchSize: chunk.dim(0), seqLen: windowSize,
+                    startPosition: mropeNextPosition)
+                mropeNextPosition += windowSize
+            } else {
+                positionIds = nil
+            }
+
+            let chunkInput = LMInput.Text(tokens: chunk, positionIds: positionIds)
             let output = callAsFunction(chunkInput, cache: cache, state: nil)
             eval(output.logits)
             return .tokens(LMInput.Text(tokens: tokens))
         }
 
         let remaining = tokens[0..., prefillOffset...]
+
+        // For VLM remaining prefill, generate sequential M-RoPE positions
+        let positionIds: MLXArray?
+        let remainingLen = tokenCount - prefillOffset
+        if vlmConfig != nil {
+            positionIds = makeSequentialPositionIds(
+                batchSize: remaining.dim(0), seqLen: remainingLen,
+                startPosition: mropeNextPosition)
+            mropeNextPosition += remainingLen
+        } else {
+            positionIds = nil
+        }
+
         let output = callAsFunction(
-            LMInput.Text(tokens: remaining),
+            LMInput.Text(tokens: remaining, positionIds: positionIds),
             cache: cache,
             state: nil
         )
         return .logits(output)
+    }
+
+    // MARK: - VLM Sequential Chunk Processing
+
+    /// Process VLM prefill with sequential chunks.
+    ///
+    /// Pipeline (llama.cpp-style):
+    /// 1. Compute M-RoPE position IDs for the full mixed text+vision sequence
+    /// 2. Run vision encoder on image pixels → vision embeddings
+    /// 3. Split token sequence at vision placeholder boundaries
+    /// 4. Process each chunk: text via tokenIDs, vision via embeddings
+    /// 5. Each chunk updates the KV cache; return logits from the last chunk
+    private func processVLMPrefill(
+        tokens: MLXArray,
+        image: LMInput.ProcessedImage,
+        video: LMInput.ProcessedVideo?,
+        vlmConfig: VLMConfig,
+        compiledCache: CompiledKVCache
+    ) -> LMOutput {
+        // 1. Compute M-RoPE position IDs for full sequence
+        let (fullPositionIds, nextTextPos) = computeMRoPEPositionIds(
+            inputIds: tokens, image: image, video: video)
+        self.mropeNextPosition = nextTextPos
+
+        // 2. Run vision encoder
+        let gridTHW = (image.frames ?? []).map { (t: $0.t, h: $0.h, w: $0.w) }
+        let visionEmbeddings = vlmConfig.visionEncoder(image.pixels, gridTHW)
+
+        // 3. Split into chunks and process sequentially
+        let chunks = splitIntoChunks(
+            tokens: tokens, visionEmbeddings: visionEmbeddings,
+            positionIds: fullPositionIds, vlmConfig: vlmConfig)
+
+        var lastLogits: MLXArray!
+        for chunk in chunks {
+            let (logits, newState) = lowered.prefill(
+                tokenIDs: chunk.tokenIDs,
+                embeddings: chunk.embeddings,
+                positionIds: chunk.positionIds,
+                state: compiledCache.inferenceState)
+            compiledCache.inferenceState = newState
+            lastLogits = logits
+        }
+
+        return LMOutput(logits: lastLogits)
+    }
+
+    /// A chunk of tokens or embeddings for sequential prefill.
+    private struct PrefillChunk {
+        let tokenIDs: MLXArray
+        let embeddings: MLXArray?
+        let positionIds: MLXArray
+    }
+
+    /// Split a mixed text+vision token sequence into chunks at vision placeholder
+    /// boundaries. Text chunks carry tokenIDs; vision chunks carry embeddings.
+    private func splitIntoChunks(
+        tokens: MLXArray,
+        visionEmbeddings: MLXArray,
+        positionIds: MLXArray,
+        vlmConfig: VLMConfig
+    ) -> [PrefillChunk] {
+        let B = tokens.dim(0)
+        let S = tokens.dim(1)
+        let flatIds: [Int32] = tokens.reshaped(-1).asArray(Int32.self)
+        let imageId = Int32(vlmConfig.imageTokenId)
+        let videoId = vlmConfig.videoTokenId.map { Int32($0) }
+
+        var chunks: [PrefillChunk] = []
+        var currentStart = 0
+        var visionEmbOffset = 0
+        var i = 0
+
+        while i < S {
+            let tokenId = flatIds[i]
+            let isVision = tokenId == imageId
+                || (videoId.map { tokenId == $0 } ?? false)
+
+            if isVision {
+                // Flush preceding text chunk
+                if currentStart < i {
+                    chunks.append(PrefillChunk(
+                        tokenIDs: tokens[0..., currentStart..<i],
+                        embeddings: nil,
+                        positionIds: positionIds[0..., 0..., currentStart..<i]))
+                }
+
+                // Find end of contiguous vision token run
+                var j = i
+                while j < S {
+                    let t = flatIds[j]
+                    let isV = t == imageId || (videoId.map { t == $0 } ?? false)
+                    if !isV { break }
+                    j += 1
+                }
+                let visionLen = j - i
+
+                // Slice vision embeddings and position IDs
+                let visionEmb = visionEmbeddings[
+                    0..., visionEmbOffset..<(visionEmbOffset + visionLen), 0...]
+                let dummyTokens = MLXArray.zeros([B, visionLen]).asType(.int32)
+                chunks.append(PrefillChunk(
+                    tokenIDs: dummyTokens,
+                    embeddings: visionEmb,
+                    positionIds: positionIds[0..., 0..., i..<j]))
+
+                visionEmbOffset += visionLen
+                currentStart = j
+                i = j
+            } else {
+                i += 1
+            }
+        }
+
+        // Flush remaining text
+        if currentStart < S {
+            chunks.append(PrefillChunk(
+                tokenIDs: tokens[0..., currentStart..<S],
+                embeddings: nil,
+                positionIds: positionIds[0..., 0..., currentStart..<S]))
+        }
+
+        return chunks
+    }
+
+    // MARK: - M-RoPE Position ID Computation
+
+    /// Compute M-RoPE 3D position IDs for mixed text+vision sequences.
+    ///
+    /// Text tokens: all 3 axes get the same sequential position.
+    /// Vision tokens: temporal/height/width from grid layout (after spatial merge).
+    ///
+    /// - Returns: `(positionIds: [3, B, S], nextTextPosition: Int)`.
+    private func computeMRoPEPositionIds(
+        inputIds: MLXArray,
+        image: LMInput.ProcessedImage?,
+        video: LMInput.ProcessedVideo?
+    ) -> (MLXArray, Int) {
+        guard let vlmConfig else {
+            fatalError("computeMRoPEPositionIds called without VLM config")
+        }
+
+        let B = inputIds.dim(0)
+        let S = inputIds.dim(1)
+
+        var temporalPos = [Int32](repeating: 0, count: B * S)
+        var heightPos = [Int32](repeating: 0, count: B * S)
+        var widthPos = [Int32](repeating: 0, count: B * S)
+
+        let flatIds = inputIds.reshaped(-1)
+
+        var currentTextPos: Int32 = 0
+        var visionTokenIdx = 0
+        let allGrids = (image?.frames ?? []) + (video?.frames ?? [])
+        var gridIdx = 0
+
+        for i in 0..<(B * S) {
+            let tokenId: Int32 = flatIds[i].item()
+
+            let isVisionToken = tokenId == Int32(vlmConfig.imageTokenId)
+                || (vlmConfig.videoTokenId.map { tokenId == Int32($0) } ?? false)
+            if isVisionToken {
+                if gridIdx < allGrids.count {
+                    let grid = allGrids[gridIdx]
+                    let mergedH = grid.h / vlmConfig.spatialMergeSize
+                    let mergedW = grid.w / vlmConfig.spatialMergeSize
+                    let totalMerged = grid.t * mergedH * mergedW
+
+                    let posInGrid = visionTokenIdx
+                    let tPos = posInGrid / (mergedH * mergedW)
+                    let hPos = (posInGrid % (mergedH * mergedW)) / mergedW
+                    let wPos = posInGrid % mergedW
+
+                    temporalPos[i] = currentTextPos + Int32(tPos)
+                    heightPos[i] = currentTextPos + Int32(hPos)
+                    widthPos[i] = currentTextPos + Int32(wPos)
+
+                    visionTokenIdx += 1
+                    if visionTokenIdx >= totalMerged {
+                        currentTextPos += Int32(max(grid.t, max(mergedH, mergedW)))
+                        visionTokenIdx = 0
+                        gridIdx += 1
+                    }
+                }
+            } else {
+                temporalPos[i] = currentTextPos
+                heightPos[i] = currentTextPos
+                widthPos[i] = currentTextPos
+                currentTextPos += 1
+            }
+        }
+
+        let tArray = MLXArray(temporalPos).reshaped(B, S)
+        let hArray = MLXArray(heightPos).reshaped(B, S)
+        let wArray = MLXArray(widthPos).reshaped(B, S)
+
+        return (stacked([tArray, hArray, wArray], axis: 0), Int(currentTextPos))
+    }
+
+    /// Create sequential M-RoPE position IDs where all 3 axes share the same
+    /// sequential positions. Used for text-only decode steps after VLM prefill.
+    private func makeSequentialPositionIds(
+        batchSize: Int, seqLen: Int, startPosition: Int
+    ) -> MLXArray {
+        let positions = tiled(
+            MLXArray(Int32(startPosition)..<Int32(startPosition + seqLen))
+                .reshaped(1, seqLen),
+            repetitions: [batchSize, 1])
+        return stacked([positions, positions, positions], axis: 0)
     }
 }

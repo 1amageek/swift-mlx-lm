@@ -64,7 +64,8 @@ func flattenSteps(_ steps: [LoweredStep]) -> [FlatStep] {
 /// Eliminates recursive dispatch overhead for single-token decode.
 /// The residual stack replaces nested `.residual(body:)` with push/pop markers.
 func executeFlatSteps(
-    _ steps: [FlatStep], input: MLXArray, state: inout InferenceState
+    _ steps: [FlatStep], input: MLXArray, state: inout InferenceState,
+    options: ExecutionOptions = .default
 ) -> MLXArray {
     var h = input
     var residualStack: [MLXArray] = []
@@ -72,7 +73,7 @@ func executeFlatSteps(
     for step in steps {
         switch step {
         case .op(let op):
-            h = executeOp(op, input: h, state: &state)
+            h = executeOp(op, input: h, state: &state, options: options)
 
         case .saveResidual:
             residualStack.append(h)
@@ -81,12 +82,13 @@ func executeFlatSteps(
             h = residualStack.removeLast() + h
 
         case .fusedSubLayer(let fused):
-            h = fused.apply(h, state: &state)
+            h = fused.apply(h, state: &state, options: options)
 
         case .parallel(let merge, let branches):
             let results = branches.map { branch in
                 var branchState = state
-                let result = executeFlatSteps(branch, input: h, state: &branchState)
+                let result = executeFlatSteps(
+                    branch, input: h, state: &branchState, options: options)
                 state = branchState
                 return result
             }

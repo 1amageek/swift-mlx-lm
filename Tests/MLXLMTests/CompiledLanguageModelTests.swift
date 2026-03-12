@@ -1,4 +1,5 @@
 import Testing
+import TestHeartbeat
 @preconcurrency import MLX
 import MLXFast
 import MLXNN
@@ -115,7 +116,7 @@ private func compileModel(layerCount: Int) throws -> CompiledLanguageModel {
 
 // MARK: - CompiledKVCache Tests
 
-@Suite("CompiledKVCache", .serialized, .tags(.unit, .compiled))
+@Suite("CompiledKVCache", .serialized, .tags(.unit, .compiled), .heartbeat)
 struct CompiledKVCacheTests {
 
     @Test("Offset reflects nextPosition from InferenceState")
@@ -186,7 +187,7 @@ struct CompiledKVCacheTests {
 
 // MARK: - CompiledLanguageModel Protocol Conformance Tests
 
-@Suite("CompiledLanguageModel", .serialized, .tags(.integration, .compiled))
+@Suite("CompiledLanguageModel", .serialized, .tags(.integration, .compiled), .heartbeat)
 struct CompiledLanguageModelTests {
 
     @Test("Conforms to LanguageModel protocol")
@@ -384,7 +385,7 @@ struct CompiledLanguageModelTests {
 
 // MARK: - P1: Sanitize Equivalence Tests
 
-@Suite("CompiledPathSanitize", .serialized, .tags(.unit, .compiled))
+@Suite("CompiledPathSanitize", .serialized, .tags(.unit, .compiled), .heartbeat)
 struct CompiledPathSanitizeTests {
 
     @Test("Default sanitizeCompiledWeights filters rotary_emb.inv_freq")
@@ -494,7 +495,7 @@ struct CompiledPathSanitizeTests {
 
 // MARK: - P2: PromptCacheSnapshot Interop Tests
 
-@Suite("CompiledKVCacheSnapshot", .serialized, .tags(.integration, .compiled))
+@Suite("CompiledKVCacheSnapshot", .serialized, .tags(.integration, .compiled), .heartbeat)
 struct CompiledKVCacheSnapshotTests {
 
     @Test("state getter returns non-empty arrays after prefill")
@@ -630,7 +631,7 @@ struct CompiledKVCacheSnapshotTests {
 
 // MARK: - Binder Tests (retained from original)
 
-@Suite("CompiledPathBinder", .serialized, .tags(.unit, .compiled))
+@Suite("CompiledPathBinder", .serialized, .tags(.unit, .compiled), .heartbeat)
 struct CompiledPathBinderTests {
 
     @Test("MLXWeightPathBinder skips RawWeights tensors not matching any slot")
@@ -688,7 +689,7 @@ struct CompiledPathBinderTests {
 
 // MARK: - Integration: End-to-End Pipeline Tests
 
-@Suite("CompiledPipelineIntegration", .serialized, .tags(.integration, .compiled))
+@Suite("CompiledPipelineIntegration", .serialized, .tags(.integration, .compiled), .heartbeat)
 struct CompiledPipelineIntegrationTests {
 
     @Test("Compiled model works with TokenIterator-style usage pattern")

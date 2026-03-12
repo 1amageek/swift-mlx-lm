@@ -216,12 +216,6 @@ public indirect enum OperationKind: Codable, Equatable, Sendable {
     /// State-space model block (Mamba, DeltaNet, etc.).
     case stateSpace(StateSpaceAttributes)
 
-    /// Vision encoder: processes image/video pixels into dense feature vectors.
-    ///
-    /// Source operation (zero operands). Reads image data from
-    /// `ModelInputs.imagePixels` at runtime.
-    case visionEncoder(VisionEncoderAttributes)
-
     // MARK: - Structural Operations (region-bearing)
 
     /// Residual connection: output = input + f(input).

@@ -373,7 +373,7 @@ private extension ModelGraphSlotEnumerator {
 
             // MARK: Passthrough
 
-            case .rope, .custom, .visionEncoder:
+            case .rope, .custom:
                 // No weight parameters
                 break
             }

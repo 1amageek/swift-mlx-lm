@@ -185,7 +185,7 @@ struct TensorNameMapperLoRATests {
 
     @Test("Map LoRA A tensor names")
     func mapLoRAA() {
-        let mapper = LlamaTensorNameMapper()
+        let mapper = TransformerTensorNameMapper()
         #expect(mapper.mlxName(for: "blk.0.attn_q.loraA.weight") == "model.layers.0.self_attn.q_proj.lora_a")
         #expect(mapper.mlxName(for: "blk.3.attn_k.loraA.weight") == "model.layers.3.self_attn.k_proj.lora_a")
         #expect(mapper.mlxName(for: "blk.1.attn_v.loraA.weight") == "model.layers.1.self_attn.v_proj.lora_a")
@@ -197,7 +197,7 @@ struct TensorNameMapperLoRATests {
 
     @Test("Map LoRA B tensor names")
     func mapLoRAB() {
-        let mapper = LlamaTensorNameMapper()
+        let mapper = TransformerTensorNameMapper()
         #expect(mapper.mlxName(for: "blk.0.attn_q.loraB.weight") == "model.layers.0.self_attn.q_proj.lora_b")
         #expect(mapper.mlxName(for: "blk.5.ffn_down.loraB.weight") == "model.layers.5.mlp.down_proj.lora_b")
     }

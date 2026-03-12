@@ -1,9 +1,10 @@
 import Testing
+import TestHeartbeat
 import Foundation
 import GGUFParser
 @testable import MLXLM
 
-@Suite("Pack Function Benchmarks", .tags(.performance))
+@Suite("Pack Function Benchmarks", .tags(.performance), .heartbeat)
 struct PackBenchmarkTests {
 
     private let bridge = GGUFTensorBridge()

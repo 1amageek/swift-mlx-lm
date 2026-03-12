@@ -227,10 +227,6 @@ public struct MLXModuleCompiler: Sendable {
 
         // MARK: Unsupported
 
-        case .visionEncoder:
-            throw CompilerError.unsupportedOperation(
-                "visionEncoder is not yet implemented in MLXModuleCompiler")
-
         case .custom(let attrs):
             throw CompilerError.unsupportedOperation("custom(\(attrs.domain).\(attrs.name))")
         }

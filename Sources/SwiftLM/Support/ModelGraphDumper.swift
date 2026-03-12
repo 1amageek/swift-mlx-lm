@@ -221,20 +221,6 @@ public enum ModelGraphDumper {
         case .stateSpace(let a):
             return "stateSpace(hidden=\(a.hiddenSize), state=\(a.stateSize), variant=\(a.variant))"
 
-        case .visionEncoder(let a):
-            var parts = [
-                "hidden=\(a.hiddenSize)",
-                "out=\(a.outputSize)",
-                "depth=\(a.depth)",
-                "heads=\(a.headCount)",
-                "patch=\(a.patchSize)"
-            ]
-            if a.spatialMergeSize != 1 { parts.append("merge=\(a.spatialMergeSize)") }
-            if let t = a.temporalPatchSize { parts.append("temporal=\(t)") }
-            parts.append("\(a.mlpActivation)")
-            if a.mlpGating != .none { parts.append("\(a.mlpGating)") }
-            return "visionEncoder(\(parts.joined(separator: ", ")))"
-
         case .custom(let a):
             return "custom(\(a.domain).\(a.name))"
 
@@ -264,7 +250,6 @@ public enum ModelGraphDumper {
         case .add: return "add"
         case .concat: return "concat"
         case .stack: return "stack"
-        case .visionMerge: return "visionMerge"
         case .custom(let s): return "custom(\(s))"
         }
     }

@@ -2,12 +2,15 @@ import CoreImage
 import Foundation
 import MLX
 
-/// Image preprocessor for Qwen2.5-VL.
+/// Unified image preprocessor for vision-language models.
 ///
 /// Performs smart resizing (dimensions divisible by imageFactor, aspect ratio preserved),
-/// normalization, and pixel array construction for the vision encoder.
-/// All parameters come from ``Qwen25VLConfiguration/VisionConfiguration``.
-struct Qwen25VLImageProcessor: Sendable {
+/// normalization, and pixel array construction. All parameters come from ``VisionConfig``.
+///
+/// For Conv3d-based encoders (`temporalPatchSize > 1`), the single frame is
+/// tiled along the temporal axis. For Conv2d-based encoders (`temporalPatchSize == 1`),
+/// the output is `[1, H, W, C]`.
+struct VisionImageProcessor: Sendable {
 
     let imageFactor: Int
     let patchSize: Int
@@ -18,7 +21,7 @@ struct Qwen25VLImageProcessor: Sendable {
     let imageStd: [Float]
     let temporalPatchSize: Int
 
-    init(config: Qwen25VLConfiguration.VisionConfiguration) {
+    init(config: VisionConfig) {
         self.imageFactor = config.imageFactor
         self.patchSize = config.patchSize
         self.spatialMergeSize = config.spatialMergeSize
@@ -39,12 +42,10 @@ struct Qwen25VLImageProcessor: Sendable {
             height: Int(image.extent.height)
         )
 
-        // Resize the image
         let scaleX = CGFloat(resizedWidth) / image.extent.width
         let scaleY = CGFloat(resizedHeight) / image.extent.height
         let resized = image.transformed(by: CGAffineTransform(scaleX: scaleX, y: scaleY))
 
-        // Render to pixel buffer
         let context = CIContext()
         let colorSpace = CGColorSpace(name: CGColorSpace.sRGB)!
         let width = resizedWidth
@@ -67,25 +68,31 @@ struct Qwen25VLImageProcessor: Sendable {
             for x in 0..<width {
                 let srcIdx = y * bytesPerRow + x * 4
                 let dstIdx = y * width * 3 + x * 3
-                // Rescale [0,255] → [0,1], then normalize
                 floatPixels[dstIdx + 0] = (Float(pixelData[srcIdx + 0]) / 255.0 - imageMean[0]) / imageStd[0]
                 floatPixels[dstIdx + 1] = (Float(pixelData[srcIdx + 1]) / 255.0 - imageMean[1]) / imageStd[1]
                 floatPixels[dstIdx + 2] = (Float(pixelData[srcIdx + 2]) / 255.0 - imageMean[2]) / imageStd[2]
             }
         }
 
-        // Create MLXArray: [1, T=temporalPatchSize, H, W, C=3] (NDHWC for Conv3d)
-        // For single image, duplicate frame to match temporal_patch_size
-        let pixels = MLXArray(floatPixels, [1, height, width, 3])
-        let temporal = tiled(pixels.expandedDimensions(axis: 1), repetitions: [1, temporalPatchSize, 1, 1, 1])
+        let pixels: MLXArray
+        if temporalPatchSize > 1 {
+            // Conv3d: [1, T, H, W, C] — tile single frame along temporal axis
+            let frame = MLXArray(floatPixels, [1, height, width, 3])
+            pixels = tiled(
+                frame.expandedDimensions(axis: 1),
+                repetitions: [1, temporalPatchSize, 1, 1, 1]
+            )
+        } else {
+            // Conv2d: [1, H, W, C]
+            pixels = MLXArray(floatPixels, [1, height, width, 3])
+        }
 
-        // Grid dimensions (in patch units, before spatial merge)
         let gridH = height / patchSize
         let gridW = width / patchSize
-        let gridT = 1  // Single image = 1 temporal frame
+        let gridT = 1
 
         let thw = LMInput.THW(t: gridT, h: gridH, w: gridW)
-        return (temporal, thw)
+        return (pixels, thw)
     }
 
     /// Preprocess multiple images.
@@ -94,8 +101,8 @@ struct Qwen25VLImageProcessor: Sendable {
         var allTHW = [LMInput.THW]()
 
         for image in images {
-            let (pixels, thw) = try preprocess(image: image)
-            allPixels.append(pixels)
+            let (p, thw) = try preprocess(image: image)
+            allPixels.append(p)
             allTHW.append(thw)
         }
 
@@ -113,13 +120,11 @@ struct Qwen25VLImageProcessor: Sendable {
         var h = height
         var w = width
 
-        // Round to nearest multiple of factor
         h = max(factor, ((h + factor / 2) / factor) * factor)
         w = max(factor, ((w + factor / 2) / factor) * factor)
 
         let totalPixels = h * w
 
-        // Scale down if too many pixels
         if totalPixels > maxPixels {
             let scale = sqrt(Double(maxPixels) / Double(totalPixels))
             h = Int(Double(h) * scale)
@@ -128,7 +133,6 @@ struct Qwen25VLImageProcessor: Sendable {
             w = max(factor, (w / factor) * factor)
         }
 
-        // Scale up if too few pixels
         if h * w < minPixels {
             let scale = sqrt(Double(minPixels) / Double(h * w))
             h = Int(Double(h) * scale)

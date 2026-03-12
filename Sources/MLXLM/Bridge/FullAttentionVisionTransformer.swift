@@ -8,14 +8,14 @@ import MLXNN
 /// Extracts patches from images using 2D convolution.
 ///
 /// Input: `[N, H, W, C]` (NHWC) -> Output: `[totalPatches, hiddenSize]`.
-class Qwen35VLPatchEmbed: Module {
+class SpatialVisionPatchEmbedding: Module {
 
     @ModuleInfo(key: "proj") var proj: Conv2d
 
     let patchSize: Int
     let hiddenSize: Int
 
-    init(_ config: Qwen35VLConfiguration.VisionConfiguration) {
+    init(_ config: VisionConfig) {
         self.patchSize = config.patchSize
         self.hiddenSize = config.hiddenSize
 
@@ -39,7 +39,7 @@ class Qwen35VLPatchEmbed: Module {
 // MARK: - Vision Attention
 
 /// Multi-head attention for vision encoder with fused QKV and 2D-RoPE.
-class Qwen35VLVisionAttention: Module {
+class FullAttentionVisionAttention: Module {
 
     let numHeads: Int
     let headDim: Int
@@ -47,7 +47,7 @@ class Qwen35VLVisionAttention: Module {
     @ModuleInfo(key: "qkv") var qkv: Linear
     @ModuleInfo(key: "proj") var oProj: Linear
 
-    init(_ config: Qwen35VLConfiguration.VisionConfiguration) {
+    init(_ config: VisionConfig) {
         self.numHeads = config.numHeads
         self.headDim = config.headDim
         let dim = config.hiddenSize
@@ -66,8 +66,8 @@ class Qwen35VLVisionAttention: Module {
         let v = split[2].reshaped(seqLen, numHeads, headDim)
 
         // Apply 2D-RoPE (reuse algorithm from Qwen2.5-VL)
-        q = Qwen25VLVisionRoPE.apply(q, freqs: rotaryFreqs)
-        k = Qwen25VLVisionRoPE.apply(k, freqs: rotaryFreqs)
+        q = VisionRoPE2D.apply(q, freqs: rotaryFreqs)
+        k = VisionRoPE2D.apply(k, freqs: rotaryFreqs)
 
         // Reshape for SDPA: [1, H, S, D]
         let qT = q.expandedDimensions(axis: 0).transposed(0, 2, 1, 3)
@@ -99,12 +99,12 @@ class Qwen35VLVisionAttention: Module {
 /// GELU feed-forward network for Qwen 3.5 vision encoder.
 ///
 /// Uses standard fc1 + GELU + fc2 (NOT SwiGLU like Qwen2.5-VL).
-class Qwen35VLVisionMLP: Module {
+class GELUVisionMLP: Module {
 
     @ModuleInfo(key: "fc1") var fc1: Linear
     @ModuleInfo(key: "fc2") var fc2: Linear
 
-    init(_ config: Qwen35VLConfiguration.VisionConfiguration) {
+    init(_ config: VisionConfig) {
         let dim = config.hiddenSize
         let ffnDim = config.intermediateSize
 
@@ -120,18 +120,18 @@ class Qwen35VLVisionMLP: Module {
 // MARK: - Vision Block
 
 /// A single transformer block in the Qwen 3.5 vision encoder.
-class Qwen35VLVisionBlock: Module {
+class FullAttentionVisionBlock: Module {
 
     @ModuleInfo var norm1: RMSNorm
-    @ModuleInfo var attn: Qwen35VLVisionAttention
+    @ModuleInfo var attn: FullAttentionVisionAttention
     @ModuleInfo var norm2: RMSNorm
-    @ModuleInfo var mlp: Qwen35VLVisionMLP
+    @ModuleInfo var mlp: GELUVisionMLP
 
-    init(_ config: Qwen35VLConfiguration.VisionConfiguration) {
+    init(_ config: VisionConfig) {
         self._norm1.wrappedValue = RMSNorm(dimensions: config.hiddenSize, eps: config.normEps)
-        self._attn.wrappedValue = Qwen35VLVisionAttention(config)
+        self._attn.wrappedValue = FullAttentionVisionAttention(config)
         self._norm2.wrappedValue = RMSNorm(dimensions: config.hiddenSize, eps: config.normEps)
-        self._mlp.wrappedValue = Qwen35VLVisionMLP(config)
+        self._mlp.wrappedValue = GELUVisionMLP(config)
     }
 
     func callAsFunction(_ x: MLXArray, rotaryFreqs: MLXArray, mask: MLXArray?) -> MLXArray {
@@ -144,7 +144,7 @@ class Qwen35VLVisionBlock: Module {
 // MARK: - Patch Merger
 
 /// Merges 2x2 adjacent patches and projects to LLM hidden dimension.
-class Qwen35VLPatchMerger: Module {
+class FullAttentionVisionPatchMerger: Module {
 
     let spatialMergeSize: Int
     let hiddenSize: Int
@@ -152,7 +152,7 @@ class Qwen35VLPatchMerger: Module {
     @ModuleInfo(key: "ln_q") var lnQ: RMSNorm
     @ModuleInfo(key: "mlp") var mlp: MergerMLP
 
-    init(_ config: Qwen35VLConfiguration.VisionConfiguration) {
+    init(_ config: VisionConfig) {
         self.spatialMergeSize = config.spatialMergeSize
         self.hiddenSize = config.hiddenSize
 
@@ -213,22 +213,22 @@ class Qwen35VLPatchMerger: Module {
 ///
 /// Processes image pixels through Conv2d patch embedding, 12 transformer blocks
 /// with full attention (no windowing), and a patch merger that reduces token count 4x.
-class Qwen35VLVisionTransformer: Module, VisionEncoder {
+class FullAttentionVisionTransformer: Module, VisionEncoder {
 
-    let config: Qwen35VLConfiguration.VisionConfiguration
-    let rotaryEmb: Qwen25VLVisionRoPE
+    let config: VisionConfig
+    let rotaryEmb: VisionRoPE2D
 
-    @ModuleInfo(key: "patch_embed") var patchEmbed: Qwen35VLPatchEmbed
-    @ModuleInfo(key: "blocks") var blocks: [Qwen35VLVisionBlock]
-    @ModuleInfo(key: "merger") var merger: Qwen35VLPatchMerger
+    @ModuleInfo(key: "patch_embed") var patchEmbed: SpatialVisionPatchEmbedding
+    @ModuleInfo(key: "blocks") var blocks: [FullAttentionVisionBlock]
+    @ModuleInfo(key: "merger") var merger: FullAttentionVisionPatchMerger
 
-    init(_ config: Qwen35VLConfiguration.VisionConfiguration) {
+    init(_ config: VisionConfig) {
         self.config = config
-        self.rotaryEmb = Qwen25VLVisionRoPE(dim: config.headDim / 2)
+        self.rotaryEmb = VisionRoPE2D(dim: config.headDim / 2)
 
-        self._patchEmbed.wrappedValue = Qwen35VLPatchEmbed(config)
-        self._blocks.wrappedValue = (0..<config.depth).map { _ in Qwen35VLVisionBlock(config) }
-        self._merger.wrappedValue = Qwen35VLPatchMerger(config)
+        self._patchEmbed.wrappedValue = SpatialVisionPatchEmbedding(config)
+        self._blocks.wrappedValue = (0..<config.depth).map { _ in FullAttentionVisionBlock(config) }
+        self._merger.wrappedValue = FullAttentionVisionPatchMerger(config)
     }
 
     func callAsFunction(_ pixels: MLXArray, gridTHW: [LMInput.THW]) -> MLXArray {

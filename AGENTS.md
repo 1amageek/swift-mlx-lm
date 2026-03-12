@@ -138,6 +138,47 @@ The text model side demonstrates the right pattern: `TransformerModel` handles 1
 - Config extraction throws on missing required metadata instead of falling back to model-specific defaults
 - Token IDs are resolved from tokenizer vocabulary or GGUF metadata, not hardcoded
 
+### Family-Level Naming Rule
+
+Treat new architectures introduced by papers as reusable **families**, not product names.
+
+- `DeltaNet`, `MoE`, `parallel attention + MLP`, `windowed vision transformer`, and similar concepts are family-level abstractions.
+- `Qwen35`, `Cohere`, `Llama`, `Gemma`, `Mixtral`, and similar names are model/product names.
+
+Repository rules:
+
+- `Sources/SwiftLM/Declaration/**` and `Sources/MLXLM/Bridge/**` must use family-level names only.
+- Model-specific names are allowed only under `Sources/Models/**` and `Sources/MLXLM/Models/**`.
+- When supporting a new model, first ask whether it requires a new family component, tensor mapper, or lowering/kernel rule. Do not introduce a product-specific bridge/component name if a family name is possible.
+- Family components should be explicit in the DSL. For example, `DeltaNet` should exist as a component instead of being hidden behind a product-specific wrapper.
+
+This rule exists because future GGUF models may introduce unknown computation-graph families even when their weights are packaged in the same container format.
+
+### New Architecture Checklist
+
+When a new model paper lands, treat the work as architecture extraction first, implementation second.
+
+Required workflow:
+
+1. Read the paper and official implementation, then identify the paper-level novelty.
+2. Separate product/model naming from reusable graph-family naming.
+3. Decide whether the architecture can be expressed with existing families.
+4. If not, add the missing pieces at the family level:
+   - `ModelComponent`
+   - GGUF tensor mapper
+   - IR lowering / compiler support
+   - specialized kernel if the hot path would otherwise degrade
+5. Enumerate every required GGUF/mmproj metadata field needed to instantiate that family.
+6. Throw on missing required metadata; do not invent defaults in Swift code.
+7. Keep `GGUFGraphBuilder` detection and assembly product-agnostic.
+8. Only after the family exists, add or update model-specific declarations under `Sources/Models/**` or `Sources/MLXLM/Models/**`.
+
+What not to do:
+
+- Do not add a product-specific bridge/component name when a family name is possible.
+- Do not hide a new family behind generic strings if it deserves an explicit component.
+- Do not merge “missing metadata” and “known architecture default” into the same code path.
+
 ### Current Performance Goals
 
 The current performance milestone is to close the largest architectural gaps versus Ollama/llama.cpp-style GGUF serving. Work that touches inference performance should be evaluated against these four goals:
@@ -176,3 +217,4 @@ When tradeoffs conflict, prefer changes that improve these four areas over conve
 - All public types must be `Sendable`
 - `UserInputProcessor.prepare/preparePrefix` are async — VLM processors need async image loading
 - additionalContext flows through to Jinja template context — supports model-specific flags like `enable_thinking`
+- Missing required GGUF/mmproj metadata must be treated as an error, not patched with code defaults. `ModelComponent` defines required structure; it is not a fallback mechanism for missing metadata.

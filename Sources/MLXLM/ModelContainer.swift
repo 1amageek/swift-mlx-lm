@@ -282,7 +282,8 @@ public actor ModelContainer {
     }
 
     func usesAutomaticPrefixReuse(for input: LMInput) -> Bool {
-        if context.model is any VisionLanguageModel {
+        // VLM models cannot snapshot/restore vision state or M-RoPE positions.
+        if let compiled = context.model as? CompiledLanguageModel, compiled.isVLM {
             return false
         }
 

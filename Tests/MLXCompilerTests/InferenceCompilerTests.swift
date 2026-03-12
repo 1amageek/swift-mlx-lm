@@ -1,4 +1,5 @@
 import Testing
+import TestHeartbeat
 @preconcurrency import MLX
 import MLXFast
 import MLXNN
@@ -141,7 +142,7 @@ private func tinyLlamaWeights(layerCount: Int) -> BoundWeights {
 
 // MARK: - LoweredProjection Tests
 
-@Suite("LoweredProjection", .tags(.unit, .compiled))
+@Suite("LoweredProjection", .tags(.unit, .compiled), .heartbeat)
 struct LoweredProjectionTests {
 
     @Test("Dense kernel matches matmul(x, w.T)")
@@ -234,7 +235,7 @@ struct LoweredProjectionTests {
 
 // MARK: - InferenceWeightStore Tests
 
-@Suite("InferenceWeightStore", .tags(.unit, .compiled))
+@Suite("InferenceWeightStore", .tags(.unit, .compiled), .heartbeat)
 struct InferenceWeightStoreTests {
 
     @Test("Accepts MLXArray from BoundWeights")
@@ -286,7 +287,7 @@ struct InferenceWeightStoreTests {
 
 // MARK: - Inference Compiler Tests
 
-@Suite("MLXInferenceCompiler", .tags(.unit, .compiled))
+@Suite("MLXInferenceCompiler", .tags(.unit, .compiled), .heartbeat)
 struct InferenceCompilerTests {
 
     @Test("Compile TinyLlama: correct cache slot count")
@@ -448,7 +449,7 @@ struct InferenceCompilerTests {
 
 // MARK: - Position Tracking Tests
 
-@Suite("PositionTracking", .tags(.unit, .compiled))
+@Suite("PositionTracking", .tags(.unit, .compiled), .heartbeat)
 struct PositionTrackingTests {
 
     @Test("nextPosition updates after prefill and decode")
@@ -579,7 +580,7 @@ private func tinyUntiedWeights() -> BoundWeights {
     return bind(dict)
 }
 
-@Suite("UntiedOutputHead", .tags(.unit, .compiled))
+@Suite("UntiedOutputHead", .tags(.unit, .compiled), .heartbeat)
 struct UntiedOutputHeadTests {
 
     @Test("Untied output head compiles and produces correct output shape")
@@ -678,7 +679,7 @@ private func tinyPosEmbWeights() -> BoundWeights {
 
 // MARK: - Standalone Position Op Tests
 
-@Suite("StandalonePositionOps", .tags(.unit, .compiled))
+@Suite("StandalonePositionOps", .tags(.unit, .compiled), .heartbeat)
 struct StandalonePositionOpTests {
 
     @Test("Standalone RoPE uses state.nextPosition as offset")
@@ -797,7 +798,7 @@ struct StandalonePositionOpTests {
 
 // MARK: - LoweredNorm Tests
 
-@Suite("LoweredNorm", .tags(.unit, .compiled))
+@Suite("LoweredNorm", .tags(.unit, .compiled), .heartbeat)
 struct LoweredNormTests {
 
     @Test("RMSNorm matches MLXFast.rmsNorm")
@@ -816,7 +817,7 @@ struct LoweredNormTests {
 
 // MARK: - LoweredMLP Tests
 
-@Suite("LoweredMLP", .tags(.unit, .compiled))
+@Suite("LoweredMLP", .tags(.unit, .compiled), .heartbeat)
 struct LoweredMLPTests {
 
     @Test("Gated MLP (SwiGLU) produces correct shape")
@@ -863,7 +864,7 @@ struct LoweredMLPTests {
 
 // MARK: - LoweredCacheState Tests
 
-@Suite("LoweredCacheState", .tags(.unit, .compiled))
+@Suite("LoweredCacheState", .tags(.unit, .compiled), .heartbeat)
 struct LoweredCacheStateTests {
 
     @Test("KV cache grows correctly")
@@ -906,7 +907,7 @@ struct LoweredCacheStateTests {
 
 // MARK: - ModelGraphSlotEnumerator Tests
 
-@Suite("ModelGraphSlotEnumerator", .tags(.unit, .compiled))
+@Suite("ModelGraphSlotEnumerator", .tags(.unit, .compiled), .heartbeat)
 struct ModelGraphSlotEnumeratorTests {
 
     @Test("Enumerates TinyLlama slots with correct MLX paths")

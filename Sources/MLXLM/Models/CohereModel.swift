@@ -339,7 +339,7 @@ extension CohereModel: GGUFLoadableModel {
 
         return GGUFLoadResult(
             model: model,
-            mapper: CohereTensorNameMapper(),
+            mapper: ParallelAttentionMLPTensorNameMapper(),
             makeProcessor: { tokenizer, chatTemplate, bosToken, eosToken, addBosToken in
                 GGUFUserInputProcessor(
                     tokenizer: tokenizer, chatTemplate: chatTemplate,

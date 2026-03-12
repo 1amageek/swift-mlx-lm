@@ -75,17 +75,7 @@ struct PrefixReuseTests {
         #expect(!usesAutomaticReuse)
     }
 
-    @Test("Vision-language models bypass automatic prefix reuse")
-    func visionModelsBypassAutomaticReuse() async {
-        let container = makeContainer(model: VisionModel())
-        let input = LMInput(tokens: MLXArray([Int32(1), Int32(2)]).reshaped([1, 2]))
-
-        let usesAutomaticReuse = await container.usesAutomaticPrefixReuse(for: input)
-
-        #expect(!usesAutomaticReuse)
-    }
-
-    private func makeContainer(model: any LanguageModel) -> ModelContainer {
+private func makeContainer(model: any LanguageModel) -> ModelContainer {
         ModelContainer(
             context: ModelContext(
                 configuration: ModelConfiguration(name: "test"),
@@ -273,49 +263,4 @@ struct PrefixReuseTests {
         }
     }
 
-    private final class VisionModel: Module, VisionLanguageModel {
-        var imageTokenId: Int { 11 }
-        var videoTokenId: Int { 12 }
-        var spatialMergeSize: Int { 2 }
-        var nextPosition: Int = 0
-        var layerCount: Int { 1 }
-        var kvHeads: [Int] { [1] }
-
-        func encodeVision(
-            image: LMInput.ProcessedImage?,
-            video: LMInput.ProcessedVideo?
-        ) throws -> MLXArray? {
-            nil
-        }
-
-        func embedTokens(_ tokens: MLXArray) -> MLXArray {
-            let batchSize = tokens.dim(0)
-            let sequenceLength = tokens.dim(1)
-            return MLXArray.zeros([batchSize, sequenceLength, 1])
-        }
-
-        func forwardTextModel(
-            _ inputs: MLXArray,
-            cache: [KVCache]?,
-            inputEmbeddings: MLXArray?,
-            positionIds: MLXArray?
-        ) -> MLXArray {
-            let batchSize = inputs.dim(0)
-            let sequenceLength = inputs.dim(1)
-            return MLXArray.zeros([batchSize, sequenceLength, 1])
-        }
-
-        func forwardLogits(_ h: MLXArray) -> MLXArray {
-            MLXArray.zeros([h.dim(0), h.dim(1), 4])
-        }
-
-        func newCache(parameters: GenerateParameters?) -> [KVCache] {
-            nextPosition = 0
-            return [KVCacheSimple()]
-        }
-
-        func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {
-            weights
-        }
-    }
 }

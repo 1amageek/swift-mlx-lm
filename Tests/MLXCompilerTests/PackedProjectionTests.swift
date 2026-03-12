@@ -1,9 +1,10 @@
 import Testing
+import TestHeartbeat
 @preconcurrency import MLX
 @testable import SwiftLM
 @testable import MLXCompiler
 
-@Suite("PackedProjection Tests", .tags(.unit, .compiled))
+@Suite("PackedProjection Tests", .tags(.unit, .compiled), .heartbeat)
 struct PackedProjectionTests {
 
     // MARK: - Dense Packing

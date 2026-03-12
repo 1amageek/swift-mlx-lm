@@ -735,11 +735,11 @@ extension TransformerModel: GGUFLoadableModel {
 
         let mapper: any GGUFTensorNameMapper
         if hasExperts {
-            mapper = MixtralTensorNameMapper()
+            mapper = MoETensorNameMapper()
         } else if hasPostNorm {
-            mapper = Gemma2TensorNameMapper()
+            mapper = PostNormTransformerTensorNameMapper()
         } else {
-            mapper = LlamaTensorNameMapper()
+            mapper = TransformerTensorNameMapper()
         }
 
         return GGUFLoadResult(

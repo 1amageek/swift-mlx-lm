@@ -1,5 +1,5 @@
 {
-  "originHash" : "2a2110ac9bbd72694b07f9a4fee682e3887bcf8f53142064196f370b334c3a83",
+  "originHash" : "c30db427fcb6f24c49ff9b95fe1769fb711da2c0592419fba8c7176a00e6760b",
   "pins" : [
     {
       "identity" : "jsonschema",
@@ -17,6 +17,15 @@
       "state" : {
         "revision" : "6ba4827fb82c97d012eec9ab4b2de21f85c3b33d",
         "version" : "0.30.6"
+      }
+    },
+    {
+      "identity" : "swift-argument-parser",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/apple/swift-argument-parser",
+      "state" : {
+        "revision" : "c5d11a805e765f52ba34ec7284bd4fcd6ba68615",
+        "version" : "1.7.0"
       }
     },
     {
@@ -44,6 +53,15 @@
       "state" : {
         "revision" : "0c0290ff6b24942dadb83a929ffaaa1481df04a2",
         "version" : "1.1.1"
+      }
+    },
+    {
+      "identity" : "swift-testing-heartbeat",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/1amageek/swift-testing-heartbeat",
+      "state" : {
+        "revision" : "6612cdd5c4327057258291a2c35b201b45da848f",
+        "version" : "0.1.0"
       }
     }
   ],

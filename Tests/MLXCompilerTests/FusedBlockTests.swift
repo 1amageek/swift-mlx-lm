@@ -1,9 +1,10 @@
 import Testing
+import TestHeartbeat
 @preconcurrency import MLX
 @testable import SwiftLM
 @testable import MLXCompiler
 
-@Suite("FusedBlock Tests", .tags(.unit, .compiled))
+@Suite("FusedBlock Tests", .tags(.unit, .compiled), .heartbeat)
 struct FusedBlockTests {
 
     // MARK: - Pattern Detection

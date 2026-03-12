@@ -52,8 +52,6 @@ public struct GGUFModelLoader {
     /// with all others except the universal fallback. The ordering is defense-in-depth
     /// (most-specific first) but correctness does not depend on it.
     package static let defaultModelTypes: [any GGUFLoadableModel.Type] = [
-        Qwen35VLModel.self,     // VLM + DeltaNet SSM tensors
-        Qwen25VLModel.self,     // VLM + standard Transformer
         Qwen35Model.self,       // DeltaNet SSM tensors (text-only)
         CohereModel.self,       // parallel attn+FFN with QK norm
         TransformerModel.self,  // universal fallback
@@ -488,6 +486,7 @@ public struct GGUFModelLoader {
     public func loadCompiled(
         repo: String,
         filename: String? = nil,
+        mmprojFilename: String? = nil,
         token: String? = nil,
         configOverride: ModelConfigurationOverride? = nil,
         progress: Progress? = nil
@@ -495,7 +494,15 @@ public struct GGUFModelLoader {
         let downloader = HuggingFaceDownloader()
         let localURL = try await downloader.download(
             repo: repo, filename: filename, token: token, progress: progress)
-        let context = try loadCompiledContext(url: localURL, configOverride: configOverride)
+
+        var mmprojURL: URL?
+        if let mmprojFilename {
+            mmprojURL = try await downloader.download(
+                repo: repo, filename: mmprojFilename, token: token, progress: progress)
+        }
+
+        let context = try loadCompiledContext(
+            url: localURL, mmprojURL: mmprojURL, configOverride: configOverride)
         return ModelContainer(context: context)
     }
 
@@ -511,6 +518,7 @@ public struct GGUFModelLoader {
     /// - Returns: A `ModelContext` with the compiled inference model.
     public func loadCompiledContext(
         url: URL,
+        mmprojURL: URL? = nil,
         configOverride: ModelConfigurationOverride? = nil
     ) throws -> ModelContext {
         let fileSize = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int64) ?? 0
@@ -519,9 +527,27 @@ public struct GGUFModelLoader {
         let file = try GGUFFile.parse(url: url)
         print("[GGUFModelLoader] parsed: architecture=\(file.architecture ?? "unknown") tensors=\(file.tensors.count)")
 
+        // Tokenizer (needed for both text-only and VLM paths)
+        let tokenizer = try GGUFTokenizerFactory.create(from: file)
+
         // GGUFGraphBuilder: GGUF → IR direct (no DSL intermediate)
         let graphBuilder = GGUFGraphBuilder()
-        let buildResult = try graphBuilder.build(file: file)
+
+        // VLM path: mmproj provided → build VLM graph with vision encoder
+        if let mmprojURL {
+            return try loadCompiledVLMContext(
+                file: file, url: url, mmprojURL: mmprojURL,
+                graphBuilder: graphBuilder, tokenizer: tokenizer,
+                configOverride: configOverride)
+        }
+
+        // Text-only path: lowered inference model
+        let buildResult: GGUFGraphBuilder.BuildResult
+        do {
+            buildResult = try graphBuilder.build(file: file)
+        } catch let error as GGUFGraphBuildError {
+            throw GGUFLoadError.invalidData(error.description)
+        }
         let mapper = graphBuilder.mapper(for: buildResult.architecture)
         let sanitize = GGUFGraphBuilder.sanitizeWeights
         print("[GGUFModelLoader] detected architecture: \(buildResult.architecture)")
@@ -533,9 +559,139 @@ public struct GGUFModelLoader {
         // Wrap in LanguageModel adapter
         let compiledModel = CompiledLanguageModel(lowered: lowered)
 
-        // Tokenizer + config + processor
-        let tokenizer = try GGUFTokenizerFactory.create(from: file)
+        // Config + processor
+        let (modelConfig, processor) = makeTextConfig(
+            file: file, url: url, tokenizer: tokenizer, configOverride: configOverride)
 
+        print("[GGUFModelLoader] compiled ready: \(modelConfig.name) cacheSlots=\(lowered.metadata.cacheSlotCount) eos=\(modelConfig.eosTokenIds)")
+        return ModelContext(
+            configuration: modelConfig,
+            model: compiledModel,
+            processor: processor,
+            tokenizer: tokenizer
+        )
+    }
+
+    /// Compile a ModelGraph (from GGUFGraphBuilder) with bound weights into an inference model.
+    private func compileFromGraph(
+        from file: GGUFFile,
+        graph: ModelGraph,
+        mapper: some GGUFTensorNameMapper,
+        sanitize: @Sendable ([String: TensorData]) -> [String: TensorData]
+    ) throws -> MLXLoweredInferenceModel {
+        let rawWeights = try buildRawWeights(from: file, mapper: mapper)
+        let sanitizedWeights = RawWeights(tensors: sanitize(rawWeights.tensors))
+
+        let binder = MLXWeightPathBinder()
+        let boundWeights = try binder.bind(sanitizedWeights, to: graph)
+
+        return try MLXInferenceCompiler().compile(graph: graph, weights: boundWeights)
+    }
+
+    // MARK: - VLM Compiled Path
+
+    /// Load a compiled VLM model context.
+    ///
+    /// Uses the lowered inference path (same as text-only models). The text
+    /// decoder IR is identical — only M-RoPE axes are configured. The vision
+    /// encoder is loaded separately and attached via `VLMConfig`.
+    ///
+    /// Pipeline:
+    /// 1. Parse mmproj GGUF → extract vision config
+    /// 2. Resolve vision token IDs from tokenizer
+    /// 3. Build text-only IR graph (with M-RoPE axes from mmproj metadata)
+    /// 4. Compile to lowered inference model
+    /// 5. Load vision encoder (MLXNN Module via GGUFVisionLoader)
+    /// 6. Wrap in CompiledLanguageModel with VLMConfig
+    private func loadCompiledVLMContext(
+        file: GGUFFile,
+        url: URL,
+        mmprojURL: URL,
+        graphBuilder: GGUFGraphBuilder,
+        tokenizer: any Tokenizer,
+        configOverride: ModelConfigurationOverride?
+    ) throws -> ModelContext {
+        var t0 = CFAbsoluteTimeGetCurrent()
+
+        let mmprojFile = try GGUFFile.parse(url: mmprojURL)
+        print("[GGUFModelLoader] parsed mmproj: tensors=\(mmprojFile.tensors.count)")
+
+        // Resolve vision token IDs from tokenizer
+        guard let imageTokenId = tokenizer.tokenID(for: "<|image_pad|>") else {
+            throw GGUFLoadError.missingMetadata("token <|image_pad|> not found in vocabulary")
+        }
+        let videoTokenId = tokenizer.tokenID(for: "<|video_pad|>")
+
+        // Build text-only IR graph with M-RoPE axes (same as text-only, plus M-RoPE)
+        let buildResult: GGUFGraphBuilder.BuildResult
+        do {
+            buildResult = try graphBuilder.build(file: file, mmprojFile: mmprojFile)
+        } catch let error as GGUFGraphBuildError {
+            throw GGUFLoadError.invalidData(error.description)
+        }
+        let architecture = buildResult.architecture
+        print("[GGUFModelLoader] VLM architecture: \(architecture)")
+
+        // Compile to lowered inference model (same path as text-only)
+        let mapper = graphBuilder.mapper(for: architecture)
+        let sanitize = GGUFGraphBuilder.sanitizeWeights
+        let lowered = try compileFromGraph(
+            from: file, graph: buildResult.graph, mapper: mapper, sanitize: sanitize)
+        print("[GGUFModelLoader] VLM lowered model compiled [\(String(format: "%.3f", CFAbsoluteTimeGetCurrent() - t0))s]")
+
+        // Load vision encoder (auto-detects architecture from mmproj tensor patterns)
+        t0 = CFAbsoluteTimeGetCurrent()
+        let textHiddenSize = file[.embeddingLength] ?? 0
+        let visionLoader = GGUFVisionLoader()
+        let visionResult = try visionLoader.load(url: mmprojURL, textHiddenSize: textHiddenSize)
+
+        let encoderBox = SendableBox(visionResult.encoder)
+        let visionEncoderClosure: @Sendable (MLXArray, [(t: Int, h: Int, w: Int)]) -> MLXArray = { pixels, gridTHW in
+            let thwArray = gridTHW.map { LMInput.THW(t: $0.t, h: $0.h, w: $0.w) }
+            return encoderBox.value(pixels, gridTHW: thwArray)
+        }
+
+        let imageProcessor = visionResult.imageProcessor
+        let spatialMergeSize = visionResult.config.spatialMergeSize
+        let vlmInputConfig = try makeVLMInputConfig(
+            imageTokenId: imageTokenId,
+            videoTokenId: videoTokenId,
+            spatialMergeSize: spatialMergeSize,
+            tokenizer: tokenizer)
+        let vlmProcessor: any UserInputProcessor = makeVLMProcessor(
+            tokenizer: tokenizer, file: file, vlmConfig: vlmInputConfig,
+            preprocessImage: { try imageProcessor.preprocess(image: $0) })
+        print("[GGUFModelLoader] VLM vision encoder loaded [\(String(format: "%.3f", CFAbsoluteTimeGetCurrent() - t0))s]")
+
+        // Wrap in CompiledLanguageModel with VLM config
+        let vlmConfig = VLMConfig(
+            visionEncoder: visionEncoderClosure,
+            imageTokenId: imageTokenId,
+            videoTokenId: videoTokenId,
+            spatialMergeSize: spatialMergeSize)
+        let compiledModel = CompiledLanguageModel(
+            lowered: lowered, vlmConfig: vlmConfig)
+
+        // Config
+        let (modelConfig, _) = makeTextConfig(
+            file: file, url: url, tokenizer: tokenizer, configOverride: configOverride)
+
+        print("[GGUFModelLoader] VLM compiled ready: \(modelConfig.name) cacheSlots=\(lowered.metadata.cacheSlotCount) eos=\(modelConfig.eosTokenIds)")
+        return ModelContext(
+            configuration: modelConfig,
+            model: compiledModel,
+            processor: vlmProcessor,
+            tokenizer: tokenizer
+        )
+    }
+
+    /// Create model configuration and text processor from GGUF file.
+    private func makeTextConfig(
+        file: GGUFFile,
+        url: URL,
+        tokenizer: any Tokenizer,
+        configOverride: ModelConfigurationOverride?
+    ) -> (ModelConfiguration, GGUFUserInputProcessor) {
         var eosTokenIds = Set<Int>()
         if let eosId = file.eosTokenID {
             eosTokenIds.insert(eosId)
@@ -572,29 +728,57 @@ public struct GGUFModelLoader {
             tokenizer: tokenizer, chatTemplate: chatTemplate,
             bosToken: bosToken, eosToken: eosToken, addBosToken: addBosToken)
 
-        print("[GGUFModelLoader] compiled ready: \(modelConfig.name) cacheSlots=\(lowered.metadata.cacheSlotCount) eos=\(modelConfig.eosTokenIds)")
-        return ModelContext(
-            configuration: modelConfig,
-            model: compiledModel,
-            processor: processor,
-            tokenizer: tokenizer
+        return (modelConfig, processor)
+    }
+
+    /// Create VLMInputConfig for the compiled VLM path.
+    ///
+    /// Throws if `<|vision_start|>` or `<|vision_end|>` tokens cannot be found
+    /// in the vocabulary — these are required for vision placeholder processing.
+    private func makeVLMInputConfig(
+        imageTokenId: Int,
+        videoTokenId: Int?,
+        spatialMergeSize: Int,
+        tokenizer: any Tokenizer
+    ) throws -> CompiledVLMInputConfig {
+        guard let visionStartId = tokenizer.tokenID(for: "<|vision_start|>") else {
+            throw GGUFLoadError.missingMetadata(
+                "token <|vision_start|> not found in vocabulary")
+        }
+        guard let visionEndId = tokenizer.tokenID(for: "<|vision_end|>") else {
+            throw GGUFLoadError.missingMetadata(
+                "token <|vision_end|> not found in vocabulary")
+        }
+        return CompiledVLMInputConfig(
+            visionStartTokenId: visionStartId,
+            visionEndTokenId: visionEndId,
+            imageTokenId: imageTokenId,
+            videoTokenId: videoTokenId ?? 0,
+            spatialMergeSize: spatialMergeSize
         )
     }
 
-    /// Compile a ModelGraph (from GGUFGraphBuilder) with bound weights into an inference model.
-    private func compileFromGraph(
-        from file: GGUFFile,
-        graph: ModelGraph,
-        mapper: some GGUFTensorNameMapper,
-        sanitize: @Sendable ([String: TensorData]) -> [String: TensorData]
-    ) throws -> MLXLoweredInferenceModel {
-        let rawWeights = try buildRawWeights(from: file, mapper: mapper)
-        let sanitizedWeights = RawWeights(tensors: sanitize(rawWeights.tensors))
+    /// Create VLM user input processor.
+    private func makeVLMProcessor(
+        tokenizer: any Tokenizer,
+        file: GGUFFile,
+        vlmConfig: CompiledVLMInputConfig,
+        preprocessImage: @escaping VLMUserInputProcessor.ImagePreprocessor
+    ) -> VLMUserInputProcessor {
+        let chatTemplate = file.chatTemplate
+        let bosToken = tokenizer.bosTokenID.flatMap { tokenizer.tokenToString($0) }
+        let eosToken = tokenizer.eosTokenID.flatMap { tokenizer.tokenToString($0) }
+        let addBosToken = file.addBosToken ?? false
 
-        let binder = MLXWeightPathBinder()
-        let boundWeights = try binder.bind(sanitizedWeights, to: graph)
-
-        return try MLXInferenceCompiler().compile(graph: graph, weights: boundWeights)
+        return VLMUserInputProcessor(
+            tokenizer: tokenizer,
+            chatTemplate: chatTemplate,
+            bosToken: bosToken,
+            eosToken: eosToken,
+            addBosToken: addBosToken,
+            vlmInputConfig: vlmConfig,
+            preprocessImage: preprocessImage
+        )
     }
 
     /// Convert GGUF tensors to `RawWeights` keyed by MLX weight paths.
@@ -899,6 +1083,32 @@ public struct QuantizationConfiguration: Sendable {
             return .fourBit
         }
     }
+}
+
+// MARK: - Sendable Box
+
+/// Wraps a non-Sendable value for use in @Sendable closures.
+///
+/// Used to capture MLXNN Module vision encoders in @Sendable closures.
+/// Safety: the encoder is fully loaded and eval'd before capture, and is
+/// only accessed from the executor's serial forward path.
+private final class SendableBox<T>: @unchecked Sendable {
+    let value: T
+    init(_ value: T) { self.value = value }
+}
+
+// MARK: - VLM Input Config
+
+/// Generic VLMInputConfig for the compiled VLM path.
+///
+/// Provides vision token IDs resolved at load time from the tokenizer,
+/// independent of model-specific configuration types.
+struct CompiledVLMInputConfig: VLMInputConfig {
+    let visionStartTokenId: Int
+    let visionEndTokenId: Int
+    let imageTokenId: Int
+    let videoTokenId: Int
+    let spatialMergeSize: Int
 }
 
 // MARK: - Dummy Tokenizer for Auto-Detection

@@ -8,6 +8,8 @@ import SwiftLM
 /// Linear projections (in_proj_qkv, in_proj_z, in_proj_b, in_proj_a, out_proj)
 /// use `@ModuleInfo`-annotated `Linear` layers for quantization support.
 /// Conv1d weight and other scalar parameters remain as raw `MLXArray`.
+///
+/// Computation precision is resolved from `StateSpaceAttributes.computeDType`.
 final class GraphDeltaNet: Module, UnaryLayer {
 
     @ModuleInfo(key: "in_proj_qkv") var inProjQKV: MLXNN.Linear
@@ -23,6 +25,7 @@ final class GraphDeltaNet: Module, UnaryLayer {
     let aLog: MLXArray
 
     let attrs: StateSpaceAttributes
+    let recurrenceDType: DType
     var cache: MLXRecurrentCache
 
     init(
@@ -32,6 +35,10 @@ final class GraphDeltaNet: Module, UnaryLayer {
         cache: MLXRecurrentCache
     ) throws {
         self.attrs = attrs
+        switch attrs.computeDType {
+        case .float32: self.recurrenceDType = .float32
+        case .float16: self.recurrenceDType = .float16
+        }
         self.cache = cache
 
         // Linear projections
@@ -64,6 +71,7 @@ final class GraphDeltaNet: Module, UnaryLayer {
     }
 
     func callAsFunction(_ x: MLXArray) -> MLXArray {
+        let inputDType = x.dtype
         let B = x.dim(0)
         let T = x.dim(1)
 
@@ -86,10 +94,10 @@ final class GraphDeltaNet: Module, UnaryLayer {
         let b = inProjB(x)
         let a = inProjA(x)
 
-        // Causal Conv1D
+        // Causal Conv1D (feedforward — stays in projection dtype)
         let prefix: MLXArray
         if let existing = cache.convState {
-            prefix = existing
+            prefix = existing.asType(mixedQKV.dtype)
         } else {
             prefix = MLXArray.zeros([B, convKernelSize, convDim])
         }
@@ -103,18 +111,18 @@ final class GraphDeltaNet: Module, UnaryLayer {
         let rawConv = conv1d(convInput, convWeight3d, stride: 1, padding: 0, groups: convDim)
         let activated = silu(rawConv[0..., 1..., 0...])
 
-        // Split Q, K, V
-        let parts = activated.split(indices: [keyDim, 2 * keyDim], axis: -1)
+        // === Dtype boundary: projection output → recurrence dtype ===
+        let parts = activated.asType(recurrenceDType).split(indices: [keyDim, 2 * keyDim], axis: -1)
         let query = parts[0].reshaped(B, T, linearKeyHeads, linearKeyHeadDim)
         let key = parts[1].reshaped(B, T, linearKeyHeads, linearKeyHeadDim)
         let value = parts[2].reshaped(B, T, linearValueHeads, linearValueHeadDim)
 
-        // Gates
-        let beta = sigmoid(b)
-        let g = -MLX.exp(aLog) * softplus(a + dtBias)
+        // Gates (computed in recurrence dtype)
+        let beta = sigmoid(b.asType(recurrenceDType))
+        let g = -MLX.exp(aLog.asType(recurrenceDType)) * softplus(a.asType(recurrenceDType) + dtBias.asType(recurrenceDType))
         let decay = MLX.exp(g)
 
-        // Delta rule recurrence
+        // Delta rule recurrence (entirely in recurrence dtype)
         let (attnOut, newState) = deltaNetRecurrence(
             query: query, key: key, value: value,
             decay: decay, beta: beta, state: cache.recurrentState,
@@ -123,10 +131,10 @@ final class GraphDeltaNet: Module, UnaryLayer {
         cache.recurrentState = newState
         cache.incrementOffset(by: T)
 
-        // Gated output norm
+        // === Dtype boundary: recurrence output → activation dtype ===
         let dv = linearValueHeadDim
         let numHeads = linearValueHeads
-        let flat = attnOut.reshaped(B * T * numHeads, dv)
+        let flat = attnOut.asType(inputDType).reshaped(B * T * numHeads, dv)
         let zFlat = z.reshaped(B, T, numHeads, dv).reshaped(B * T * numHeads, dv)
         let normed = MLXFast.rmsNorm(flat, weight: 1 + normWeight, eps: 1e-6) * silu(zFlat)
         let gated = normed.reshaped(B, T, valueDim)
@@ -148,7 +156,7 @@ final class GraphDeltaNet: Module, UnaryLayer {
         let B = query.dim(0), T = query.dim(1), H = query.dim(2)
         let dk = query.dim(3), dv = value.dim(3)
 
-        let qN = l2Norm(query) * MLXArray(scale)
+        let qN = l2Norm(query) * MLXArray(scale).asType(recurrenceDType)
         let kN = l2Norm(key)
 
         let qSlices = qN.split(parts: T, axis: 1)
@@ -157,7 +165,7 @@ final class GraphDeltaNet: Module, UnaryLayer {
         let gSlices = decay.split(parts: T, axis: 1)
         let bSlices = beta.split(parts: T, axis: 1)
 
-        var S = state ?? MLXArray.zeros([B, H, dk, dv])
+        var S = state ?? MLXArray.zeros([B, H, dk, dv], dtype: recurrenceDType)
         var outputs = [MLXArray]()
         outputs.reserveCapacity(T)
 

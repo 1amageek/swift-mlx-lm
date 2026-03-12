@@ -26,10 +26,15 @@ public enum FusedSubLayer: @unchecked Sendable {
     /// Apply the fused sub-layer: `output = x + op(norm(x))`.
     ///
     /// Residual addition is performed inline — no external stack needed.
-    public func apply(_ x: MLXArray, state: inout InferenceState) -> MLXArray {
+    public func apply(
+        _ x: MLXArray, state: inout InferenceState,
+        options: ExecutionOptions = .default
+    ) -> MLXArray {
         switch self {
         case .attention(let norm, let attn):
-            return x + attn.apply(norm.apply(x), caches: &state.caches)
+            return x + attn.apply(
+                norm.apply(x), caches: &state.caches,
+                positionIds: options.positionIds)
         case .mlp(let norm, let mlp):
             return x + mlp.apply(norm.apply(x))
         case .deltaNet(let norm, let dn):

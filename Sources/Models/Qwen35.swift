@@ -203,28 +203,9 @@ public struct Qwen35: ModelComponent {
 
     @ModelComponentBuilder
     public var body: some ModelComponent {
-        // Input embedding: VLM uses Parallel(TokenEmbedding, VisionEncoder),
-        // text-only uses plain TokenEmbedding.
-        if let vision = config.vision {
-            Parallel(merge: .visionMerge(VisionMergeConfig(
-                imageTokenId: vision.imageTokenId,
-                videoTokenId: vision.videoTokenId
-            ))) {
-                TokenEmbedding(vocabSize: config.vocabularySize, embeddingSize: config.hiddenSize)
-                VisionEncoder(
-                    hiddenSize: vision.hiddenSize,
-                    outputSize: vision.outputSize,
-                    depth: vision.depth,
-                    headCount: vision.headCount,
-                    patchSize: vision.patchSize,
-                    spatialMergeSize: vision.spatialMergeSize,
-                    intermediateSize: vision.intermediateSize,
-                    temporalPatchSize: vision.temporalPatchSize
-                )
-            }
-        } else {
-            TokenEmbedding(vocabSize: config.vocabularySize, embeddingSize: config.hiddenSize)
-        }
+        // Token embedding — same IR for text-only and VLM.
+        // Vision encoder is loaded separately (not part of the IR graph).
+        TokenEmbedding(vocabSize: config.vocabularySize, embeddingSize: config.hiddenSize)
 
         // Hybrid decoder: [DeltaNet x (interval-1), FullAttention x 1] groups
         Repeat(count: config.hybridGroupCount, label: "hybrid_groups") {
@@ -256,10 +237,10 @@ struct Qwen35DeltaNetDecoderLayer: ModelComponent {
     var body: some ModelComponent {
         Residual {
             RMSNorm(dimension: config.hiddenSize, epsilon: config.normEps)
-            StateSpace(
+            DeltaNet(
                 hiddenSize: config.hiddenSize,
                 stateSize: config.linearKeyHeadDim,
-                variant: "gated_deltanet"
+                variant: .gated
             )
         }
         Residual {

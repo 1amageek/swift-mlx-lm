@@ -1,4 +1,5 @@
 import Testing
+import TestHeartbeat
 @preconcurrency import MLX
 import MLXFast
 @testable import SwiftLM
@@ -207,7 +208,7 @@ private let mediumConfig = (
 
 // MARK: - Fusion Benchmarks (Realistic Dimensions)
 
-@Suite("Fusion Benchmarks (Realistic)", .tags(.performance, .compiled))
+@Suite("Fusion Benchmarks (Realistic)", .tags(.performance, .compiled), .heartbeat)
 struct FusionRealisticBenchmarks {
 
     // MARK: - Small Model (Qwen3.5-0.6B scale)

@@ -4,7 +4,7 @@ import SwiftLM
 /// Compiles a SwiftLM `ModelGraph` + `BoundWeights` into an executable `MLXCompiledModel`.
 ///
 /// The compiler performs:
-/// 1. Weight extraction (`BoundWeights` → `MLXWeightStore`)
+/// 1. Weight extraction (`BoundWeights` → `InferenceWeightStore`)
 /// 2. Cache inference (auto-detect attention/stateSpace → path-keyed `CacheDescriptor` array)
 /// 3. Embedding discovery with validation (for tied output head weights)
 ///
@@ -26,7 +26,7 @@ public struct MLXCompiler: Sendable {
 
     /// Compile a model graph with bound weights into an executable model.
     public func compile(graph: ModelGraph, weights: BoundWeights) throws -> MLXCompiledModel {
-        let weightStore = try MLXWeightStore(boundWeights: weights)
+        let weightStore = try InferenceWeightStore(boundWeights: weights)
 
         var cacheDescriptors: [CacheDescriptor] = []
         var embeddingPaths: [StructuralPath] = []

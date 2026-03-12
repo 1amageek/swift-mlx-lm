@@ -145,57 +145,6 @@ struct ModelDeclarationTests {
             Issue.record("Expected tokenEmbedding as first op for text-only, got \(firstOp.kind)")
         }
 
-        // No vision encoder anywhere in the graph
-        let visionCount = countOperations(in: graph.rootRegion) { kind in
-            if case .visionEncoder = kind { return true }
-            return false
-        }
-        #expect(visionCount == 0)
-    }
-
-    @Test("Qwen35 graph contains vision encoder")
-    func qwen35VisionEncoder() throws {
-        let graph = try Qwen35(config: .qwen35_0_8B).makeModelGraph()
-
-        // First op should be parallel (visionMerge) containing both
-        // token embedding and vision encoder
-        let firstOp = graph.rootRegion.operations[0]
-        guard case .parallel(let merge, let branches) = firstOp.kind else {
-            Issue.record("Expected parallel as first operation, got \(firstOp.kind)")
-            return
-        }
-
-        // Merge strategy should be visionMerge
-        guard case .visionMerge(let config) = merge else {
-            Issue.record("Expected visionMerge strategy, got \(merge)")
-            return
-        }
-        #expect(config.imageTokenId == 248056)
-        #expect(config.videoTokenId == 248057)
-
-        // Should have 2 branches: text embedding + vision encoder
-        #expect(branches.count == 2)
-
-        // Branch 0: token embedding
-        let textBranch = branches[0]
-        #expect(textBranch.operations.count == 1)
-        if case .tokenEmbedding = textBranch.operations[0].kind {
-            // OK
-        } else {
-            Issue.record("Expected tokenEmbedding in branch 0")
-        }
-
-        // Branch 1: vision encoder
-        let visionBranch = branches[1]
-        #expect(visionBranch.operations.count == 1)
-        if case .visionEncoder(let attrs) = visionBranch.operations[0].kind {
-            #expect(attrs.hiddenSize == 768)
-            #expect(attrs.depth == 12)
-            #expect(attrs.outputSize == 1024)
-            #expect(attrs.temporalPatchSize == 2)
-        } else {
-            Issue.record("Expected visionEncoder in branch 1")
-        }
     }
 
     @Test("Qwen35 attention uses M-RoPE")

@@ -3,6 +3,7 @@ import GGUFParser
 import MLX
 import MLXNN
 import Testing
+import TestHeartbeat
 @testable import MLXLM
 
 /// Step-by-step verification of Qwen3.5 model correctness.
@@ -10,7 +11,7 @@ import Testing
 /// Step 1: Configuration (verified manually against GGUF metadata)
 /// Step 2: Weight loading — modules have correct shapes and non-trivial values
 /// Step 3: Single-component forward pass (future)
-@Suite("Qwen3.5 Weight Verification", .tags(.diagnostic))
+@Suite("Qwen3.5 Weight Verification", .tags(.diagnostic), .heartbeat)
 struct Qwen35WeightVerificationTests {
 
     private static let repo = "unsloth/Qwen3.5-0.8B-GGUF"
@@ -32,7 +33,7 @@ struct Qwen35WeightVerificationTests {
         let downloader = HuggingFaceDownloader()
         let url = try await downloader.download(repo: Self.repo, filename: Self.filename)
         let file = try GGUFFile.parse(url: url)
-        let mapper = Qwen35TensorNameMapper()
+        let mapper = HybridDeltaNetAttentionTensorNameMapper()
 
         var unmapped: [String] = []
         for tensor in file.tensors {

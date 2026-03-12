@@ -9,8 +9,7 @@ import MLXNN
 /// Configuration for the Qwen 3.5 hybrid DeltaNet + Full Attention architecture.
 ///
 /// Alternates between Gated DeltaNet (linear attention, O(1) per token)
-/// and standard Full Attention layers in a configurable ratio
-/// (default 3:1 via `fullAttentionInterval=4`).
+/// and standard Full Attention layers in a metadata-defined ratio.
 struct Qwen35Configuration: Sendable {
 
     // MARK: Core Dimensions
@@ -82,13 +81,26 @@ extension Qwen35Configuration {
         let ropeScaling = extractRopeScaling(from: file)
 
         guard let linearKeyHeads = file[.ssmGroupCount] else {
-            throw GGUFLoadError.missingMetadata("ssm.group_count")
+            throw GGUFLoadError.missingMetadata(
+                GGUFMetadataDiagnostics.missingMetadataMessage("ssm.group_count", in: file))
         }
 
-        let linearKeyHeadDim = file[.ssmStateSize] ?? 128
-        let convKernelSize = file[.ssmConvKernel] ?? 4
-        let fullAttInterval = file[.fullAttentionInterval] ?? 4
-        let partialRotary = file[.partialRotaryFactor] ?? 0.25
+        guard let linearKeyHeadDim = file[.ssmStateSize] else {
+            throw GGUFLoadError.missingMetadata(
+                GGUFMetadataDiagnostics.missingMetadataMessage("ssm.state_size", in: file))
+        }
+        guard let convKernelSize = file[.ssmConvKernel] else {
+            throw GGUFLoadError.missingMetadata(
+                GGUFMetadataDiagnostics.missingMetadataMessage("ssm.conv_kernel", in: file))
+        }
+        guard let fullAttInterval = file[.fullAttentionInterval] else {
+            throw GGUFLoadError.missingMetadata(
+                GGUFMetadataDiagnostics.missingMetadataMessage("full_attention_interval", in: file))
+        }
+        guard let partialRotary = file[.partialRotaryFactor] else {
+            throw GGUFLoadError.missingMetadata(
+                GGUFMetadataDiagnostics.missingMetadataMessage("rope.partial_rotary_factor", in: file))
+        }
         let headDim = file[.attentionKeyLength] ?? embed / heads
 
         self.hiddenSize = embed
@@ -685,7 +697,7 @@ extension Qwen35Model: GGUFLoadableModel {
 
         return GGUFLoadResult(
             model: model,
-            mapper: Qwen35TensorNameMapper(),
+            mapper: HybridDeltaNetAttentionTensorNameMapper(),
             makeProcessor: { tokenizer, chatTemplate, bosToken, eosToken, addBosToken in
                 GGUFUserInputProcessor(
                     tokenizer: tokenizer, chatTemplate: chatTemplate,

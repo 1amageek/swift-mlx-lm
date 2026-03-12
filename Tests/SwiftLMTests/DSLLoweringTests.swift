@@ -577,7 +577,6 @@ struct DSLLoweringTests {
                 case .linear: kindNames.insert("linear")
                 case .outputHead: kindNames.insert("outputHead")
                 case .stateSpace: kindNames.insert("stateSpace")
-                case .visionEncoder: kindNames.insert("visionEncoder")
                 case .custom: kindNames.insert("custom")
                 case .residual(_, let body): collectKinds(from: body)
                 case .parallel(_, let branches): branches.forEach { collectKinds(from: $0) }

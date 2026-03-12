@@ -11,6 +11,11 @@ import SwiftLM
 /// (attention, mlp, etc.) rather than lowering to operator-level instructions,
 /// which preserves MLX fused kernel optimizations (SDPA, rmsNorm, RoPE).
 ///
+/// Weight storage uses `InferenceWeightStore` which supports both dense
+/// (`MLXArray`) and quantized (`AffineQuantizedTensor`) weights. The executor
+/// dispatches `quantizedMatmul` or standard `matmul` based on storage type
+/// via `LoweredProjection`.
+///
 /// ```swift
 /// let compiler = MLXCompiler()
 /// let compiled = try compiler.compile(graph: modelGraph, weights: boundWeights)
@@ -19,7 +24,7 @@ import SwiftLM
 /// ```
 ///
 /// - Note: Marked `@unchecked Sendable` because `MLXArray` (used in
-///   `MLXWeightStore`) is not declared `Sendable`. This type is only
+///   `InferenceWeightStore`) is not declared `Sendable`. This type is only
 ///   used under executor-controlled synchronization with immutable
 ///   weight storage after compilation.
 public struct MLXCompiledModel: @unchecked Sendable {
@@ -27,8 +32,8 @@ public struct MLXCompiledModel: @unchecked Sendable {
     /// The semantic model graph (ground truth for execution).
     public let graph: ModelGraph
 
-    /// Typed weight storage keyed by `ParameterSlot`.
-    public let weightStore: MLXWeightStore
+    /// Typed weight storage supporting both dense and quantized weights.
+    public let weightStore: InferenceWeightStore
 
     /// Cache requirements for each cacheable layer, in DFS execution order.
     public let cacheDescriptors: [CacheDescriptor]
@@ -45,7 +50,7 @@ public struct MLXCompiledModel: @unchecked Sendable {
 
     public init(
         graph: ModelGraph,
-        weightStore: MLXWeightStore,
+        weightStore: InferenceWeightStore,
         cacheDescriptors: [CacheDescriptor],
         embeddingPath: StructuralPath? = nil
     ) {

@@ -1,25 +1,13 @@
-/// Cohere-style transformer with parallel attention + MLP.
+/// Transformer with a shared normalization feeding parallel attention and MLP branches.
 ///
 /// Each layer runs Attention and MLP in parallel from a shared LayerNorm,
 /// then adds both results to the residual. This is unlike the standard
 /// sequential residual structure.
 ///
 /// Architecture: LayerNorm -> Parallel(Attention, MLP) -> Add
-///
-/// ```swift
-/// let cohere = CohereTransformer(config: .init(
-///     hiddenSize: 4096,
-///     hiddenLayers: 32,
-///     intermediateSize: 14336,
-///     attentionHeads: 32,
-///     kvHeads: 8,
-///     vocabularySize: 256000,
-///     useQKNorm: true
-/// ))
-/// ```
-public struct CohereTransformer: ModelComponent {
+public struct ParallelAttentionMLPTransformer: ModelComponent {
 
-    /// Configuration for Cohere-style transformers.
+    /// Configuration for shared-norm parallel attention/MLP transformers.
     public struct Config: Sendable {
 
         public let hiddenSize: Int
@@ -91,8 +79,6 @@ public struct CohereTransformer: ModelComponent {
         TokenEmbedding(vocabSize: config.vocabularySize, embeddingSize: config.hiddenSize)
 
         Repeat(count: config.hiddenLayers, label: "layers") {
-            // Cohere uses a single LayerNorm shared across both branches
-            // with parallel Attention + MLP, added to residual.
             Residual {
                 LayerNorm(dimension: config.hiddenSize, epsilon: config.normEps)
                 Parallel(merge: .add) {

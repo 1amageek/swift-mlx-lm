@@ -34,12 +34,5 @@ public enum ParallelMergeStrategy: Codable, Equatable, Sendable {
     case concat
     case stack
 
-    /// Vision-text merge: replaces placeholder token positions in the text
-    /// branch (branch 0) with encoded vision features from the vision
-    /// branch (branch 1).
-    ///
-    /// Requires exactly 2 branches with equal result arity.
-    case visionMerge(VisionMergeConfig)
-
     case custom(String)
 }

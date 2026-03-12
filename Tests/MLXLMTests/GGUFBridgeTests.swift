@@ -8,10 +8,10 @@ import GGUFParser
 
 // MARK: - GGUFTensorNameMapper Tests
 
-@Suite("LlamaTensorNameMapper", .tags(.unit))
-struct LlamaTensorNameMapperTests {
+@Suite("TransformerTensorNameMapper", .tags(.unit))
+struct TransformerTensorNameMapperTests {
 
-    let mapper = LlamaTensorNameMapper()
+    let mapper = TransformerTensorNameMapper()
 
     @Test("Global tensor: token_embd.weight")
     func tokenEmbd() {
@@ -2397,7 +2397,7 @@ struct LoadReportTests {
         let context = try loader.loadContext(url: tempURL)
         let report = try #require(context.loadReport)
 
-        // 11 tensors in the GGUF, all should be mapped by LlamaTensorNameMapper
+        // 11 tensors in the GGUF, all should be mapped by TransformerTensorNameMapper
         #expect(report.weightLoading.mappedCount == 11)
         #expect(report.weightLoading.skippedCount == 0)
         #expect(report.weightLoading.skippedTensors.isEmpty)

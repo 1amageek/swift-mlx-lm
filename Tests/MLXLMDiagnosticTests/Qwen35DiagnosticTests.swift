@@ -4,9 +4,10 @@ import MLXNN
 import GGUFParser
 import GGUFTokenizer
 import Testing
+import TestHeartbeat
 @testable import MLXLM
 
-@Suite("Qwen3.5 Diagnostics", .tags(.diagnostic))
+@Suite("Qwen3.5 Diagnostics", .tags(.diagnostic), .heartbeat)
 struct Qwen35DiagnosticTests {
 
     private static let repo = "unsloth/Qwen3.5-0.8B-GGUF"

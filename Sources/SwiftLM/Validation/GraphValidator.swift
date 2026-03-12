@@ -298,21 +298,6 @@ private func validateMergeArity(
             )
         }
 
-    case .visionMerge:
-        // Vision merge requires exactly 2 branches (text + vision)
-        // with equal result arity.
-        guard let first = branchResultCounts.first else { return }
-        let allEqual = branchResultCounts.allSatisfy { $0 == first }
-        let matchesOp = operationResultCount == first
-        if branchResultCounts.count != 2 || !allEqual || !matchesOp {
-            throw GraphValidationError.parallelMergeArityMismatch(
-                strategy: strategy,
-                branchResultCounts: branchResultCounts,
-                operationResultCount: operationResultCount,
-                operationKey: operationKey
-            )
-        }
-
     case .custom:
         // No arity constraint for custom merge strategies.
         break

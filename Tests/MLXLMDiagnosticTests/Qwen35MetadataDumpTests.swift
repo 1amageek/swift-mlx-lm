@@ -1,9 +1,10 @@
 import Foundation
 import GGUFParser
 import Testing
+import TestHeartbeat
 @testable import MLXLM
 
-@Suite("Qwen3.5 GGUF Metadata Dump", .tags(.diagnostic))
+@Suite("Qwen3.5 GGUF Metadata Dump", .tags(.diagnostic), .heartbeat)
 struct Qwen35MetadataDumpTests {
 
     private static let repo = "unsloth/Qwen3.5-0.8B-GGUF"

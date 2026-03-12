@@ -1,6 +1,16 @@
 @preconcurrency import MLX
 import SwiftLM
 
+/// Results from graph scanning (cache discovery, embedding detection).
+///
+/// Extracted from `MLXInferenceCompiler.scan()` to allow reuse by
+/// both the lowered path and the executor path (VLM).
+public struct GraphScanResult: Sendable {
+    public let cacheDescriptors: [CacheDescriptor]
+    public let embeddingPath: StructuralPath?
+    public let hasTiedOutputHead: Bool
+}
+
 /// Compiles a SwiftLM `ModelGraph` + `BoundWeights` into a lowered inference model.
 ///
 /// This is the third compilation path:
@@ -18,6 +28,32 @@ public struct MLXInferenceCompiler: Sendable {
 
     public init() {}
 
+    /// Scan a model graph for cache descriptors and structural info without lowering.
+    ///
+    /// Used by the executor path (VLM) which needs cache layout but not lowered steps.
+    /// The lowered path also calls this internally during `compile()`.
+    public func scan(graph: ModelGraph) -> GraphScanResult {
+        var cacheDescriptors: [CacheDescriptor] = []
+        var embeddingPaths: [StructuralPath] = []
+        var hasTiedOutputHead = false
+        var cacheIndex = 0
+
+        scanRegion(
+            graph.rootRegion,
+            pathComponents: [],
+            cacheDescriptors: &cacheDescriptors,
+            cacheIndex: &cacheIndex,
+            embeddingPaths: &embeddingPaths,
+            hasTiedOutputHead: &hasTiedOutputHead
+        )
+
+        return GraphScanResult(
+            cacheDescriptors: cacheDescriptors,
+            embeddingPath: embeddingPaths.first,
+            hasTiedOutputHead: hasTiedOutputHead
+        )
+    }
+
     /// Compile a model graph with bound weights into a lowered inference model.
     ///
     /// Accepts either `MLXTensorStorage` or `MLXArray` in `BoundWeights.tensors`.
@@ -26,8 +62,6 @@ public struct MLXInferenceCompiler: Sendable {
     public func compile(
         graph: ModelGraph, weights: BoundWeights
     ) throws -> MLXLoweredInferenceModel {
-        print("[MLXInferenceCompiler] architecture:\n\(ModelGraphDumper.dump(graph))")
-
         let store = try InferenceWeightStore(boundWeights: weights)
 
         // Phase 1: Scan — discover caches, embeddings, tied output heads
@@ -365,10 +399,6 @@ public struct MLXInferenceCompiler: Sendable {
             return .parallel(merge: merge, branches: loweredBranches)
 
         // MARK: Unsupported
-
-        case .visionEncoder:
-            throw CompilerError.unsupportedOperation(
-                "visionEncoder is not yet implemented in MLXInferenceCompiler")
 
         case .custom(let attrs):
             throw CompilerError.unsupportedOperation("custom(\(attrs.domain).\(attrs.name))")

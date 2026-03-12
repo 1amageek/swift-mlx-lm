@@ -161,13 +161,31 @@ public struct MLXLoweredInferenceModel: @unchecked Sendable {
 
     /// Run prefill on the full prompt.
     ///
+    /// When `embeddings` is provided, token embedding lookup is skipped and
+    /// the pre-computed embeddings are used directly (VLM sequential chunk).
+    ///
+    /// When `positionIds` is provided (shape `[3, B, S]` for M-RoPE), per-token
+    /// position encoding is used instead of the scalar `nextPosition` offset.
+    ///
     /// Returns logits for the last token and the updated state.
     public func prefill(
-        tokenIDs: MLXArray, state: InferenceState
+        tokenIDs: MLXArray,
+        embeddings: MLXArray? = nil,
+        positionIds: MLXArray? = nil,
+        state: InferenceState
     ) -> (MLXArray, InferenceState) {
         var mutableState = state
-        let logits = executeSteps(prefill.steps, input: tokenIDs, state: &mutableState)
-        let seqLen = tokenIDs.dim(tokenIDs.ndim - 1)
+        let options = ExecutionOptions(
+            embeddings: embeddings, positionIds: positionIds)
+        let logits = executeSteps(
+            prefill.steps, input: tokenIDs, state: &mutableState, options: options)
+        // Derive sequence length from embeddings when provided (VLM vision chunk)
+        let seqLen: Int
+        if let embeddings {
+            seqLen = embeddings.dim(1) // [B, S, D]
+        } else {
+            seqLen = tokenIDs.dim(tokenIDs.ndim - 1)
+        }
         mutableState.nextPosition += seqLen
         return (logits, mutableState)
     }
@@ -177,14 +195,36 @@ public struct MLXLoweredInferenceModel: @unchecked Sendable {
     /// Uses the flattened step execution engine for reduced dispatch overhead.
     /// Returns logits for the next token and the updated state.
     public func decode(
-        tokenIDs: MLXArray, state: InferenceState
+        tokenIDs: MLXArray,
+        positionIds: MLXArray? = nil,
+        state: InferenceState
     ) -> (MLXArray, InferenceState) {
         var mutableState = state
-        let logits = executeFlatSteps(decode.steps, input: tokenIDs, state: &mutableState)
+        let options = ExecutionOptions(positionIds: positionIds)
+        let logits = executeFlatSteps(
+            decode.steps, input: tokenIDs, state: &mutableState, options: options)
         let seqLen = tokenIDs.dim(tokenIDs.ndim - 1)
         mutableState.nextPosition += seqLen
         return (logits, mutableState)
     }
+}
+
+// MARK: - Execution Options
+
+/// Options passed through the execution engine for VLM support.
+///
+/// - `embeddings`: Pre-computed embeddings that bypass token embedding lookup.
+/// - `positionIds`: Per-token M-RoPE positions `[3, B, S]` that override scalar offset.
+public struct ExecutionOptions: @unchecked Sendable {
+    public let embeddings: MLXArray?
+    public let positionIds: MLXArray?
+
+    public init(embeddings: MLXArray? = nil, positionIds: MLXArray? = nil) {
+        self.embeddings = embeddings
+        self.positionIds = positionIds
+    }
+
+    public static let `default` = ExecutionOptions()
 }
 
 // MARK: - Execution Engine
@@ -195,20 +235,21 @@ public struct MLXLoweredInferenceModel: @unchecked Sendable {
 /// It walks the flattened step list, dispatching each operation to its
 /// `apply()` method with the external cache state.
 func executeSteps(
-    _ steps: [LoweredStep], input: MLXArray, state: inout InferenceState
+    _ steps: [LoweredStep], input: MLXArray, state: inout InferenceState,
+    options: ExecutionOptions = .default
 ) -> MLXArray {
     var h = input
     for step in steps {
         switch step {
         case .op(let op):
-            h = executeOp(op, input: h, state: &state)
+            h = executeOp(op, input: h, state: &state, options: options)
 
         case .residual(let body):
-            h = h + executeSteps(body, input: h, state: &state)
+            h = h + executeSteps(body, input: h, state: &state, options: options)
 
         case .parallel(let merge, let branches):
             let results = branches.map { branch in
-                executeSteps(branch, input: h, state: &state)
+                executeSteps(branch, input: h, state: &state, options: options)
             }
             h = mergeResults(results, strategy: merge)
         }
@@ -218,13 +259,16 @@ func executeSteps(
 
 /// Execute a single lowered inference operation.
 func executeOp(
-    _ op: LoweredInferenceOp, input: MLXArray, state: inout InferenceState
+    _ op: LoweredInferenceOp, input: MLXArray, state: inout InferenceState,
+    options: ExecutionOptions
 ) -> MLXArray {
     switch op {
     case .tokenEmbedding(let emb):
+        // Skip embedding lookup when pre-computed embeddings are provided
+        if let embeddings = options.embeddings { return embeddings }
         return emb.apply(input)
     case .attention(let attn):
-        return attn.apply(input, caches: &state.caches)
+        return attn.apply(input, caches: &state.caches, positionIds: options.positionIds)
     case .mlp(let mlp):
         return mlp.apply(input)
     case .moe(let moe):

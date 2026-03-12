@@ -1,7 +1,7 @@
 /// Maps GGUF mmproj tensor names to MLX vision encoder weight paths for Qwen 3.5.
 ///
 /// Vision MLP uses GELU (fc1+fc2) instead of SwiGLU (gate+up+down).
-struct Qwen35VLVisionTensorNameMapper: GGUFTensorNameMapper {
+struct FullAttentionVisionTensorNameMapper: GGUFTensorNameMapper {
 
     func mlxName(for ggufName: String) -> String? {
         switch ggufName {
@@ -84,7 +84,7 @@ struct Qwen35VLVisionTensorNameMapper: GGUFTensorNameMapper {
 ///
 /// Handles the llama.cpp mmproj format where vision encoder tensors
 /// use `v.blk.{i}.*` naming and merger tensors use `mm.*` naming.
-struct Qwen25VLVisionTensorNameMapper: GGUFTensorNameMapper {
+struct WindowedVisionTensorNameMapper: GGUFTensorNameMapper {
 
     func mlxName(for ggufName: String) -> String? {
         // Patch embedding

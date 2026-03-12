@@ -16,17 +16,17 @@ public enum DetectedArchitecture: Sendable, Equatable {
     /// Sequential residual blocks: [norm+attn] → [norm+mlp].
     case transformer
 
-    /// Cohere Command-R: parallel attn+FFN, QK norm, LayerNorm.
+    /// Shared-norm parallel attention + MLP transformer.
     /// No separate FFN norm. QK norm weights present.
-    case cohere
+    case parallelAttentionMLP
 
     /// MoE transformer (Mixtral): standard transformer with expert FFN.
     /// Has `ffn_gate_inp` (router) and per-expert `ffn_gate.{e}` tensors.
     case moe
 
-    /// Qwen 3.5 hybrid: DeltaNet + Full Attention layers.
-    /// Has SSM tensors (ssm_beta, ssm_alpha, ssm_conv1d) on some layers.
-    case qwen35Hybrid
+    /// Hybrid DeltaNet / full-attention decoder.
+    /// Has DeltaNet tensors (ssm_beta, ssm_alpha, ssm_conv1d) on some layers.
+    case hybridDeltaNetAttention
 }
 
 // MARK: - GGUFArchitectureDetector
@@ -35,8 +35,8 @@ public enum DetectedArchitecture: Sendable, Equatable {
 ///
 /// Each pattern check is a sufficient condition. Detection order
 /// (most specific first):
-/// 1. qwen35Hybrid — SSM tensors
-/// 2. cohere — QK norm + no FFN norm
+/// 1. hybridDeltaNetAttention — DeltaNet tensors
+/// 2. parallelAttentionMLP — QK norm + no FFN norm
 /// 3. moe — expert tensors
 /// 4. transformer — universal fallback
 public struct GGUFArchitectureDetector: Sendable {
@@ -53,16 +53,16 @@ public struct GGUFArchitectureDetector: Sendable {
     ///
     /// Exposed for testing with synthetic tensor name sets.
     public func detect(tensorNames names: Set<String>) -> DetectedArchitecture {
-        // Priority 1: Qwen 3.5 hybrid (DeltaNet + Full Attention)
+        // Priority 1: hybrid DeltaNet / full-attention decoder
         if names.contains("blk.0.ssm_beta.weight") {
-            return .qwen35Hybrid
+            return .hybridDeltaNetAttention
         }
 
-        // Priority 2: Cohere (QK norm present, no separate FFN norm)
+        // Priority 2: shared-norm parallel attention + MLP
         if names.contains("blk.0.attn_q_norm.weight")
             && !names.contains("blk.0.ffn_norm.weight")
         {
-            return .cohere
+            return .parallelAttentionMLP
         }
 
         // Priority 3: MoE (expert routing gate)
@@ -118,11 +118,11 @@ public struct GGUFModelConfig: Sendable {
     public let expertCount: Int?
     public let expertsPerToken: Int?
 
-    // MARK: Cohere (optional)
+    // MARK: Shared-Norm Parallel Attention/MLP (optional)
 
     public let qkNorm: Bool
 
-    // MARK: Qwen 3.5 Hybrid (optional)
+    // MARK: Hybrid State-Space / Attention (optional)
 
     public let fullAttentionInterval: Int?
     public let linearKeyHeads: Int?
@@ -136,10 +136,35 @@ public struct GGUFModelConfig: Sendable {
 
     public let slidingWindow: Int?
 
+    // MARK: M-RoPE (VLM only)
+
+    /// Multi-axis RoPE configuration for VLM. Nil for text-only models.
+    public let mropeAxes: MRoPEAxes?
+
     /// Normalization layer kind.
     public enum NormKind: Sendable, Equatable {
         case rmsNorm
         case layerNorm
+    }
+
+    /// Return a copy with M-RoPE axes set.
+    func withMRoPEAxes(_ axes: MRoPEAxes?) -> GGUFModelConfig {
+        GGUFModelConfig(
+            hiddenSize: hiddenSize, layerCount: layerCount,
+            intermediateSize: intermediateSize, vocabSize: vocabSize,
+            attentionHeads: attentionHeads, kvHeads: kvHeads, headDim: headDim,
+            attentionBias: attentionBias, mlpBias: mlpBias,
+            normEps: normEps, normKind: normKind,
+            ropeTheta: ropeTheta, ropeDimension: ropeDimension,
+            ropeScaling: ropeScaling, tiedEmbeddings: tiedEmbeddings,
+            expertCount: expertCount, expertsPerToken: expertsPerToken,
+            qkNorm: qkNorm,
+            fullAttentionInterval: fullAttentionInterval,
+            linearKeyHeads: linearKeyHeads, linearValueHeads: linearValueHeads,
+            linearKeyHeadDim: linearKeyHeadDim, linearValueHeadDim: linearValueHeadDim,
+            convKernelSize: convKernelSize, partialRotaryFactor: partialRotaryFactor,
+            slidingWindow: slidingWindow, mropeAxes: axes
+        )
     }
 }
 
@@ -182,7 +207,7 @@ public struct GGUFConfigExtractor: Sendable {
         // Norm kind
         let normKind: GGUFModelConfig.NormKind
         switch architecture {
-        case .cohere:
+        case .parallelAttentionMLP:
             normKind = .layerNorm
         default:
             normKind = .rmsNorm
@@ -198,14 +223,21 @@ public struct GGUFConfigExtractor: Sendable {
         let expertCount = file.expertCount
         let expertsPerToken = file.expertUsedCount
 
-        // Qwen 3.5 hybrid
+        // Hybrid state-space / attention
         let fullAttentionInterval = file.fullAttentionInterval
         let linearKeyHeads = file.linearKeyHeadCount
         let linearValueHeads = file.linearValueHeadCount
         let linearKeyHeadDim = file.linearKeyHeadDim
         let linearValueHeadDim = file.linearValueHeadDim
         let convKernelSize = file.linearConvKernelSize
-        let partialRotaryFactor = file.partialRotaryFactor
+        let partialRotaryFactor: Float?
+        switch architecture {
+        case .hybridDeltaNetAttention:
+            partialRotaryFactor = try require(
+                file.partialRotaryFactor, "rope.partial_rotary_factor", in: file)
+        default:
+            partialRotaryFactor = file.partialRotaryFactor
+        }
 
         // Sliding window
         let slidingWindow = file.slidingWindow
@@ -236,15 +268,17 @@ public struct GGUFConfigExtractor: Sendable {
             linearValueHeadDim: linearValueHeadDim,
             convKernelSize: convKernelSize,
             partialRotaryFactor: partialRotaryFactor,
-            slidingWindow: slidingWindow
+            slidingWindow: slidingWindow,
+            mropeAxes: nil
         )
     }
 
     // MARK: - Private
 
-    private func require<T>(_ value: T?, _ name: String) throws -> T {
+    private func require<T>(_ value: T?, _ name: String, in file: GGUFFile? = nil) throws -> T {
         guard let v = value else {
-            throw GGUFGraphBuildError.missingMetadata(name)
+            let message = file.map { GGUFMetadataDiagnostics.missingMetadataMessage(name, in: $0) } ?? name
+            throw GGUFGraphBuildError.missingMetadata(message)
         }
         return v
     }
@@ -293,16 +327,17 @@ public struct IRGraphAssembler: Sendable {
         switch architecture {
         case .transformer:
             rootRegion = assembleTransformer(config: config, ctx: &ctx)
-        case .cohere:
-            rootRegion = assembleCohere(config: config, ctx: &ctx)
+        case .parallelAttentionMLP:
+            rootRegion = assembleParallelAttentionMLP(config: config, ctx: &ctx)
         case .moe:
             rootRegion = try assembleMoE(config: config, ctx: &ctx)
-        case .qwen35Hybrid:
-            rootRegion = assembleQwen35(config: config, ctx: &ctx)
+        case .hybridDeltaNetAttention:
+            rootRegion = assembleHybridDeltaNetAttention(config: config, ctx: &ctx)
         }
 
         return ModelGraph(rootRegion: rootRegion)
     }
+
 }
 
 // MARK: - IRContext (SSA Counter)
@@ -353,31 +388,73 @@ struct IRContext {
 
 private extension IRGraphAssembler {
 
-    // MARK: Standard Transformer
+    // MARK: Shared Post-Embedding Assembly
 
-    func assembleTransformer(config: GGUFModelConfig, ctx: inout IRContext) -> Region {
-        // Root region: embed → repeating(N, decoderBlock) → norm → outputHead
+    /// Build the decoder + final norm + output head.
+    ///
+    /// Used by both text-only and VLM graph assembly to avoid duplication.
+    func assemblePostEmbedding(
+        config: GGUFModelConfig,
+        architecture: DetectedArchitecture,
+        inputVal: ValueID,
+        ctx: inout IRContext
+    ) throws -> (operations: [Operation], resultVal: ValueID) {
         var ops: [Operation] = []
 
-        // Token embedding
-        let (embedOp, embedVal) = ctx.makeSource(kind: .tokenEmbedding(
-            TokenEmbeddingAttributes(vocabSize: config.vocabSize, embeddingSize: config.hiddenSize)
-        ))
-        ops.append(embedOp)
+        // Decoder layers
+        let decoderVal: ValueID
+        switch architecture {
+        case .transformer:
+            let body = makeTransformerDecoderBlock(config: config, ctx: &ctx)
+            let (op, val) = ctx.makePrimitive(
+                kind: .repeating(count: config.layerCount, body: body),
+                operands: [inputVal])
+            ops.append(op)
+            decoderVal = val
 
-        // Repeating decoder blocks
-        let decoderBody = makeTransformerDecoderBlock(config: config, ctx: &ctx)
-        let (repeatOp, repeatVal) = ctx.makePrimitive(
-            kind: .repeating(count: config.layerCount, body: decoderBody),
-            operands: [embedVal]
-        )
-        ops.append(repeatOp)
+        case .parallelAttentionMLP:
+            let body = makeParallelAttentionMLPDecoderBlock(config: config, ctx: &ctx)
+            let (op, val) = ctx.makePrimitive(
+                kind: .repeating(count: config.layerCount, body: body),
+                operands: [inputVal])
+            ops.append(op)
+            decoderVal = val
+
+        case .moe:
+            let body = try makeMoEDecoderBlock(config: config, ctx: &ctx)
+            let (op, val) = ctx.makePrimitive(
+                kind: .repeating(count: config.layerCount, body: body),
+                operands: [inputVal])
+            ops.append(op)
+            decoderVal = val
+
+        case .hybridDeltaNetAttention:
+            let interval = config.fullAttentionInterval ?? 4
+            var layers: [Region] = []
+            for i in 0..<config.layerCount {
+                let isFullAttention = (i + 1) % interval == 0
+                if isFullAttention {
+                    layers.append(makeHybridDeltaNetAttentionFullAttnBlock(config: config, ctx: &ctx))
+                } else {
+                    layers.append(makeHybridDeltaNetAttentionStateSpaceBlock(config: config, ctx: &ctx))
+                }
+            }
+            let (op, val) = ctx.makePrimitive(
+                kind: .layerStack(layers: layers),
+                operands: [inputVal])
+            ops.append(op)
+            decoderVal = val
+        }
 
         // Final norm
-        let (normOp, normVal) = ctx.makePrimitive(
-            kind: makeNorm(config: config),
-            operands: [repeatVal]
-        )
+        let normKind: OperationKind
+        switch architecture {
+        case .hybridDeltaNetAttention:
+            normKind = .rmsNorm(RMSNormAttributes(dimension: config.hiddenSize, epsilon: config.normEps))
+        default:
+            normKind = makeNorm(config: config)
+        }
+        let (normOp, normVal) = ctx.makePrimitive(kind: normKind, operands: [decoderVal])
         ops.append(normOp)
 
         // Output head
@@ -392,17 +469,13 @@ private extension IRGraphAssembler {
         )
         ops.append(headOp)
 
-        return Region(
-            parameters: [],
-            operations: ops,
-            results: [ValueUse(value: headVal)]
-        )
+        return (operations: ops, resultVal: headVal)
     }
 
-    // MARK: Cohere
+    // MARK: Standard Transformer
 
-    func assembleCohere(config: GGUFModelConfig, ctx: inout IRContext) -> Region {
-        // Same structure as transformer but with LayerNorm and QK norm
+    func assembleTransformer(config: GGUFModelConfig, ctx: inout IRContext) -> Region {
+        // Root region: embed → repeating(N, decoderBlock) → norm → outputHead
         var ops: [Operation] = []
 
         let (embedOp, embedVal) = ctx.makeSource(kind: .tokenEmbedding(
@@ -410,34 +483,37 @@ private extension IRGraphAssembler {
         ))
         ops.append(embedOp)
 
-        let decoderBody = makeCohereDecoderBlock(config: config, ctx: &ctx)
-        let (repeatOp, repeatVal) = ctx.makePrimitive(
-            kind: .repeating(count: config.layerCount, body: decoderBody),
-            operands: [embedVal]
-        )
-        ops.append(repeatOp)
-
-        let (normOp, normVal) = ctx.makePrimitive(
-            kind: makeNorm(config: config),
-            operands: [repeatVal]
-        )
-        ops.append(normOp)
-
-        let (headOp, headVal) = ctx.makePrimitive(
-            kind: .outputHead(OutputHeadAttributes(
-                inputSize: config.hiddenSize,
-                vocabSize: config.vocabSize,
-                tiedToEmbedding: config.tiedEmbeddings,
-                bias: false
-            )),
-            operands: [normVal]
-        )
-        ops.append(headOp)
+        // Safe to force-try: transformer assembly does not throw
+        let (postOps, resultVal) = try! assemblePostEmbedding(
+            config: config, architecture: .transformer, inputVal: embedVal, ctx: &ctx)
+        ops.append(contentsOf: postOps)
 
         return Region(
             parameters: [],
             operations: ops,
-            results: [ValueUse(value: headVal)]
+            results: [ValueUse(value: resultVal)]
+        )
+    }
+
+    // MARK: Shared-Norm Parallel Attention/MLP
+
+    func assembleParallelAttentionMLP(config: GGUFModelConfig, ctx: inout IRContext) -> Region {
+        var ops: [Operation] = []
+
+        let (embedOp, embedVal) = ctx.makeSource(kind: .tokenEmbedding(
+            TokenEmbeddingAttributes(vocabSize: config.vocabSize, embeddingSize: config.hiddenSize)
+        ))
+        ops.append(embedOp)
+
+        // Safe to force-try: shared-norm parallel assembly does not throw
+        let (postOps, resultVal) = try! assemblePostEmbedding(
+            config: config, architecture: .parallelAttentionMLP, inputVal: embedVal, ctx: &ctx)
+        ops.append(contentsOf: postOps)
+
+        return Region(
+            parameters: [],
+            operations: ops,
+            results: [ValueUse(value: resultVal)]
         )
     }
 
@@ -451,40 +527,20 @@ private extension IRGraphAssembler {
         ))
         ops.append(embedOp)
 
-        let decoderBody = try makeMoEDecoderBlock(config: config, ctx: &ctx)
-        let (repeatOp, repeatVal) = ctx.makePrimitive(
-            kind: .repeating(count: config.layerCount, body: decoderBody),
-            operands: [embedVal]
-        )
-        ops.append(repeatOp)
-
-        let (normOp, normVal) = ctx.makePrimitive(
-            kind: makeNorm(config: config),
-            operands: [repeatVal]
-        )
-        ops.append(normOp)
-
-        let (headOp, headVal) = ctx.makePrimitive(
-            kind: .outputHead(OutputHeadAttributes(
-                inputSize: config.hiddenSize,
-                vocabSize: config.vocabSize,
-                tiedToEmbedding: config.tiedEmbeddings,
-                bias: false
-            )),
-            operands: [normVal]
-        )
-        ops.append(headOp)
+        let (postOps, resultVal) = try assemblePostEmbedding(
+            config: config, architecture: .moe, inputVal: embedVal, ctx: &ctx)
+        ops.append(contentsOf: postOps)
 
         return Region(
             parameters: [],
             operations: ops,
-            results: [ValueUse(value: headVal)]
+            results: [ValueUse(value: resultVal)]
         )
     }
 
-    // MARK: Qwen 3.5 Hybrid
+    // MARK: Hybrid State-Space / Attention
 
-    func assembleQwen35(config: GGUFModelConfig, ctx: inout IRContext) -> Region {
+    func assembleHybridDeltaNetAttention(config: GGUFModelConfig, ctx: inout IRContext) -> Region {
         var ops: [Operation] = []
 
         let (embedOp, embedVal) = ctx.makeSource(kind: .tokenEmbedding(
@@ -492,45 +548,15 @@ private extension IRGraphAssembler {
         ))
         ops.append(embedOp)
 
-        // Build heterogeneous layers
-        let interval = config.fullAttentionInterval ?? 4
-        var layers: [Region] = []
-        for i in 0..<config.layerCount {
-            let isFullAttention = (i + 1) % interval == 0
-            if isFullAttention {
-                layers.append(makeQwen35FullAttnBlock(config: config, ctx: &ctx))
-            } else {
-                layers.append(makeQwen35DeltaNetBlock(config: config, ctx: &ctx))
-            }
-        }
-
-        let (stackOp, stackVal) = ctx.makePrimitive(
-            kind: .layerStack(layers: layers),
-            operands: [embedVal]
-        )
-        ops.append(stackOp)
-
-        let (normOp, normVal) = ctx.makePrimitive(
-            kind: .rmsNorm(RMSNormAttributes(dimension: config.hiddenSize, epsilon: config.normEps)),
-            operands: [stackVal]
-        )
-        ops.append(normOp)
-
-        let (headOp, headVal) = ctx.makePrimitive(
-            kind: .outputHead(OutputHeadAttributes(
-                inputSize: config.hiddenSize,
-                vocabSize: config.vocabSize,
-                tiedToEmbedding: config.tiedEmbeddings,
-                bias: false
-            )),
-            operands: [normVal]
-        )
-        ops.append(headOp)
+        // Safe to force-try: hybridDeltaNetAttention assembly does not throw
+        let (postOps, resultVal) = try! assemblePostEmbedding(
+            config: config, architecture: .hybridDeltaNetAttention, inputVal: embedVal, ctx: &ctx)
+        ops.append(contentsOf: postOps)
 
         return Region(
             parameters: [],
             operations: ops,
-            results: [ValueUse(value: headVal)]
+            results: [ValueUse(value: resultVal)]
         )
     }
 }
@@ -561,7 +587,8 @@ private extension IRGraphAssembler {
             rope: RoPEAttributes(
                 dimension: config.ropeDimension,
                 base: config.ropeTheta,
-                scaling: config.ropeScaling
+                scaling: config.ropeScaling,
+                mropeAxes: config.mropeAxes
             ),
             qkNorm: config.qkNorm ? .rmsNorm : nil
         )
@@ -652,16 +679,14 @@ private extension IRGraphAssembler {
         )
     }
 
-    // MARK: Cohere Decoder Block
+    // MARK: Shared-Norm Parallel Decoder Block
 
-    func makeCohereDecoderBlock(config: GGUFModelConfig, ctx: inout IRContext) -> Region {
-        // Cohere: single LayerNorm → Parallel(Attention, MLP) → residual add.
-        // NOT sequential like standard transformer.
+    func makeParallelAttentionMLPDecoderBlock(config: GGUFModelConfig, ctx: inout IRContext) -> Region {
+        // Shared LayerNorm → Parallel(Attention, MLP) → residual add.
         let (param, paramVal) = ctx.makeParam()
         var ops: [Operation] = []
 
-        // Single residual: LayerNorm → Parallel(.add, [Attention, MLP])
-        let residualBody = makeCohereResidualBody(config: config, ctx: &ctx)
+        let residualBody = makeParallelAttentionMLPResidualBody(config: config, ctx: &ctx)
         let (residualOp, residualVal) = ctx.makePrimitive(
             kind: .residual(strategy: .add, body: residualBody),
             operands: [paramVal]
@@ -675,8 +700,8 @@ private extension IRGraphAssembler {
         )
     }
 
-    /// Cohere residual body: LayerNorm → Parallel(.add, [Attention, MLP]).
-    func makeCohereResidualBody(config: GGUFModelConfig, ctx: inout IRContext) -> Region {
+    /// Shared-norm residual body: LayerNorm → Parallel(.add, [Attention, MLP]).
+    func makeParallelAttentionMLPResidualBody(config: GGUFModelConfig, ctx: inout IRContext) -> Region {
         let (param, paramVal) = ctx.makeParam()
         var ops: [Operation] = []
 
@@ -691,7 +716,7 @@ private extension IRGraphAssembler {
         let attnBranch: Region = {
             let (bp, bpVal) = ctx.makeParam()
             let (attnOp, attnVal) = ctx.makePrimitive(
-                kind: .attention(makeCohereAttentionAttrs(config: config)),
+                kind: .attention(makeParallelAttentionMLPAttentionAttrs(config: config)),
                 operands: [bpVal]
             )
             return Region(
@@ -729,8 +754,8 @@ private extension IRGraphAssembler {
         )
     }
 
-    /// Cohere-specific attention attributes: QK norm uses layerNorm, not rmsNorm.
-    func makeCohereAttentionAttrs(config: GGUFModelConfig) -> AttentionAttributes {
+    /// Shared-norm parallel attention attributes: QK norm uses layerNorm.
+    func makeParallelAttentionMLPAttentionAttrs(config: GGUFModelConfig) -> AttentionAttributes {
         AttentionAttributes(
             hiddenSize: config.hiddenSize,
             headCount: config.attentionHeads,
@@ -741,7 +766,8 @@ private extension IRGraphAssembler {
             rope: RoPEAttributes(
                 dimension: config.ropeDimension,
                 base: config.ropeTheta,
-                scaling: config.ropeScaling
+                scaling: config.ropeScaling,
+                mropeAxes: config.mropeAxes
             ),
             qkNorm: config.qkNorm ? .layerNorm : nil
         )
@@ -784,9 +810,9 @@ private extension IRGraphAssembler {
         )
     }
 
-    // MARK: Qwen 3.5 Blocks
+    // MARK: Hybrid State-Space / Attention Blocks
 
-    func makeQwen35FullAttnBlock(config: GGUFModelConfig, ctx: inout IRContext) -> Region {
+    func makeHybridDeltaNetAttentionFullAttnBlock(config: GGUFModelConfig, ctx: inout IRContext) -> Region {
         let ropePartialDim: Int
         if let factor = config.partialRotaryFactor {
             ropePartialDim = Int(Float(config.headDim) * factor)
@@ -804,7 +830,8 @@ private extension IRGraphAssembler {
             rope: RoPEAttributes(
                 dimension: ropePartialDim,
                 base: config.ropeTheta,
-                scaling: config.ropeScaling
+                scaling: config.ropeScaling,
+                mropeAxes: config.mropeAxes
             ),
             qkNorm: .rmsNorm,
             outputGate: .sigmoidPackedInQProj
@@ -842,11 +869,11 @@ private extension IRGraphAssembler {
         )
     }
 
-    func makeQwen35DeltaNetBlock(config: GGUFModelConfig, ctx: inout IRContext) -> Region {
+    func makeHybridDeltaNetAttentionStateSpaceBlock(config: GGUFModelConfig, ctx: inout IRContext) -> Region {
         let ssAttrs = StateSpaceAttributes(
             hiddenSize: config.hiddenSize,
             stateSize: config.linearKeyHeadDim ?? config.headDim,
-            variant: "gated_deltanet"
+            variant: DeltaNet.Variant.gated.rawValue
         )
 
         let (param, paramVal) = ctx.makeParam()
@@ -915,13 +942,27 @@ public struct GGUFGraphBuilder: Sendable {
         public let config: GGUFModelConfig
     }
 
-    /// Build ModelGraph from a GGUF file.
-    public func build(file: GGUFFile) throws -> BuildResult {
+    /// Build a text decoder ModelGraph from a GGUF file.
+    ///
+    /// For VLM models, pass `mmprojFile` to resolve M-RoPE sections.
+    /// The resulting graph is the same text decoder IR as text-only models —
+    /// the vision encoder is loaded separately by `GGUFVisionLoader`.
+    public func build(
+        file: GGUFFile,
+        mmprojFile: GGUFFile? = nil
+    ) throws -> BuildResult {
         let detector = GGUFArchitectureDetector()
         let architecture = detector.detect(file: file)
 
         let extractor = GGUFConfigExtractor()
-        let config = try extractor.extract(from: file, architecture: architecture)
+        var config = try extractor.extract(from: file, architecture: architecture)
+
+        // Resolve M-RoPE for VLM (from text GGUF metadata)
+        if mmprojFile != nil {
+            let mropeAxes = resolveMRoPEAxes(
+                file: file, config: config, architecture: architecture)
+            config = config.withMRoPEAxes(mropeAxes)
+        }
 
         let assembler = IRGraphAssembler()
         let graph = try assembler.assemble(config: config, architecture: architecture)
@@ -933,17 +974,36 @@ public struct GGUFGraphBuilder: Sendable {
         )
     }
 
+    // MARK: - Private Helpers
+
+    /// Resolve M-RoPE axes for VLM from GGUF metadata.
+    ///
+    /// Returns `nil` if `rope.scaling.sections` is not present in the GGUF file,
+    /// meaning the model does not use M-RoPE. No architecture-specific heuristics
+    /// are applied — the sections must come from metadata.
+    private func resolveMRoPEAxes(
+        file: GGUFFile,
+        config: GGUFModelConfig,
+        architecture: DetectedArchitecture
+    ) -> MRoPEAxes? {
+        guard let sections: [Int] = file[.ropeScalingSections], !sections.isEmpty else {
+            return nil
+        }
+        let interleaved = architecture == .hybridDeltaNetAttention
+        return MRoPEAxes(sections: sections, interleaved: interleaved)
+    }
+
     /// Return the appropriate GGUFTensorNameMapper for a detected architecture.
     public func mapper(for architecture: DetectedArchitecture) -> any GGUFTensorNameMapper {
         switch architecture {
         case .transformer:
-            return LlamaTensorNameMapper()
-        case .cohere:
-            return CohereTensorNameMapper()
+            return TransformerTensorNameMapper()
+        case .parallelAttentionMLP:
+            return ParallelAttentionMLPTensorNameMapper()
         case .moe:
-            return MixtralTensorNameMapper()
-        case .qwen35Hybrid:
-            return Qwen35TensorNameMapper()
+            return MoETensorNameMapper()
+        case .hybridDeltaNetAttention:
+            return HybridDeltaNetAttentionTensorNameMapper()
         }
     }
 

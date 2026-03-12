@@ -1,4 +1,5 @@
 import Testing
+import TestHeartbeat
 @preconcurrency import MLX
 import MLXFast
 import MLXNN
@@ -273,7 +274,7 @@ private func buildMixedMoEDeltaNetExecutor(
 
 // MARK: - MoE Performance Tests
 
-@Suite("MoE Executor Performance", .tags(.performance))
+@Suite("MoE Executor Performance", .tags(.performance), .heartbeat)
 struct MoEExecutorPerformanceTests {
 
     @Test("MoE forward: 2 experts × top-1, 4 tokens")
@@ -340,7 +341,7 @@ struct MoEExecutorPerformanceTests {
 
 // MARK: - DeltaNet Performance Tests
 
-@Suite("DeltaNet Executor Performance", .tags(.performance))
+@Suite("DeltaNet Executor Performance", .tags(.performance), .heartbeat)
 struct DeltaNetExecutorPerformanceTests {
 
     @Test("DeltaNet forward: 2 tokens (prefill)")
@@ -417,7 +418,7 @@ struct DeltaNetExecutorPerformanceTests {
 
 // MARK: - Combined MoE + DeltaNet Performance Tests
 
-@Suite("Combined MoE+DeltaNet Executor Performance", .tags(.performance))
+@Suite("Combined MoE+DeltaNet Executor Performance", .tags(.performance), .heartbeat)
 struct CombinedMoEDeltaNetPerformanceTests {
 
     @Test("Mixed model: 2 layers × (DeltaNet + MoE), short sequence")

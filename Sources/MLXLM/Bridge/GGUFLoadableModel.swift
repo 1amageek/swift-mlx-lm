@@ -104,3 +104,69 @@ enum GGUFLoadError: Error {
     case dimensionMismatch(String)
     case invalidData(String)
 }
+
+extension GGUFLoadError: CustomStringConvertible, LocalizedError {
+
+    var description: String {
+        switch self {
+        case .missingMetadata(let key):
+            return "Missing required GGUF metadata: \(key)"
+        case .unsupportedArchitecture(let architecture):
+            return "Unsupported GGUF architecture: \(architecture)"
+        case .unsupportedQuantization(let rawValue):
+            return "Unsupported GGUF quantization type: \(rawValue)"
+        case .tensorNotFound(let name):
+            return "Required GGUF tensor not found: \(name)"
+        case .dimensionMismatch(let message):
+            return "GGUF tensor dimension mismatch: \(message)"
+        case .invalidData(let message):
+            return "Invalid GGUF data: \(message)"
+        }
+    }
+
+    var errorDescription: String? { description }
+}
+
+package enum GGUFMetadataDiagnostics {
+
+    package static func missingMetadataMessage(_ key: String, in file: GGUFFile) -> String {
+        if let detail = diagnosticDetail(for: key, in: file) {
+            return "\(key) (\(detail))"
+        }
+        if let architecture = file.architecture {
+            return "\(key) (expected key: \(architecture).\(key))"
+        }
+        return key
+    }
+
+    private static func diagnosticDetail(for key: String, in file: GGUFFile) -> String? {
+        switch key {
+        case "rope.partial_rotary_factor":
+            return partialRotaryFactorDetail(in: file)
+        default:
+            return nil
+        }
+    }
+
+    private static func partialRotaryFactorDetail(in file: GGUFFile) -> String? {
+        guard let architecture = file.architecture else { return nil }
+
+        let expectedKey = "\(architecture).rope.partial_rotary_factor"
+        guard let ropeDimension = file.ropeDimensionCount else {
+            return "expected key: \(expectedKey)"
+        }
+
+        let ropeDimensionKey = "\(architecture).rope.dimension_count"
+        let attentionKeyLength = file.attentionKeyLength ?? file.headDimension
+
+        guard let attentionKeyLength, attentionKeyLength > 0 else {
+            return "expected key: \(expectedKey); found \(ropeDimensionKey)=\(ropeDimension)"
+        }
+
+        let attentionKeyLengthKey = "\(architecture).attention.key_length"
+        let inferred = Float(ropeDimension) / Float(attentionKeyLength)
+        let inferredString = String(format: "%.6g", inferred)
+        return
+            "expected key: \(expectedKey); found \(ropeDimensionKey)=\(ropeDimension) and \(attentionKeyLengthKey)=\(attentionKeyLength); inferred factor would be \(inferredString), but strict loading requires explicit metadata"
+    }
+}

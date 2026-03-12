@@ -29,8 +29,8 @@ struct ArchitectureDetectorTests {
         #expect(detector.detect(tensorNames: names) == .transformer)
     }
 
-    @Test("QK norm + no FFN norm → .cohere")
-    func detectCohere() {
+    @Test("QK norm + no FFN norm → .parallelAttentionMLP")
+    func detectParallelAttentionMLP() {
         let names: Set<String> = [
             "token_embd.weight",
             "blk.0.attn_q.weight",
@@ -43,7 +43,7 @@ struct ArchitectureDetectorTests {
             "blk.0.ffn_gate.weight",
             "output_norm.weight",
         ]
-        #expect(detector.detect(tensorNames: names) == .cohere)
+        #expect(detector.detect(tensorNames: names) == .parallelAttentionMLP)
     }
 
     @Test("ffn_gate_inp.weight → .moe")
@@ -65,7 +65,7 @@ struct ArchitectureDetectorTests {
         #expect(detector.detect(tensorNames: names) == .moe)
     }
 
-    @Test("ssm_beta.weight → .qwen35Hybrid")
+    @Test("ssm_beta.weight → .hybridDeltaNetAttention")
     func detectQwen35Hybrid() {
         let names: Set<String> = [
             "token_embd.weight",
@@ -76,11 +76,11 @@ struct ArchitectureDetectorTests {
             "blk.0.ffn_gate.weight",
             "output_norm.weight",
         ]
-        #expect(detector.detect(tensorNames: names) == .qwen35Hybrid)
+        #expect(detector.detect(tensorNames: names) == .hybridDeltaNetAttention)
     }
 
-    @Test("SSM + MoE patterns → .qwen35Hybrid wins (highest priority)")
-    func detectPriorityQwen35OverMoE() {
+    @Test("SSM + MoE patterns → .hybridDeltaNetAttention wins (highest priority)")
+    func detectPriorityHybridOverMoE() {
         let names: Set<String> = [
             "token_embd.weight",
             "blk.0.ssm_beta.weight",
@@ -88,11 +88,11 @@ struct ArchitectureDetectorTests {
             "blk.0.ffn_gate.0.weight",
             "output_norm.weight",
         ]
-        #expect(detector.detect(tensorNames: names) == .qwen35Hybrid)
+        #expect(detector.detect(tensorNames: names) == .hybridDeltaNetAttention)
     }
 
-    @Test("QK norm + no FFN norm → .cohere wins over .transformer")
-    func detectPriorityCohereOverTransformer() {
+    @Test("QK norm + no FFN norm → .parallelAttentionMLP wins over .transformer")
+    func detectPriorityParallelAttentionMLPOverTransformer() {
         let names: Set<String> = [
             "token_embd.weight",
             "blk.0.attn_q.weight",
@@ -101,10 +101,10 @@ struct ArchitectureDetectorTests {
             "blk.0.ffn_gate.weight",
             "output_norm.weight",
         ]
-        #expect(detector.detect(tensorNames: names) == .cohere)
+        #expect(detector.detect(tensorNames: names) == .parallelAttentionMLP)
     }
 
-    @Test("QK norm WITH FFN norm → .transformer (not cohere)")
+    @Test("QK norm WITH FFN norm → .transformer (not parallelAttentionMLP)")
     func detectQKNormWithFFNNormIsTransformer() {
         let names: Set<String> = [
             "token_embd.weight",
@@ -200,8 +200,8 @@ struct ConfigExtractorTests {
         #expect(config.expertsPerToken == 2)
     }
 
-    @Test("Cohere architecture → layerNorm, qkNorm=true")
-    func extractCohereNormKind() throws {
+    @Test("Shared-norm parallel architecture → layerNorm, qkNorm=true")
+    func extractParallelAttentionMLPNormKind() throws {
         let file = try makeLlamaGGUF(
             arch: "command-r",
             extraTensors: [
@@ -209,7 +209,7 @@ struct ConfigExtractorTests {
                 "blk.0.attn_k_norm.weight",
             ]
         )
-        let config = try extractor.extract(from: file, architecture: .cohere)
+        let config = try extractor.extract(from: file, architecture: .parallelAttentionMLP)
 
         #expect(config.normKind == .layerNorm)
         #expect(config.qkNorm == true)
@@ -227,7 +227,7 @@ struct ConfigExtractorTests {
                 ("qwen3moe.rope.partial_rotary_factor", .float32(0.25)),
             ]
         )
-        let config = try extractor.extract(from: file, architecture: .qwen35Hybrid)
+        let config = try extractor.extract(from: file, architecture: .hybridDeltaNetAttention)
 
         #expect(config.fullAttentionInterval == 4)
         #expect(config.linearKeyHeads == 16)
@@ -236,6 +236,47 @@ struct ConfigExtractorTests {
         #expect(config.linearValueHeadDim == 128)
         #expect(config.convKernelSize == 4)
         #expect(config.partialRotaryFactor == 0.25)
+    }
+
+    @Test("Hybrid state-space / attention extraction throws when partial rotary factor is missing")
+    func extractHybridDeltaNetAttentionMissingPartialRotaryFactor() throws {
+        let file = try makeLlamaGGUF(
+            arch: "qwen35",
+            extraMetadata: [
+                ("qwen35.full_attention_interval", .uint32(4)),
+                ("qwen35.ssm.group_count", .uint32(16)),
+                ("qwen35.ssm.state_size", .uint32(128)),
+                ("qwen35.ssm.conv_kernel", .uint32(4)),
+            ]
+        )
+        #expect(throws: GGUFGraphBuildError.self) {
+            try extractor.extract(from: file, architecture: .hybridDeltaNetAttention)
+        }
+    }
+
+    @Test("Hybrid state-space / attention extraction reports inferred partial rotary factor")
+    func extractHybridDeltaNetAttentionMissingPartialRotaryFactorIncludesDiagnostic() throws {
+        let file = try makeLlamaGGUF(
+            arch: "qwen35",
+            extraMetadata: [
+                ("qwen35.attention.key_length", .uint32(256)),
+                ("qwen35.full_attention_interval", .uint32(4)),
+                ("qwen35.ssm.group_count", .uint32(16)),
+                ("qwen35.ssm.state_size", .uint32(128)),
+                ("qwen35.ssm.conv_kernel", .uint32(4)),
+                ("qwen35.rope.dimension_count", .uint32(64)),
+            ]
+        )
+
+        do {
+            _ = try extractor.extract(from: file, architecture: .hybridDeltaNetAttention)
+            Issue.record("Expected missing metadata error")
+        } catch let error as GGUFGraphBuildError {
+            let description = error.description
+            #expect(description.contains("qwen35.rope.dimension_count=64"))
+            #expect(description.contains("qwen35.attention.key_length=256"))
+            #expect(description.contains("inferred factor would be 0.25"))
+        }
     }
 
     @Test("RoPE scaling extraction")
@@ -268,6 +309,103 @@ struct ConfigExtractorTests {
         #expect(throws: GGUFGraphBuildError.self) {
             let file = try GGUFFile.parse(data: data)
             _ = try extractor.extract(from: file, architecture: .transformer)
+        }
+    }
+}
+
+@Suite("Qwen35 Load Configuration")
+struct Qwen35LoadConfigurationTests {
+
+    @Test("Qwen35 loader requires ssm.state_size metadata")
+    func qwen35LoaderRequiresStateSize() throws {
+        let file = try makeLlamaGGUF(
+            arch: "qwen35",
+            extraMetadata: [
+                ("qwen35.ssm.group_count", .uint32(16)),
+                ("qwen35.ssm.conv_kernel", .uint32(4)),
+                ("qwen35.full_attention_interval", .uint32(4)),
+                ("qwen35.rope.partial_rotary_factor", .float32(0.25)),
+            ]
+        )
+
+        #expect(throws: GGUFLoadError.self) {
+            try Qwen35Configuration(from: file)
+        }
+    }
+
+    @Test("Qwen35 loader requires ssm.conv_kernel metadata")
+    func qwen35LoaderRequiresConvKernel() throws {
+        let file = try makeLlamaGGUF(
+            arch: "qwen35",
+            extraMetadata: [
+                ("qwen35.ssm.group_count", .uint32(16)),
+                ("qwen35.ssm.state_size", .uint32(128)),
+                ("qwen35.full_attention_interval", .uint32(4)),
+                ("qwen35.rope.partial_rotary_factor", .float32(0.25)),
+            ]
+        )
+
+        #expect(throws: GGUFLoadError.self) {
+            try Qwen35Configuration(from: file)
+        }
+    }
+
+    @Test("Qwen35 loader requires full_attention_interval metadata")
+    func qwen35LoaderRequiresFullAttentionInterval() throws {
+        let file = try makeLlamaGGUF(
+            arch: "qwen35",
+            extraMetadata: [
+                ("qwen35.ssm.group_count", .uint32(16)),
+                ("qwen35.ssm.state_size", .uint32(128)),
+                ("qwen35.ssm.conv_kernel", .uint32(4)),
+                ("qwen35.rope.partial_rotary_factor", .float32(0.25)),
+            ]
+        )
+
+        #expect(throws: GGUFLoadError.self) {
+            try Qwen35Configuration(from: file)
+        }
+    }
+
+    @Test("Qwen35 loader requires rope.partial_rotary_factor metadata")
+    func qwen35LoaderRequiresPartialRotaryFactor() throws {
+        let file = try makeLlamaGGUF(
+            arch: "qwen35",
+            extraMetadata: [
+                ("qwen35.ssm.group_count", .uint32(16)),
+                ("qwen35.ssm.state_size", .uint32(128)),
+                ("qwen35.ssm.conv_kernel", .uint32(4)),
+                ("qwen35.full_attention_interval", .uint32(4)),
+            ]
+        )
+
+        #expect(throws: GGUFLoadError.self) {
+            try Qwen35Configuration(from: file)
+        }
+    }
+
+    @Test("Qwen35 loader reports inferred partial rotary factor")
+    func qwen35LoaderPartialRotaryFactorDiagnostic() throws {
+        let file = try makeLlamaGGUF(
+            arch: "qwen35",
+            extraMetadata: [
+                ("qwen35.attention.key_length", .uint32(256)),
+                ("qwen35.ssm.group_count", .uint32(16)),
+                ("qwen35.ssm.state_size", .uint32(128)),
+                ("qwen35.ssm.conv_kernel", .uint32(4)),
+                ("qwen35.full_attention_interval", .uint32(4)),
+                ("qwen35.rope.dimension_count", .uint32(64)),
+            ]
+        )
+
+        do {
+            _ = try Qwen35Configuration(from: file)
+            Issue.record("Expected missing metadata error")
+        } catch let error as GGUFLoadError {
+            let description = error.description
+            #expect(description.contains("qwen35.rope.dimension_count=64"))
+            #expect(description.contains("qwen35.attention.key_length=256"))
+            #expect(description.contains("inferred factor would be 0.25"))
         }
     }
 }
@@ -309,7 +447,8 @@ struct IRAssemblerTransformerTests {
             linearValueHeadDim: nil,
             convKernelSize: nil,
             partialRotaryFactor: nil,
-            slidingWindow: nil
+            slidingWindow: nil,
+            mropeAxes: nil
         )
     }
 
@@ -495,8 +634,8 @@ struct IRAssemblerVariantTests {
 
     let assembler = IRGraphAssembler()
 
-    @Test("Cohere uses layerNorm instead of rmsNorm")
-    func assembleCohereLayerNorm() throws {
+    @Test("Shared-norm parallel transformer uses layerNorm instead of rmsNorm")
+    func assembleParallelAttentionMLPLayerNorm() throws {
         let config = GGUFModelConfig(
             hiddenSize: 256, layerCount: 2, intermediateSize: 512,
             vocabSize: 32000, attentionHeads: 4, kvHeads: 2, headDim: 64,
@@ -508,9 +647,9 @@ struct IRAssemblerVariantTests {
             fullAttentionInterval: nil,
             linearKeyHeads: nil, linearValueHeads: nil,
             linearKeyHeadDim: nil, linearValueHeadDim: nil,
-            convKernelSize: nil, partialRotaryFactor: nil, slidingWindow: nil
+            convKernelSize: nil, partialRotaryFactor: nil, slidingWindow: nil, mropeAxes: nil
         )
-        let graph = try assembler.assemble(config: config, architecture: .cohere)
+        let graph = try assembler.assemble(config: config, architecture: .parallelAttentionMLP)
         let root = graph.rootRegion
 
         // Final norm should be layerNorm
@@ -518,11 +657,11 @@ struct IRAssemblerVariantTests {
             Issue.record("Final norm should be layerNorm, got \(root.operations[2].kind)")
         }
 
-        // Cohere decoder block: single residual → body has [layerNorm, parallel(attn, mlp)]
+        // Shared-norm decoder block: single residual → body has [layerNorm, parallel(attn, mlp)]
         guard case .repeating(_, let decoderBody) = root.operations[1].kind,
               case .residual(_, let residualBody) = decoderBody.operations[0].kind
         else {
-            Issue.record("Cannot navigate to Cohere decoder block")
+            Issue.record("Cannot navigate to shared-norm parallel decoder block")
             return
         }
 
@@ -535,8 +674,8 @@ struct IRAssemblerVariantTests {
         #expect(decoderBody.operations.count == 1)
     }
 
-    @Test("Cohere attention has qkNorm: .layerNorm")
-    func assembleCohereQKNorm() throws {
+    @Test("Shared-norm parallel attention has qkNorm: .layerNorm")
+    func assembleParallelAttentionMLPQKNorm() throws {
         let config = GGUFModelConfig(
             hiddenSize: 256, layerCount: 2, intermediateSize: 512,
             vocabSize: 32000, attentionHeads: 4, kvHeads: 2, headDim: 64,
@@ -548,19 +687,19 @@ struct IRAssemblerVariantTests {
             fullAttentionInterval: nil,
             linearKeyHeads: nil, linearValueHeads: nil,
             linearKeyHeadDim: nil, linearValueHeadDim: nil,
-            convKernelSize: nil, partialRotaryFactor: nil, slidingWindow: nil
+            convKernelSize: nil, partialRotaryFactor: nil, slidingWindow: nil, mropeAxes: nil
         )
-        let graph = try assembler.assemble(config: config, architecture: .cohere)
+        let graph = try assembler.assemble(config: config, architecture: .parallelAttentionMLP)
         let root = graph.rootRegion
 
-        // Cohere: repeating → decoderBody (1 residual) → residualBody (norm, parallel)
+        // Shared-norm parallel: repeating → decoderBody (1 residual) → residualBody (norm, parallel)
         // parallel branches: [attnBranch, mlpBranch]
         guard case .repeating(_, let decoderBody) = root.operations[1].kind,
               case .residual(_, let residualBody) = decoderBody.operations[0].kind,
               case .parallel(_, let branches) = residualBody.operations[1].kind,
               case .attention(let attrs) = branches[0].operations[0].kind
         else {
-            Issue.record("Cannot navigate to Cohere attention")
+            Issue.record("Cannot navigate to shared-norm parallel attention")
             return
         }
         #expect(attrs.qkNorm == .layerNorm)
@@ -579,7 +718,7 @@ struct IRAssemblerVariantTests {
             fullAttentionInterval: nil,
             linearKeyHeads: nil, linearValueHeads: nil,
             linearKeyHeadDim: nil, linearValueHeadDim: nil,
-            convKernelSize: nil, partialRotaryFactor: nil, slidingWindow: nil
+            convKernelSize: nil, partialRotaryFactor: nil, slidingWindow: nil, mropeAxes: nil
         )
         let graph = try assembler.assemble(config: config, architecture: .moe)
         let root = graph.rootRegion
@@ -612,7 +751,7 @@ struct IRAssemblerVariantTests {
     @Test("Qwen 3.5 uses layerStack instead of repeating")
     func assembleQwen35LayerStack() throws {
         let config = makeQwen35Config(layers: 4, interval: 4)
-        let graph = try assembler.assemble(config: config, architecture: .qwen35Hybrid)
+        let graph = try assembler.assemble(config: config, architecture: .hybridDeltaNetAttention)
         let root = graph.rootRegion
 
         if case .layerStack(let layers) = root.operations[1].kind {
@@ -626,7 +765,7 @@ struct IRAssemblerVariantTests {
     func assembleQwen35HeterogeneousLayers() throws {
         // 4 layers, interval=4: layers 0,1,2 = DeltaNet, layer 3 = Full Attention
         let config = makeQwen35Config(layers: 4, interval: 4)
-        let graph = try assembler.assemble(config: config, architecture: .qwen35Hybrid)
+        let graph = try assembler.assemble(config: config, architecture: .hybridDeltaNetAttention)
         let root = graph.rootRegion
 
         guard case .layerStack(let layers) = root.operations[1].kind else {
@@ -662,7 +801,7 @@ struct IRAssemblerVariantTests {
     @Test("Qwen 3.5 partial rotary factor applied to attention rope dimension")
     func assembleQwen35PartialRotary() throws {
         let config = makeQwen35Config(layers: 4, interval: 4)
-        let graph = try assembler.assemble(config: config, architecture: .qwen35Hybrid)
+        let graph = try assembler.assemble(config: config, architecture: .hybridDeltaNetAttention)
         let root = graph.rootRegion
 
         guard case .layerStack(let layers) = root.operations[1].kind,
@@ -691,7 +830,7 @@ struct IRAssemblerVariantTests {
             fullAttentionInterval: interval,
             linearKeyHeads: 8, linearValueHeads: 8,
             linearKeyHeadDim: 64, linearValueHeadDim: 64,
-            convKernelSize: 4, partialRotaryFactor: 0.25, slidingWindow: nil
+            convKernelSize: 4, partialRotaryFactor: 0.25, slidingWindow: nil, mropeAxes: nil
         )
     }
 }
@@ -717,7 +856,7 @@ struct SlotEnumerationTests {
             fullAttentionInterval: nil,
             linearKeyHeads: nil, linearValueHeads: nil,
             linearKeyHeadDim: nil, linearValueHeadDim: nil,
-            convKernelSize: nil, partialRotaryFactor: nil, slidingWindow: nil
+            convKernelSize: nil, partialRotaryFactor: nil, slidingWindow: nil, mropeAxes: nil
         )
         let graph = try assembler.assemble(config: config, architecture: .transformer)
         let manifest = enumerator.enumerate(graph)
@@ -752,8 +891,8 @@ struct SlotEnumerationTests {
         #expect(paths.contains("model.layers.1.mlp.gate_proj.weight"))
     }
 
-    @Test("Cohere slot manifest includes QK norm weights")
-    func slotManifestCoherePaths() throws {
+    @Test("Shared-norm parallel slot manifest includes QK norm weights")
+    func slotManifestParallelAttentionMLPPaths() throws {
         let config = GGUFModelConfig(
             hiddenSize: 256, layerCount: 2, intermediateSize: 512,
             vocabSize: 32000, attentionHeads: 4, kvHeads: 2, headDim: 64,
@@ -765,9 +904,9 @@ struct SlotEnumerationTests {
             fullAttentionInterval: nil,
             linearKeyHeads: nil, linearValueHeads: nil,
             linearKeyHeadDim: nil, linearValueHeadDim: nil,
-            convKernelSize: nil, partialRotaryFactor: nil, slidingWindow: nil
+            convKernelSize: nil, partialRotaryFactor: nil, slidingWindow: nil, mropeAxes: nil
         )
-        let graph = try assembler.assemble(config: config, architecture: .cohere)
+        let graph = try assembler.assemble(config: config, architecture: .parallelAttentionMLP)
         let manifest = enumerator.enumerate(graph)
         let paths = Set(manifest.map(\.mlxWeightPath))
 
@@ -793,7 +932,7 @@ struct SlotEnumerationTests {
             fullAttentionInterval: nil,
             linearKeyHeads: nil, linearValueHeads: nil,
             linearKeyHeadDim: nil, linearValueHeadDim: nil,
-            convKernelSize: nil, partialRotaryFactor: nil, slidingWindow: nil
+            convKernelSize: nil, partialRotaryFactor: nil, slidingWindow: nil, mropeAxes: nil
         )
         let graph = try assembler.assemble(config: config, architecture: .moe)
         let manifest = enumerator.enumerate(graph)
@@ -823,9 +962,9 @@ struct SlotEnumerationTests {
             fullAttentionInterval: 4,
             linearKeyHeads: 8, linearValueHeads: 8,
             linearKeyHeadDim: 64, linearValueHeadDim: 64,
-            convKernelSize: 4, partialRotaryFactor: 0.25, slidingWindow: nil
+            convKernelSize: 4, partialRotaryFactor: 0.25, slidingWindow: nil, mropeAxes: nil
         )
-        let graph = try assembler.assemble(config: config, architecture: .qwen35Hybrid)
+        let graph = try assembler.assemble(config: config, architecture: .hybridDeltaNetAttention)
         let manifest = enumerator.enumerate(graph)
         let paths = Set(manifest.map(\.mlxWeightPath))
 
@@ -872,8 +1011,8 @@ struct GGUFGraphBuilderIntegrationTests {
         #expect(result.graph.rootRegion.operations.count == 4)
     }
 
-    @Test("Build cohere graph from synthetic GGUF")
-    func buildCohereFromGGUF() throws {
+    @Test("Build shared-norm parallel graph from synthetic GGUF")
+    func buildParallelAttentionMLPFromGGUF() throws {
         let file = try makeLlamaGGUF(
             arch: "command-r",
             extraTensors: [
@@ -885,7 +1024,7 @@ struct GGUFGraphBuilderIntegrationTests {
         )
         let result = try builder.build(file: file)
 
-        #expect(result.architecture == .cohere)
+        #expect(result.architecture == .parallelAttentionMLP)
         #expect(result.config.normKind == .layerNorm)
         #expect(result.config.qkNorm == true)
     }
@@ -928,7 +1067,7 @@ struct GGUFGraphBuilderIntegrationTests {
         )
         let result = try builder.build(file: file)
 
-        #expect(result.architecture == .qwen35Hybrid)
+        #expect(result.architecture == .hybridDeltaNetAttention)
 
         guard case .layerStack(let layers) = result.graph.rootRegion.operations[1].kind else {
             Issue.record("op1 should be layerStack")
@@ -939,10 +1078,10 @@ struct GGUFGraphBuilderIntegrationTests {
 
     @Test("Mapper selection by architecture")
     func mapperSelection() {
-        #expect(builder.mapper(for: .transformer) is LlamaTensorNameMapper)
-        #expect(builder.mapper(for: .cohere) is CohereTensorNameMapper)
-        #expect(builder.mapper(for: .moe) is MixtralTensorNameMapper)
-        #expect(builder.mapper(for: .qwen35Hybrid) is Qwen35TensorNameMapper)
+        #expect(builder.mapper(for: .transformer) is TransformerTensorNameMapper)
+        #expect(builder.mapper(for: .parallelAttentionMLP) is ParallelAttentionMLPTensorNameMapper)
+        #expect(builder.mapper(for: .moe) is MoETensorNameMapper)
+        #expect(builder.mapper(for: .hybridDeltaNetAttention) is HybridDeltaNetAttentionTensorNameMapper)
     }
 }
 

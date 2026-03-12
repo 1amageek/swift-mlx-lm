@@ -49,6 +49,7 @@ public final class MLXExecutor {
     // Runtime state (reset per forward call)
     private var tokenIDs: MLXArray!
     private var pathComponents: [StructuralPathComponent] = []
+    private var positionIds: MLXArray?
 
     public init(compiledModel: MLXCompiledModel) {
         self.model = compiledModel
@@ -76,9 +77,23 @@ public final class MLXExecutor {
     /// Accepts 1D `[L]` or 2D `[B, L]` token IDs. Internally adds a batch
     /// dimension if needed and squeezes it from the output for transparent usage.
     public func forward(tokenIDs: MLXArray) throws -> MLXArray {
+        try forward(tokenIDs: tokenIDs, positionIds: nil)
+    }
+
+    /// Execute a forward pass with optional position IDs.
+    ///
+    /// When `positionIds` is provided (shape `[3, B, S]` for M-RoPE), the
+    /// executor uses per-token 3D position encoding instead of scalar offsets.
+    ///
+    /// Accepts 1D `[L]` or 2D `[B, L]` token IDs.
+    public func forward(
+        tokenIDs: MLXArray,
+        positionIds: MLXArray? = nil
+    ) throws -> MLXArray {
         let needsSqueeze = tokenIDs.ndim == 1
         self.tokenIDs = needsSqueeze ? tokenIDs.expandedDimensions(axis: 0) : tokenIDs
         self.pathComponents = []
+        self.positionIds = positionIds
 
         let results = try executeRegion(model.graph.rootRegion, inputValues: [])
         guard let logits = results.first else {
@@ -212,10 +227,6 @@ public final class MLXExecutor {
         case .layerStack(let layers):
             return try executeLayerStack(layers: layers, inputs: inputs)
 
-        case .visionEncoder:
-            throw CompilerError.unsupportedOperation(
-                "visionEncoder is not yet implemented in MLXExecutor")
-
         case .custom(let attrs):
             throw CompilerError.unsupportedOperation("custom(\(attrs.domain).\(attrs.name))")
         }
@@ -281,9 +292,6 @@ public final class MLXExecutor {
             return (0..<resultCount).map { j in
                 stacked(branchResults.map { $0[j] })
             }
-        case .visionMerge:
-            throw CompilerError.unsupportedOperation(
-                "visionMerge is not yet implemented in MLXExecutor")
         case .custom:
             throw CompilerError.unsupportedOperation("custom parallel merge")
         }
@@ -356,13 +364,8 @@ public final class MLXExecutor {
     private func executeLinear(
         _ attrs: LinearAttributes, input: MLXArray
     ) throws -> MLXArray {
-        let w = try weight(role: .weight)
-        var result = MLX.matmul(input, w.T)
-        if attrs.bias {
-            let b = try weight(role: .bias)
-            result = result + b
-        }
-        return result
+        let proj = try projection(role: .weight)
+        return proj.apply(input)
     }
 
     // MARK: - Output Head
@@ -371,19 +374,15 @@ public final class MLXExecutor {
         _ attrs: OutputHeadAttributes, input: MLXArray
     ) throws -> MLXArray {
         if attrs.tiedToEmbedding, let embPath = model.embeddingPath {
-            let embWeight = try model.weightStore.require(
+            // Tied embedding is always dense (embedding tables cannot be quantized)
+            let embWeight = try model.weightStore.requireDense(
                 ParameterSlot(path: embPath, role: .embeddingTable)
             )
             return MLX.matmul(input, embWeight.T)
         }
 
-        let w = try weight(role: .outputProjection)
-        var result = MLX.matmul(input, w.T)
-        if attrs.bias {
-            let b = try weight(role: .bias)
-            result = result + b
-        }
-        return result
+        let outputProj = try projection(role: .outputProjection)
+        return outputProj.apply(input)
     }
 
     // MARK: - RoPE
@@ -431,20 +430,10 @@ public final class MLXExecutor {
         let headDim = attrs.headDimension
         let scale = 1.0 / Float(headDim).squareRoot()
 
-        // Project Q, K, V
-        let qWeight = try weight(field: "q_proj", role: .weight)
-        let kWeight = try weight(field: "k_proj", role: .weight)
-        let vWeight = try weight(field: "v_proj", role: .weight)
-
-        var queries = MLX.matmul(input, qWeight.T)
-        var keys = MLX.matmul(input, kWeight.T)
-        var values = MLX.matmul(input, vWeight.T)
-
-        if attrs.bias {
-            if let qb = optionalWeight(field: "q_proj", role: .bias) { queries = queries + qb }
-            if let kb = optionalWeight(field: "k_proj", role: .bias) { keys = keys + kb }
-            if let vb = optionalWeight(field: "v_proj", role: .bias) { values = values + vb }
-        }
+        // Project Q, K, V via LoweredProjection (quantized or dense dispatch)
+        var queries = try projection(field: "q_proj").apply(input)
+        var keys = try projection(field: "k_proj").apply(input)
+        var values = try projection(field: "v_proj").apply(input)
 
         // Reshape to head layout [B, H, L, D]
         queries = queries.reshaped(B, L, attrs.headCount, -1).transposed(0, 2, 1, 3)
@@ -481,41 +470,65 @@ public final class MLXExecutor {
         // RoPE
         let kvCache = caches[slot] as? MLXKVCache
         if let ropeAttrs = attrs.rope {
-            let offset = kvCache?.offset ?? 0
-            let ropeScale: Float = {
-                if let scaling = ropeAttrs.scaling, scaling.kind == .linear {
-                    return 1.0 / scaling.factor
+            if let mropeAxes = ropeAttrs.mropeAxes, let posIds = positionIds {
+                // M-RoPE: 3D position encoding for VLM
+                let ropeDim = ropeAttrs.dimension
+                if mropeAxes.interleaved {
+                    queries = applyInterleavedMRoPE(
+                        queries, positionIds: posIds, ropeDim: ropeDim,
+                        ropeBase: ropeAttrs.base, sections: mropeAxes.sections,
+                        headDim: headDim)
+                    keys = applyInterleavedMRoPE(
+                        keys, positionIds: posIds, ropeDim: ropeDim,
+                        ropeBase: ropeAttrs.base, sections: mropeAxes.sections,
+                        headDim: headDim)
+                } else {
+                    queries = applyContiguousMRoPE(
+                        queries, positionIds: posIds,
+                        ropeBase: ropeAttrs.base, sections: mropeAxes.sections,
+                        headDim: headDim)
+                    keys = applyContiguousMRoPE(
+                        keys, positionIds: posIds,
+                        ropeBase: ropeAttrs.base, sections: mropeAxes.sections,
+                        headDim: headDim)
                 }
-                return 1.0
-            }()
-
-            let ropeDim = ropeAttrs.dimension
-            if ropeDim < headDim {
-                // Partial RoPE (e.g. Qwen 3.5: 64 of 256)
-                let qRot = MLXFast.RoPE(
-                    queries[0..., 0..., 0..., 0..<ropeDim],
-                    dimensions: ropeDim, traditional: false,
-                    base: ropeAttrs.base, scale: ropeScale, offset: offset
-                )
-                queries = concatenated(
-                    [qRot, queries[0..., 0..., 0..., ropeDim...]], axis: -1)
-
-                let kRot = MLXFast.RoPE(
-                    keys[0..., 0..., 0..., 0..<ropeDim],
-                    dimensions: ropeDim, traditional: false,
-                    base: ropeAttrs.base, scale: ropeScale, offset: offset
-                )
-                keys = concatenated(
-                    [kRot, keys[0..., 0..., 0..., ropeDim...]], axis: -1)
             } else {
-                queries = MLXFast.RoPE(
-                    queries, dimensions: ropeDim, traditional: false,
-                    base: ropeAttrs.base, scale: ropeScale, offset: offset
-                )
-                keys = MLXFast.RoPE(
-                    keys, dimensions: ropeDim, traditional: false,
-                    base: ropeAttrs.base, scale: ropeScale, offset: offset
-                )
+                // Standard RoPE with scalar offset
+                let offset = kvCache?.offset ?? 0
+                let ropeScale: Float = {
+                    if let scaling = ropeAttrs.scaling, scaling.kind == .linear {
+                        return 1.0 / scaling.factor
+                    }
+                    return 1.0
+                }()
+
+                let ropeDim = ropeAttrs.dimension
+                if ropeDim < headDim {
+                    let qRot = MLXFast.RoPE(
+                        queries[0..., 0..., 0..., 0..<ropeDim],
+                        dimensions: ropeDim, traditional: false,
+                        base: ropeAttrs.base, scale: ropeScale, offset: offset
+                    )
+                    queries = concatenated(
+                        [qRot, queries[0..., 0..., 0..., ropeDim...]], axis: -1)
+
+                    let kRot = MLXFast.RoPE(
+                        keys[0..., 0..., 0..., 0..<ropeDim],
+                        dimensions: ropeDim, traditional: false,
+                        base: ropeAttrs.base, scale: ropeScale, offset: offset
+                    )
+                    keys = concatenated(
+                        [kRot, keys[0..., 0..., 0..., ropeDim...]], axis: -1)
+                } else {
+                    queries = MLXFast.RoPE(
+                        queries, dimensions: ropeDim, traditional: false,
+                        base: ropeAttrs.base, scale: ropeScale, offset: offset
+                    )
+                    keys = MLXFast.RoPE(
+                        keys, dimensions: ropeDim, traditional: false,
+                        base: ropeAttrs.base, scale: ropeScale, offset: offset
+                    )
+                }
             }
         }
 
@@ -530,15 +543,10 @@ public final class MLXExecutor {
             scale: scale, mask: mask
         )
 
-        // Output projection
-        let oWeight = try weight(field: "o_proj", role: .weight)
-        var output = MLX.matmul(
-            attnOutput.transposed(0, 2, 1, 3).reshaped(B, L, -1),
-            oWeight.T
-        )
-        if attrs.bias {
-            if let ob = optionalWeight(field: "o_proj", role: .bias) { output = output + ob }
-        }
+        // Output projection via LoweredProjection
+        let oProj = try projection(field: "o_proj")
+        let output = oProj.apply(
+            attnOutput.transposed(0, 2, 1, 3).reshaped(B, L, -1))
 
         return output
     }
@@ -548,14 +556,10 @@ public final class MLXExecutor {
     private func executeMLP(
         _ attrs: MLPAttributes, input: MLXArray
     ) throws -> MLXArray {
-        let gateWeight = try weight(field: "gate_proj", role: .weight)
-        let downWeight = try weight(field: "down_proj", role: .weight)
+        let gateProj = try projection(field: "gate_proj")
+        let downProj = try projection(field: "down_proj")
 
-        var gate = MLX.matmul(input, gateWeight.T)
-
-        if attrs.bias {
-            if let gb = optionalWeight(field: "gate_proj", role: .bias) { gate = gate + gb }
-        }
+        let gate = gateProj.apply(input)
 
         // Activation
         let activated: MLXArray
@@ -574,24 +578,16 @@ public final class MLXExecutor {
         let gated: MLXArray
         switch attrs.gating {
         case .swiglu, .geglu, .glu:
-            let upWeight = try weight(field: "up_proj", role: .weight)
-            var up = MLX.matmul(input, upWeight.T)
-            if attrs.bias {
-                if let ub = optionalWeight(field: "up_proj", role: .bias) { up = up + ub }
-            }
+            let up = try projection(field: "up_proj").apply(input)
             gated = activated * up
         case .none:
             gated = activated
         case .custom:
-            let upWeight = try weight(field: "up_proj", role: .weight)
-            let up = MLX.matmul(input, upWeight.T)
+            let up = try projection(field: "up_proj").apply(input)
             gated = activated * up
         }
 
-        var output = MLX.matmul(gated, downWeight.T)
-        if attrs.bias {
-            if let db = optionalWeight(field: "down_proj", role: .bias) { output = output + db }
-        }
+        let output = downProj.apply(gated)
 
         return output
     }
@@ -604,8 +600,8 @@ public final class MLXExecutor {
         let (B, L, D) = (input.dim(0), input.dim(1), input.dim(2))
         let flat = input.reshaped(-1, D)
 
-        let routerWeight = try weight(field: "router", role: .weight)
-        let gateLogits = MLX.matmul(flat, routerWeight.T)
+        let routerProj = try projection(field: "router")
+        let gateLogits = routerProj.apply(flat)
 
         let topKIndices = MLX.argSort(gateLogits, axis: -1)[
             0..., (gateLogits.dim(-1) - attrs.expertsPerToken)...]
@@ -627,19 +623,18 @@ public final class MLXExecutor {
             }
 
             // Run expert MLP once with combined weight (skip if no tokens routed)
-            let expertGateW = try weight(field: "gate_proj", role: .weight)
-            let expertUpW = try weight(field: "up_proj", role: .weight)
-            let expertDownW = try weight(field: "down_proj", role: .weight)
+            let expertGateProj = try projection(field: "gate_proj")
+            let expertUpProj = try projection(field: "up_proj")
+            let expertDownProj = try projection(field: "down_proj")
 
             let activated: MLXArray
             switch attrs.expertMLP.activation {
-            case .gelu: activated = gelu(MLX.matmul(flat, expertGateW.T))
-            default: activated = silu(MLX.matmul(flat, expertGateW.T))
+            case .gelu: activated = gelu(expertGateProj.apply(flat))
+            default: activated = silu(expertGateProj.apply(flat))
             }
 
-            let expertOut = MLX.matmul(
-                activated * MLX.matmul(flat, expertUpW.T),
-                expertDownW.T
+            let expertOut = expertDownProj.apply(
+                activated * expertUpProj.apply(flat)
             )
 
             output = output + expertOut * expertWeight
@@ -666,24 +661,37 @@ public final class MLXExecutor {
     private func executeDeltaNet(
         _ attrs: StateSpaceAttributes, input: MLXArray
     ) throws -> MLXArray {
+        let inputDType = input.dtype
         let B = input.dim(0)
         let T = input.dim(1)
 
-        // Load weights
-        let qkvWeight = try weight(field: "in_proj_qkv", role: .weight)
-        let zWeight = try weight(field: "in_proj_z", role: .weight)
-        let bWeight = try weight(field: "in_proj_b", role: .weight)
-        let aWeight = try weight(field: "in_proj_a", role: .weight)
+        // Resolve recurrence dtype from IR declaration
+        let recurrenceDType: DType
+        switch attrs.computeDType {
+        case .float32: recurrenceDType = .float32
+        case .float16: recurrenceDType = .float16
+        }
+
+        // Load projection weights via LoweredProjection
+        let qkvProj = try projection(field: "in_proj_qkv")
+        let zProj = try projection(field: "in_proj_z")
+        let bProj = try projection(field: "in_proj_b")
+        let aProj = try projection(field: "in_proj_a")
+        let outProj = try projection(field: "out_proj")
+        // Non-projection weights (1D: conv, norm, bias)
         let convWeight = try weight(field: "conv1d", role: .weight)
-        let outWeight = try weight(field: "out_proj", role: .weight)
         let normWeight = try weight(field: "norm", role: .scale)
         let dtBias = try weight(field: "dt_bias", role: .bias)
         let aLog = try weight(field: "A_log", role: .weight)
 
-        // Infer dimensions from weight shapes
-        // Weight layout: [output_dim, input_dim] — dim(0) is the output dimension
-        let totalQKV = qkvWeight.dim(0)
-        let valueDim = zWeight.dim(0)
+        // Infer dimensions from projection output shapes
+        let mixedQKV = qkvProj.apply(input)
+        let z = zProj.apply(input)
+        let b = bProj.apply(input)
+        let a = aProj.apply(input)
+
+        let totalQKV = mixedQKV.dim(-1)
+        let valueDim = z.dim(-1)
         let keyDim = (totalQKV - valueDim) / 2
         let linearKeyHeadDim = attrs.stateSize
         let linearKeyHeads = keyDim / linearKeyHeadDim
@@ -693,20 +701,14 @@ public final class MLXExecutor {
         let convKernelSize = convWeight.dim(1)
         let scale = 1.0 / Float(linearKeyHeadDim).squareRoot()
 
-        // Projections
-        let mixedQKV = MLX.matmul(input, qkvWeight.T)
-        let z = MLX.matmul(input, zWeight.T)
-        let b = MLX.matmul(input, bWeight.T)
-        let a = MLX.matmul(input, aWeight.T)
-
         // Get recurrent cache by path
         let slot = try cacheSlot()
         let cache = caches[slot] as! MLXRecurrentCache
 
-        // Causal Conv1D
+        // Causal Conv1D (feedforward — stays in projection dtype)
         let prefix: MLXArray
         if let existing = cache.convState {
-            prefix = existing
+            prefix = existing.asType(mixedQKV.dtype)
         } else {
             prefix = MLXArray.zeros([B, convKernelSize, convDim])
         }
@@ -720,35 +722,36 @@ public final class MLXExecutor {
         let rawConv = conv1d(convInput, convWeight3d, stride: 1, padding: 0, groups: convDim)
         let activated = silu(rawConv[0..., 1..., 0...])  // Skip warmup token
 
-        // Split Q, K, V
-        let parts = activated.split(indices: [keyDim, 2 * keyDim], axis: -1)
+        // === Dtype boundary: projection output → recurrence dtype ===
+        let parts = activated.asType(recurrenceDType).split(indices: [keyDim, 2 * keyDim], axis: -1)
         let query = parts[0].reshaped(B, T, linearKeyHeads, linearKeyHeadDim)
         let key = parts[1].reshaped(B, T, linearKeyHeads, linearKeyHeadDim)
         let value = parts[2].reshaped(B, T, linearValueHeads, linearValueHeadDim)
 
-        // Gates
-        let beta = sigmoid(b)
-        let g = -MLX.exp(aLog) * softplus(a + dtBias)
+        // Gates (computed in recurrence dtype)
+        let beta = sigmoid(b.asType(recurrenceDType))
+        let g = -MLX.exp(aLog.asType(recurrenceDType)) * softplus(a.asType(recurrenceDType) + dtBias.asType(recurrenceDType))
         let decay = MLX.exp(g)
 
-        // Delta rule recurrence
+        // Delta rule recurrence (entirely in recurrence dtype)
         let (attnOut, newState) = deltaNetRecurrence(
             query: query, key: key, value: value,
             decay: decay, beta: beta, state: cache.recurrentState,
+            recurrenceDType: recurrenceDType,
             scale: scale
         )
         cache.recurrentState = newState
         cache.incrementOffset(by: T)
 
-        // Gated output norm
+        // === Dtype boundary: recurrence output → activation dtype ===
         let dv = linearValueHeadDim
         let numHeads = linearValueHeads
-        let flat = attnOut.reshaped(B * T * numHeads, dv)
+        let flat = attnOut.asType(inputDType).reshaped(B * T * numHeads, dv)
         let zFlat = z.reshaped(B, T, numHeads, dv).reshaped(B * T * numHeads, dv)
         let normed = MLXFast.rmsNorm(flat, weight: 1 + normWeight, eps: 1e-6) * silu(zFlat)
         let gated = normed.reshaped(B, T, valueDim)
 
-        return MLX.matmul(gated, outWeight.T)
+        return outProj.apply(gated)
     }
 
     /// Per-token recurrence for the DeltaNet state update.
@@ -757,15 +760,17 @@ public final class MLXExecutor {
     /// o_t = S_t^T · (q_t / √d_k)
     ///
     /// Pre-slices all timesteps before the loop to avoid repeated slice+squeeze overhead.
+    /// All inputs are expected in `recurrenceDType`.
     private func deltaNetRecurrence(
         query: MLXArray, key: MLXArray, value: MLXArray,
         decay: MLXArray, beta: MLXArray, state: MLXArray?,
+        recurrenceDType: DType,
         scale: Float
     ) -> (MLXArray, MLXArray) {
         let B = query.dim(0), T = query.dim(1), H = query.dim(2)
         let dk = query.dim(3), dv = value.dim(3)
 
-        let qN = l2Norm(query) * MLXArray(scale)
+        let qN = l2Norm(query) * MLXArray(scale).asType(recurrenceDType)
         let kN = l2Norm(key)
 
         // Pre-slice all timesteps: split along axis=1 returns [B, 1, H, d] arrays
@@ -775,7 +780,7 @@ public final class MLXExecutor {
         let gSlices = decay.split(parts: T, axis: 1)
         let bSlices = beta.split(parts: T, axis: 1)
 
-        var S = state ?? MLXArray.zeros([B, H, dk, dv])
+        var S = state ?? MLXArray.zeros([B, H, dk, dv], dtype: recurrenceDType)
         var outputs = [MLXArray]()
         outputs.reserveCapacity(T)
 
@@ -823,34 +828,94 @@ public final class MLXExecutor {
 
     // MARK: - Weight Lookup
 
-    /// Look up a weight at the current structural path with a given role.
+    /// Look up a dense weight at the current structural path with a given role.
+    ///
+    /// Use for weights that must be plain MLXArray (norms, embeddings).
+    /// For projection weights, use `projection(field:role:)` instead.
     private func weight(role: ParameterRole) throws -> MLXArray {
         let path = StructuralPath(components: pathComponents)
         let slot = ParameterSlot(path: path, role: role)
-        return try model.weightStore.require(slot)
+        return try model.weightStore.requireDense(slot)
     }
 
-    /// Look up a weight at the current path, returning nil if not found.
+    /// Look up a dense weight at the current path, returning nil if not found.
     private func optionalWeight(role: ParameterRole) -> MLXArray? {
         let path = StructuralPath(components: pathComponents)
         let slot = ParameterSlot(path: path, role: role)
-        return model.weightStore.get(slot)
+        guard let storage = model.weightStore.get(slot) else { return nil }
+        switch storage {
+        case .dense(let array): return array
+        case .affineQuantized(let qt):
+            // Norm/embed should not be quantized, but return something safe
+            return MLX.dequantized(
+                qt.packedWeight, scales: qt.scales, biases: qt.zeroBiases,
+                groupSize: qt.groupSize, bits: qt.bits
+            )
+        }
     }
 
-    /// Look up a weight at a sub-field of the current path.
+    /// Look up a dense weight at a sub-field of the current path.
     private func weight(field: String, role: ParameterRole) throws -> MLXArray {
         let path = StructuralPath(components: pathComponents)
             .appending(.field(field))
         let slot = ParameterSlot(path: path, role: role)
-        return try model.weightStore.require(slot)
+        return try model.weightStore.requireDense(slot)
     }
 
-    /// Look up a weight at a sub-field, returning nil if not found.
+    /// Look up a dense weight at a sub-field, returning nil if not found.
     private func optionalWeight(field: String, role: ParameterRole) -> MLXArray? {
         let path = StructuralPath(components: pathComponents)
             .appending(.field(field))
         let slot = ParameterSlot(path: path, role: role)
-        return model.weightStore.get(slot)
+        guard let storage = model.weightStore.get(slot) else { return nil }
+        switch storage {
+        case .dense(let array): return array
+        case .affineQuantized(let qt):
+            return MLX.dequantized(
+                qt.packedWeight, scales: qt.scales, biases: qt.zeroBiases,
+                groupSize: qt.groupSize, bits: qt.bits
+            )
+        }
+    }
+
+    /// Create a `LoweredProjection` for a projection weight at the given field.
+    ///
+    /// This dispatches `quantizedMatmul` for quantized weights and standard
+    /// `matmul` for dense weights, preserving GGUF-native quantization.
+    private func projection(field: String) throws -> LoweredProjection {
+        let path = StructuralPath(components: pathComponents)
+            .appending(.field(field))
+        let storage = try model.weightStore.require(
+            ParameterSlot(path: path, role: .weight))
+        let biasSlot = ParameterSlot(path: path, role: .bias)
+        let bias: MLXArray?
+        if let biasStorage = model.weightStore.get(biasSlot) {
+            switch biasStorage {
+            case .dense(let array): bias = array
+            case .affineQuantized: bias = nil
+            }
+        } else {
+            bias = nil
+        }
+        return LoweredProjection(storage: storage, bias: bias)
+    }
+
+    /// Create a `LoweredProjection` for a weight at the current path (no field).
+    private func projection(role: ParameterRole = .weight) throws -> LoweredProjection {
+        let path = StructuralPath(components: pathComponents)
+        let storage = try model.weightStore.require(
+            ParameterSlot(path: path, role: role))
+        let biasSlot = ParameterSlot(path: path, role: .bias)
+        let bias: MLXArray?
+        if let biasStorage = model.weightStore.get(biasSlot) {
+            switch biasStorage {
+            case .dense(let array): bias = array
+            case .affineQuantized: bias = nil
+            }
+        } else {
+            bias = nil
+        }
+        return LoweredProjection(storage: storage, bias: bias)
     }
 }
 

@@ -86,7 +86,13 @@ public struct LoweredAttention: @unchecked Sendable {
     }
 
     /// Apply attention with external cache state.
-    public func apply(_ x: MLXArray, caches: inout [LoweredCacheState]) -> MLXArray {
+    ///
+    /// When `positionIds` is provided (shape `[3, B, S]` for M-RoPE), per-token
+    /// multi-axis rotation is applied instead of a scalar cache offset.
+    public func apply(
+        _ x: MLXArray, caches: inout [LoweredCacheState],
+        positionIds: MLXArray? = nil
+    ) -> MLXArray {
         let (B, L) = (x.dim(0), x.dim(1))
         let headDim = attrs.headDimension
         let scale = 1.0 / Float(headDim).squareRoot()
@@ -158,40 +164,64 @@ public struct LoweredAttention: @unchecked Sendable {
 
         // RoPE
         if let ropeAttrs = attrs.rope {
-            let ropeScale: Float = {
-                if let scaling = ropeAttrs.scaling, scaling.kind == .linear {
-                    return 1.0 / scaling.factor
+            if let mropeAxes = ropeAttrs.mropeAxes, let posIds = positionIds {
+                // M-RoPE: per-token 3D position encoding for VLM
+                let ropeDim = ropeAttrs.dimension
+                if mropeAxes.interleaved {
+                    queries = applyInterleavedMRoPE(
+                        queries, positionIds: posIds, ropeDim: ropeDim,
+                        ropeBase: ropeAttrs.base, sections: mropeAxes.sections,
+                        headDim: headDim)
+                    keys = applyInterleavedMRoPE(
+                        keys, positionIds: posIds, ropeDim: ropeDim,
+                        ropeBase: ropeAttrs.base, sections: mropeAxes.sections,
+                        headDim: headDim)
+                } else {
+                    queries = applyContiguousMRoPE(
+                        queries, positionIds: posIds,
+                        ropeBase: ropeAttrs.base, sections: mropeAxes.sections,
+                        headDim: headDim)
+                    keys = applyContiguousMRoPE(
+                        keys, positionIds: posIds,
+                        ropeBase: ropeAttrs.base, sections: mropeAxes.sections,
+                        headDim: headDim)
                 }
-                return 1.0
-            }()
-
-            let ropeDim = ropeAttrs.dimension
-            if ropeDim < headDim {
-                // Partial RoPE (e.g. Qwen 3.5: 64 of 256)
-                let qRot = MLXFast.RoPE(
-                    queries[0..., 0..., 0..., 0..<ropeDim],
-                    dimensions: ropeDim, traditional: false,
-                    base: ropeAttrs.base, scale: ropeScale, offset: cacheOffset
-                )
-                queries = concatenated(
-                    [qRot, queries[0..., 0..., 0..., ropeDim...]], axis: -1)
-
-                let kRot = MLXFast.RoPE(
-                    keys[0..., 0..., 0..., 0..<ropeDim],
-                    dimensions: ropeDim, traditional: false,
-                    base: ropeAttrs.base, scale: ropeScale, offset: cacheOffset
-                )
-                keys = concatenated(
-                    [kRot, keys[0..., 0..., 0..., ropeDim...]], axis: -1)
             } else {
-                queries = MLXFast.RoPE(
-                    queries, dimensions: ropeDim, traditional: false,
-                    base: ropeAttrs.base, scale: ropeScale, offset: cacheOffset
-                )
-                keys = MLXFast.RoPE(
-                    keys, dimensions: ropeDim, traditional: false,
-                    base: ropeAttrs.base, scale: ropeScale, offset: cacheOffset
-                )
+                // Standard RoPE with scalar offset
+                let ropeScale: Float = {
+                    if let scaling = ropeAttrs.scaling, scaling.kind == .linear {
+                        return 1.0 / scaling.factor
+                    }
+                    return 1.0
+                }()
+
+                let ropeDim = ropeAttrs.dimension
+                if ropeDim < headDim {
+                    let qRot = MLXFast.RoPE(
+                        queries[0..., 0..., 0..., 0..<ropeDim],
+                        dimensions: ropeDim, traditional: false,
+                        base: ropeAttrs.base, scale: ropeScale, offset: cacheOffset
+                    )
+                    queries = concatenated(
+                        [qRot, queries[0..., 0..., 0..., ropeDim...]], axis: -1)
+
+                    let kRot = MLXFast.RoPE(
+                        keys[0..., 0..., 0..., 0..<ropeDim],
+                        dimensions: ropeDim, traditional: false,
+                        base: ropeAttrs.base, scale: ropeScale, offset: cacheOffset
+                    )
+                    keys = concatenated(
+                        [kRot, keys[0..., 0..., 0..., ropeDim...]], axis: -1)
+                } else {
+                    queries = MLXFast.RoPE(
+                        queries, dimensions: ropeDim, traditional: false,
+                        base: ropeAttrs.base, scale: ropeScale, offset: cacheOffset
+                    )
+                    keys = MLXFast.RoPE(
+                        keys, dimensions: ropeDim, traditional: false,
+                        base: ropeAttrs.base, scale: ropeScale, offset: cacheOffset
+                    )
+                }
             }
         }
 
