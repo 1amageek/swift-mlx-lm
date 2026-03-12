@@ -118,11 +118,15 @@ public struct LoweredAttention: @unchecked Sendable {
         if let outputGate = attrs.outputGate {
             switch outputGate {
             case .sigmoidPackedInQProj:
-                // Q projection output is [B, L, 2 * headCount * headDim]
-                // Split into queries and gate along last axis
-                let qDim = queries.dim(-1) / 2
-                gateValues = queries[0..., 0..., qDim...]
-                queries = queries[0..., 0..., 0..<qDim]
+                // Q projection output: [B, L, headCount * 2 * headDim]
+                // Per-head layout: [q_dims, gate_dims] interleaved per head.
+                // Must reshape per-head then split within each head (not flat split).
+                let headCount = attrs.headCount
+                let perHeadDim = queries.dim(-1) / headCount  // 2 * headDim
+                let hd = perHeadDim / 2  // headDim
+                let perHead = queries.reshaped(B, L, headCount, perHeadDim)
+                gateValues = perHead[0..., 0..., 0..., hd...].reshaped(B, L, -1)
+                queries = perHead[0..., 0..., 0..., 0..<hd].reshaped(B, L, -1)
             }
         }
 
@@ -136,10 +140,10 @@ public struct LoweredAttention: @unchecked Sendable {
             switch qkNorm {
             case .rmsNorm:
                 if let qnw = qNormWeight {
-                    queries = MLXFast.rmsNorm(queries, weight: 1 + qnw, eps: 1e-6)
+                    queries = MLXFast.rmsNorm(queries, weight: qnw, eps: 1e-6)
                 }
                 if let knw = kNormWeight {
-                    keys = MLXFast.rmsNorm(keys, weight: 1 + knw, eps: 1e-6)
+                    keys = MLXFast.rmsNorm(keys, weight: knw, eps: 1e-6)
                 }
             case .layerNorm:
                 if let qnw = qNormWeight {

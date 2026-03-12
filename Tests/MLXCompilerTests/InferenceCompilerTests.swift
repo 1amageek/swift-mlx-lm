@@ -114,7 +114,7 @@ private func tinyLlamaWeights(layerCount: Int) -> BoundWeights {
 
         // Residual 0: RMSNorm + Attention
         let attnNormPath = layerPrefix + [.operation(0), .regionBody, .operation(0)]
-        dict[slot(attnNormPath, role: .scale)] = MLXArray.zeros([D])
+        dict[slot(attnNormPath, role: .scale)] = MLXArray.ones([D])
 
         let attnPath = layerPrefix + [.operation(0), .regionBody, .operation(1)]
         dict[slot(attnPath + [.field("q_proj")], role: .weight)] = MLXRandom.normal([H * headDim, D]) * 0.1
@@ -124,7 +124,7 @@ private func tinyLlamaWeights(layerCount: Int) -> BoundWeights {
 
         // Residual 1: RMSNorm + MLP
         let mlpNormPath = layerPrefix + [.operation(1), .regionBody, .operation(0)]
-        dict[slot(mlpNormPath, role: .scale)] = MLXArray.zeros([D])
+        dict[slot(mlpNormPath, role: .scale)] = MLXArray.ones([D])
 
         let mlpPath = layerPrefix + [.operation(1), .regionBody, .operation(1)]
         dict[slot(mlpPath + [.field("gate_proj")], role: .weight)] = MLXRandom.normal([inter, D]) * 0.1
@@ -133,7 +133,7 @@ private func tinyLlamaWeights(layerCount: Int) -> BoundWeights {
     }
 
     // op2: Final RMSNorm
-    dict[slot([.operation(2)], role: .scale)] = MLXArray.zeros([D])
+    dict[slot([.operation(2)], role: .scale)] = MLXArray.ones([D])
 
     // op3: OutputHead (tied — no weight needed)
 
@@ -563,7 +563,7 @@ private func tinyUntiedWeights() -> BoundWeights {
 
     // op1: Residual (RMSNorm + Attention)
     let attnNormPath: [StructuralPathComponent] = [.operation(1), .regionBody, .operation(0)]
-    dict[slot(attnNormPath, role: .scale)] = MLXArray.zeros([D])
+    dict[slot(attnNormPath, role: .scale)] = MLXArray.ones([D])
 
     let attnPath: [StructuralPathComponent] = [.operation(1), .regionBody, .operation(1)]
     dict[slot(attnPath + [.field("q_proj")], role: .weight)] = MLXRandom.normal([H * headDim, D]) * 0.1
@@ -572,7 +572,7 @@ private func tinyUntiedWeights() -> BoundWeights {
     dict[slot(attnPath + [.field("o_proj")], role: .weight)] = MLXRandom.normal([D, H * headDim]) * 0.1
 
     // op2: Final RMSNorm
-    dict[slot([.operation(2)], role: .scale)] = MLXArray.zeros([D])
+    dict[slot([.operation(2)], role: .scale)] = MLXArray.ones([D])
 
     // op3: OutputHead (untied — needs .outputProjection weight)
     dict[slot([.operation(3)], role: .outputProjection)] = MLXRandom.normal([vocab, D]) * 0.1
@@ -786,7 +786,7 @@ struct StandalonePositionOpTests {
         )
 
         // Step 3: RMSNorm (default epsilon = 1e-6)
-        h = MLXFast.rmsNorm(h, weight: 1 + normWeight, eps: 1e-6)
+        h = MLXFast.rmsNorm(h, weight: normWeight, eps: 1e-6)
 
         // Step 4: Output head (tied to embedding) — matmul(h, embTable.T)
         let expected = matmul(h, embTable.T)
@@ -807,7 +807,7 @@ struct LoweredNormTests {
         let input = MLXRandom.normal([2, 3, 4])
         let norm = LoweredNorm.rms(weight: weight, epsilon: 1e-5)
 
-        let expected = MLXFast.rmsNorm(input, weight: 1 + weight, eps: 1e-5)
+        let expected = MLXFast.rmsNorm(input, weight: weight, eps: 1e-5)
         let actual = norm.apply(input)
 
         let diff = abs(actual - expected).max()

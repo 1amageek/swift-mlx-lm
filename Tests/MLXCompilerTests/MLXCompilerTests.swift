@@ -179,7 +179,7 @@ struct ExecutorOperationTests {
         #expect(vals[5] == 0)
     }
 
-    @Test("RMSNorm applies 1+w convention")
+    @Test("RMSNorm applies weight directly (mlx-swift convention)")
     func rmsNormConvention() throws {
         struct NormModel: ModelComponent {
             @ModelComponentBuilder var body: some ModelComponent {
@@ -193,8 +193,8 @@ struct ExecutorOperationTests {
         // Uniform input → RMS = value itself, so normalized = sign(x)
         let table = MLXArray(converting: [Double](repeating: 2.0, count: 16), [4, 4])
 
-        // Scale weights centered at 0: w=0 means effective weight=1
-        let scale = MLXArray.zeros([4])
+        // Scale weight = 1.0 → identity scaling (mlx-swift: weight used directly)
+        let scale = MLXArray.ones([4])
 
         let weights = bind([
             slot([.operation(0)], role: .embeddingTable): table,
@@ -205,7 +205,7 @@ struct ExecutorOperationTests {
 
         let output = try executor.forward(tokenIDs: MLXArray([Int32(0)]))
 
-        // RMSNorm on [2,2,2,2] with weight=(1+0)=1:
+        // RMSNorm on [2,2,2,2] with weight=1:
         // rms = sqrt(mean([4,4,4,4])) = sqrt(4) = 2
         // normalized = [2,2,2,2] / 2 * 1 = [1,1,1,1]
         let vals = output.asArray(Float.self)
@@ -894,8 +894,8 @@ struct ExecutorAttentionVariantTests {
             slot(attnPath + [.field("v_proj")], role: .weight): MLXRandom.normal([4, 4]) * 0.1,
             slot(attnPath + [.field("o_proj")], role: .weight): MLXRandom.normal([4, 4]) * 0.1,
             // QK norm weights (centered at 0 for 1+w convention)
-            slot(attnPath + [.field("q_norm")], role: .scale): MLXArray.zeros([2]),
-            slot(attnPath + [.field("k_norm")], role: .scale): MLXArray.zeros([2]),
+            slot(attnPath + [.field("q_norm")], role: .scale): MLXArray.ones([2]),
+            slot(attnPath + [.field("k_norm")], role: .scale): MLXArray.ones([2]),
         ])
         let compiled = try MLXCompiler().compile(graph: graph, weights: weights)
         let executor = MLXExecutor(compiledModel: compiled)
@@ -1546,7 +1546,7 @@ struct CompilerErrorPathTests {
 
         let graph = try HeadOnly().makeModelGraph()
         let weights = bind([
-            slot([.operation(0)], role: .scale): MLXArray.zeros([4]),
+            slot([.operation(0)], role: .scale): MLXArray.ones([4]),
         ])
 
         #expect(throws: CompilerError.self) {
@@ -2027,7 +2027,7 @@ struct ExecutorDeltaNetTests {
             slot(ssPath + [.field("in_proj_a")], role: .weight): MLXRandom.normal([1, 4]) * 0.1,
             slot(ssPath + [.field("conv1d")], role: .weight): MLXRandom.normal([6, 4]) * 0.01,
             slot(ssPath + [.field("out_proj")], role: .weight): MLXRandom.normal([4, 2]) * 0.1,
-            slot(ssPath + [.field("norm")], role: .scale): MLXArray.zeros([2]),
+            slot(ssPath + [.field("norm")], role: .scale): MLXArray.ones([2]),
             slot(ssPath + [.field("dt_bias")], role: .bias): MLXArray.zeros([1]),
             slot(ssPath + [.field("A_log")], role: .weight): MLXArray(converting: [-1.0] as [Double], [1]),
         ])
@@ -2066,7 +2066,7 @@ struct ExecutorDeltaNetTests {
             slot(ssPath + [.field("in_proj_a")], role: .weight): MLXRandom.normal([1, 4]),
             slot(ssPath + [.field("conv1d")], role: .weight): MLXRandom.normal([6, 4]),
             slot(ssPath + [.field("out_proj")], role: .weight): MLXRandom.normal([4, 2]),
-            slot(ssPath + [.field("norm")], role: .scale): MLXArray.zeros([2]),
+            slot(ssPath + [.field("norm")], role: .scale): MLXArray.ones([2]),
             slot(ssPath + [.field("dt_bias")], role: .bias): MLXArray.zeros([1]),
             slot(ssPath + [.field("A_log")], role: .weight): MLXArray(converting: [-1.0] as [Double], [1]),
         ])
@@ -2572,7 +2572,7 @@ struct ExecutorBatchVariantTests {
         let graph = try SimpleModel().makeModelGraph()
         let weights = bind([
             slot([.operation(0)], role: .embeddingTable): MLXRandom.normal([4, 4]) * 0.1,
-            slot([.operation(1)], role: .scale): MLXArray.zeros([4]),
+            slot([.operation(1)], role: .scale): MLXArray.ones([4]),
         ])
 
         let compiled = try MLXCompiler().compile(graph: graph, weights: weights)
@@ -2707,7 +2707,7 @@ private func miniLlamaWeights(graph: ModelGraph, layerCount: Int) -> BoundWeight
 
         // Residual 0: RMSNorm + Attention
         let attnNormPath = layerPrefix + [.operation(0), .regionBody, .operation(0)]
-        dict[slot(attnNormPath, role: .scale)] = MLXArray.zeros([D])
+        dict[slot(attnNormPath, role: .scale)] = MLXArray.ones([D])
 
         let attnPath = layerPrefix + [.operation(0), .regionBody, .operation(1)]
         dict[slot(attnPath + [.field("q_proj")], role: .weight)] = MLXRandom.normal([H * headDim, D]) * 0.1
@@ -2717,7 +2717,7 @@ private func miniLlamaWeights(graph: ModelGraph, layerCount: Int) -> BoundWeight
 
         // Residual 1: RMSNorm + MLP
         let mlpNormPath = layerPrefix + [.operation(1), .regionBody, .operation(0)]
-        dict[slot(mlpNormPath, role: .scale)] = MLXArray.zeros([D])
+        dict[slot(mlpNormPath, role: .scale)] = MLXArray.ones([D])
 
         let mlpPath = layerPrefix + [.operation(1), .regionBody, .operation(1)]
         dict[slot(mlpPath + [.field("gate_proj")], role: .weight)] = MLXRandom.normal([inter, D]) * 0.1
@@ -2726,7 +2726,7 @@ private func miniLlamaWeights(graph: ModelGraph, layerCount: Int) -> BoundWeight
     }
 
     // op2: Final RMSNorm
-    dict[slot([.operation(2)], role: .scale)] = MLXArray.zeros([D])
+    dict[slot([.operation(2)], role: .scale)] = MLXArray.ones([D])
 
     // op3: OutputHead (tied to embedding — no weight needed)
 
@@ -2925,7 +2925,7 @@ struct ModuleCompilerTests {
         let graph = try model.makeModelGraph()
         let weights = bind([
             slot([.operation(0)], role: .embeddingTable): MLXRandom.normal([8, 4]) * 0.1,
-            slot([.operation(1)], role: .scale): MLXArray.zeros([4]),
+            slot([.operation(1)], role: .scale): MLXArray.ones([4]),
         ])
 
         let compiled = try MLXModuleCompiler().compile(graph: graph, weights: weights)

@@ -447,3 +447,45 @@ quantization パラメータ
 
 - **Compiled path**: `LoweredProjection.init(storage:)` がコンパイル時に `.affineQuantized` カーネルを選択。`apply()` は分岐なしでディスパッチ
 - **`.dequantizeMatmul`**: `LoweredProjection` に残っているが、全型が groupSize >= 32 を生成するため実質的に未使用。将来の非標準量子化型への安全ネットとして保持
+
+## MLXCompiler 実装規則
+
+### 禁止: `MLXFast.rmsNorm` に `1 + weight` を渡す
+
+mlx-swift の `MLXFast.rmsNorm(x, weight: w, eps:)` は `x_normalized * w` を計算する（weight を直接乗算）。Python MLX の `(1 + weight)` 慣例とは異なる。
+
+- **mlx-swift**: `RMSNorm` は weight を **ones** で初期化。`rmsNorm` は weight を**そのまま乗算** → `x_norm * 1.0 = x_norm` (identity)
+- **mlx Python**: `RMSNorm` は weight を **zeros** で初期化。`rms_norm` は **`(1 + weight)` を乗算** → `x_norm * (1 + 0) = x_norm` (identity)
+
+GGUF の norm weight は HuggingFace/PyTorch 由来で 1.0 付近の値。`1 + weight` とすると scale が約2倍になり、全層の出力が破壊される。
+
+```swift
+// ✗ WRONG — doubles the scale
+MLXFast.rmsNorm(x, weight: 1 + weight, eps: eps)
+
+// ✓ CORRECT — mlx-swift uses weight directly
+MLXFast.rmsNorm(x, weight: weight, eps: eps)
+```
+
+### 禁止: per-head interleaved テンソルの flat split
+
+Q projection が gate を含む場合（`sigmoidPackedInQProj`）、出力 `[B, L, H * 2D]` は per-head interleaved: `[q0, g0, q1, g1, ...]`。flat tensor を半分で分割すると head 境界を跨いで q と gate が混在する。
+
+```swift
+// ✗ WRONG — flat split crosses head boundaries
+let qDim = queries.dim(-1) / 2
+gateValues = queries[0..., 0..., qDim...]
+
+// ✓ CORRECT — reshape per-head then split within each head
+let perHead = queries.reshaped(B, L, headCount, 2 * headDim)
+gateValues = perHead[0..., 0..., 0..., headDim...].reshaped(B, L, -1)
+queries = perHead[0..., 0..., 0..., 0..<headDim].reshaped(B, L, -1)
+```
+
+### 参照実装との一致検証
+
+コンパイルパス（`LoweredAttention`, `LoweredDeltaNet` 等）は参照実装（`Qwen35Model` 等の `Sources/MLXLM/Models/` 内のモデル）と**数値的に一致**しなければならない。新しい lowered op を実装する際は:
+
+1. 参照実装の forward pass を読み、各操作の入出力テンソル形状・dtype を確認する
+2. テンソルの次元レイアウト（per-head interleaved vs contiguous）を特定する
+3. API の慣例（`MLXFast.rmsNorm` の weight 処理等）をソースレベルで検証する — ドキュメントやコメントではなく C++ 実装を確認する

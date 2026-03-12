@@ -8,7 +8,7 @@ import SwiftLM
 /// RMSNorm module compiled from ModelGraph.
 ///
 /// Wraps a scale parameter and applies `MLXFast.rmsNorm`.
-/// Uses `1 + weight` convention matching HuggingFace's residual scale.
+/// Passes weight directly to `MLXFast.rmsNorm` (mlx-swift convention: weight * x_normalized).
 final class GraphRMSNorm: Module, UnaryLayer {
 
     let weight: MLXArray
@@ -20,7 +20,7 @@ final class GraphRMSNorm: Module, UnaryLayer {
     }
 
     func callAsFunction(_ x: MLXArray) -> MLXArray {
-        MLXFast.rmsNorm(x, weight: 1 + weight, eps: epsilon)
+        MLXFast.rmsNorm(x, weight: weight, eps: epsilon)
     }
 }
 

@@ -340,7 +340,7 @@ public final class MLXExecutor {
         _ attrs: RMSNormAttributes, input: MLXArray
     ) throws -> MLXArray {
         let w = try weight(role: .scale)
-        return MLXFast.rmsNorm(input, weight: 1 + w, eps: attrs.epsilon)
+        return MLXFast.rmsNorm(input, weight: w, eps: attrs.epsilon)
     }
 
     private func executeLayerNorm(
@@ -445,10 +445,10 @@ public final class MLXExecutor {
             switch qkNorm {
             case .rmsNorm:
                 if let qnw = optionalWeight(field: "q_norm", role: .scale) {
-                    queries = MLXFast.rmsNorm(queries, weight: 1 + qnw, eps: 1e-6)
+                    queries = MLXFast.rmsNorm(queries, weight: qnw, eps: 1e-6)
                 }
                 if let knw = optionalWeight(field: "k_norm", role: .scale) {
-                    keys = MLXFast.rmsNorm(keys, weight: 1 + knw, eps: 1e-6)
+                    keys = MLXFast.rmsNorm(keys, weight: knw, eps: 1e-6)
                 }
             case .layerNorm:
                 if let qnw = optionalWeight(field: "q_norm", role: .scale) {
@@ -748,7 +748,7 @@ public final class MLXExecutor {
         let numHeads = linearValueHeads
         let flat = attnOut.asType(inputDType).reshaped(B * T * numHeads, dv)
         let zFlat = z.reshaped(B, T, numHeads, dv).reshaped(B * T * numHeads, dv)
-        let normed = MLXFast.rmsNorm(flat, weight: 1 + normWeight, eps: 1e-6) * silu(zFlat)
+        let normed = MLXFast.rmsNorm(flat, weight: normWeight, eps: 1e-6) * silu(zFlat)
         let gated = normed.reshaped(B, T, valueDim)
 
         return outProj.apply(gated)

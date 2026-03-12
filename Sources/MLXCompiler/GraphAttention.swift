@@ -78,10 +78,10 @@ final class GraphAttention: Module, UnaryLayer {
             switch qkNorm {
             case .rmsNorm:
                 if let qnw = qNormWeight {
-                    queries = MLXFast.rmsNorm(queries, weight: 1 + qnw, eps: 1e-6)
+                    queries = MLXFast.rmsNorm(queries, weight: qnw, eps: 1e-6)
                 }
                 if let knw = kNormWeight {
-                    keys = MLXFast.rmsNorm(keys, weight: 1 + knw, eps: 1e-6)
+                    keys = MLXFast.rmsNorm(keys, weight: knw, eps: 1e-6)
                 }
             case .layerNorm:
                 if let qnw = qNormWeight {

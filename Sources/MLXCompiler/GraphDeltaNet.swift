@@ -136,7 +136,7 @@ final class GraphDeltaNet: Module, UnaryLayer {
         let numHeads = linearValueHeads
         let flat = attnOut.asType(inputDType).reshaped(B * T * numHeads, dv)
         let zFlat = z.reshaped(B, T, numHeads, dv).reshaped(B * T * numHeads, dv)
-        let normed = MLXFast.rmsNorm(flat, weight: 1 + normWeight, eps: 1e-6) * silu(zFlat)
+        let normed = MLXFast.rmsNorm(flat, weight: normWeight, eps: 1e-6) * silu(zFlat)
         let gated = normed.reshaped(B, T, valueDim)
 
         return outProj(gated)

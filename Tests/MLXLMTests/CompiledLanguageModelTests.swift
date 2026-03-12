@@ -83,7 +83,7 @@ private func tinyLlamaWeights(layerCount: Int) -> BoundWeights {
         ]
 
         let attnNormPath = layerPrefix + [.operation(0), .regionBody, .operation(0)]
-        dict[slot(attnNormPath, role: .scale)] = MLXArray.zeros([D])
+        dict[slot(attnNormPath, role: .scale)] = MLXArray.ones([D])
 
         let attnPath = layerPrefix + [.operation(0), .regionBody, .operation(1)]
         dict[slot(attnPath + [.field("q_proj")], role: .weight)] = MLXRandom.normal([H * headDim, D]) * 0.1
@@ -92,7 +92,7 @@ private func tinyLlamaWeights(layerCount: Int) -> BoundWeights {
         dict[slot(attnPath + [.field("o_proj")], role: .weight)] = MLXRandom.normal([D, H * headDim]) * 0.1
 
         let mlpNormPath = layerPrefix + [.operation(1), .regionBody, .operation(0)]
-        dict[slot(mlpNormPath, role: .scale)] = MLXArray.zeros([D])
+        dict[slot(mlpNormPath, role: .scale)] = MLXArray.ones([D])
 
         let mlpPath = layerPrefix + [.operation(1), .regionBody, .operation(1)]
         dict[slot(mlpPath + [.field("gate_proj")], role: .weight)] = MLXRandom.normal([inter, D]) * 0.1
@@ -100,7 +100,7 @@ private func tinyLlamaWeights(layerCount: Int) -> BoundWeights {
         dict[slot(mlpPath + [.field("down_proj")], role: .weight)] = MLXRandom.normal([D, inter]) * 0.1
     }
 
-    dict[slot([.operation(2)], role: .scale)] = MLXArray.zeros([D])
+    dict[slot([.operation(2)], role: .scale)] = MLXArray.ones([D])
 
     return bind(dict)
 }

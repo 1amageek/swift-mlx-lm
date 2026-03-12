@@ -152,7 +152,7 @@ private func buildDeltaNetExecutor(
         slot(ssPath + [.field("in_proj_a")], role: .weight): MLXRandom.normal([linearKeyHeads, hiddenSize]) * 0.1,
         slot(ssPath + [.field("conv1d")], role: .weight): MLXRandom.normal([totalQKV, 4]) * 0.01,
         slot(ssPath + [.field("out_proj")], role: .weight): MLXRandom.normal([hiddenSize, valueDim]) * 0.1,
-        slot(ssPath + [.field("norm")], role: .scale): MLXArray.zeros([linearValueHeadDim]),
+        slot(ssPath + [.field("norm")], role: .scale): MLXArray.ones([linearValueHeadDim]),
         slot(ssPath + [.field("dt_bias")], role: .bias): MLXArray.zeros([linearKeyHeads]),
         slot(ssPath + [.field("A_log")], role: .weight): MLXArray(converting: [-1.0] as [Double], [linearKeyHeads]),
     ])
@@ -236,7 +236,7 @@ private func buildMixedMoEDeltaNetExecutor(
 
         // Residual 0: RMSNorm + DeltaNet
         let ssNormPath = layerPrefix + [.operation(0), .regionBody, .operation(0)]
-        dict[slot(ssNormPath, role: .scale)] = MLXArray.zeros([hiddenSize])
+        dict[slot(ssNormPath, role: .scale)] = MLXArray.ones([hiddenSize])
 
         let ssPath = layerPrefix + [.operation(0), .regionBody, .operation(1)]
         dict[slot(ssPath + [.field("in_proj_qkv")], role: .weight)] = MLXRandom.normal([totalQKV, hiddenSize]) * 0.1
@@ -245,13 +245,13 @@ private func buildMixedMoEDeltaNetExecutor(
         dict[slot(ssPath + [.field("in_proj_a")], role: .weight)] = MLXRandom.normal([linearKeyHeads, hiddenSize]) * 0.1
         dict[slot(ssPath + [.field("conv1d")], role: .weight)] = MLXRandom.normal([totalQKV, 4]) * 0.01
         dict[slot(ssPath + [.field("out_proj")], role: .weight)] = MLXRandom.normal([hiddenSize, valueDim]) * 0.1
-        dict[slot(ssPath + [.field("norm")], role: .scale)] = MLXArray.zeros([linearValueHeadDim])
+        dict[slot(ssPath + [.field("norm")], role: .scale)] = MLXArray.ones([linearValueHeadDim])
         dict[slot(ssPath + [.field("dt_bias")], role: .bias)] = MLXArray.zeros([linearKeyHeads])
         dict[slot(ssPath + [.field("A_log")], role: .weight)] = MLXArray(converting: [-1.0] as [Double], [linearKeyHeads])
 
         // Residual 1: RMSNorm + MoE
         let moeNormPath = layerPrefix + [.operation(1), .regionBody, .operation(0)]
-        dict[slot(moeNormPath, role: .scale)] = MLXArray.zeros([hiddenSize])
+        dict[slot(moeNormPath, role: .scale)] = MLXArray.ones([hiddenSize])
 
         let moePath = layerPrefix + [.operation(1), .regionBody, .operation(1)]
         dict[slot(moePath + [.field("router")], role: .weight)] = MLXRandom.normal([expertCount, hiddenSize]) * 0.1
@@ -265,7 +265,7 @@ private func buildMixedMoEDeltaNetExecutor(
     }
 
     // Final norm
-    dict[slot([.operation(2)], role: .scale)] = MLXArray.zeros([hiddenSize])
+    dict[slot([.operation(2)], role: .scale)] = MLXArray.ones([hiddenSize])
 
     let compiled = try MLXCompiler().compile(graph: graph, weights: bind(dict))
     return MLXExecutor(compiledModel: compiled)

@@ -6,7 +6,7 @@ import MLXFast
 /// Supports RMSNorm and LayerNorm. Norm weights are always dense (not quantized).
 public enum LoweredNorm: @unchecked Sendable {
 
-    /// RMS normalization: `rmsNorm(x, weight: 1 + weight, eps: epsilon)`.
+    /// RMS normalization: `rmsNorm(x, weight: weight, eps: epsilon)`.
     case rms(weight: MLXArray, epsilon: Float)
 
     /// Layer normalization with optional bias.
@@ -16,7 +16,7 @@ public enum LoweredNorm: @unchecked Sendable {
     public func apply(_ x: MLXArray) -> MLXArray {
         switch self {
         case .rms(let weight, let epsilon):
-            return MLXFast.rmsNorm(x, weight: 1 + weight, eps: epsilon)
+            return MLXFast.rmsNorm(x, weight: weight, eps: epsilon)
         case .layer(let weight, let bias, let epsilon):
             return layerNormOp(x, weight: weight, bias: bias, eps: epsilon)
         }
