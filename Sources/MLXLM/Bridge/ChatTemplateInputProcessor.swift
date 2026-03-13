@@ -1,20 +1,19 @@
 import MLX
-import GGUFTokenizer
 
-/// Converts user input to tokenized model input using GGUF chat template.
+/// Converts user input to tokenized model input using chat template.
 ///
 /// Pipeline: UserInput → ChatTemplateRenderer → tokenize → LMInput
-struct GGUFUserInputProcessor: UserInputProcessor {
+struct ChatTemplateInputProcessor: UserInputProcessor {
 
     private let tokenizer: any Tokenizer
     private let renderer: ChatTemplateRenderer?
     private let addBosToken: Bool
 
-    /// Create a processor for a GGUF-loaded model.
+    /// Create a processor for a model.
     ///
     /// - Parameters:
     ///   - tokenizer: The tokenizer for encoding text to tokens.
-    ///   - chatTemplate: Optional Jinja chat template string from GGUF metadata.
+    ///   - chatTemplate: Optional Jinja chat template string.
     ///   - bosToken: BOS token string for template rendering.
     ///   - eosToken: EOS token string for template rendering.
     ///   - addBosToken: Whether to prepend BOS token when no chat template is used.
@@ -38,7 +37,7 @@ struct GGUFUserInputProcessor: UserInputProcessor {
             } catch {
                 let preview = String(template.prefix(200)).replacingOccurrences(of: "\n", with: "\\n")
                 print(
-                    "[GGUFUserInputProcessor] chat_template parse failed: \(error). Falling back to plain prompt formatting. templatePreview=\"\(preview)\""
+                    "[ChatTemplateInputProcessor] chat_template parse failed: \(error). Falling back to plain prompt formatting. templatePreview=\"\(preview)\""
                 )
                 self.renderer = nil
             }

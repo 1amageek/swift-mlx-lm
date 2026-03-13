@@ -1,5 +1,4 @@
 import Foundation
-import GGUFTokenizer
 
 /// Logs prompt and sampled token traces for tokenizer/debugging investigations.
 ///

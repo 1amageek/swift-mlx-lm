@@ -6,7 +6,7 @@ let package = Package(
     platforms: [.macOS(.v15), .iOS(.v18), .visionOS(.v2)],
     products: [
         .library(name: "SwiftLM", targets: ["SwiftLM"]),
-        .library(name: "Models", targets: ["Models"]),
+        .library(name: "ModelDeclarations", targets: ["ModelDeclarations"]),
         .library(name: "MLXLM", targets: ["MLXLM"]),
         .library(name: "GGUFParser", targets: ["GGUFParser"]),
         .library(name: "GGUFTokenizer", targets: ["GGUFTokenizer"]),
@@ -18,6 +18,7 @@ let package = Package(
         .package(url: "https://github.com/ml-explore/mlx-swift", .upToNextMinor(from: "0.30.6")),
         .package(url: "https://github.com/apple/swift-collections.git", from: "1.1.0"),
         .package(url: "https://github.com/huggingface/swift-jinja", from: "2.3.2"),
+        .package(url: "https://github.com/huggingface/swift-transformers", .upToNextMinor(from: "1.1.9")),
         .package(url: "https://github.com/mattt/JSONSchema", from: "1.3.1"),
         .package(url: "https://github.com/1amageek/swift-testing-heartbeat", from: "0.1.0"),
         .package(url: "https://github.com/apple/swift-argument-parser", from: "1.3.0"),
@@ -29,7 +30,7 @@ let package = Package(
                 .product(name: "JSONSchema", package: "JSONSchema"),
             ]
         ),
-        .target(name: "Models", dependencies: ["SwiftLM"]),
+        .target(name: "ModelDeclarations", dependencies: ["SwiftLM"], path: "Sources/Models"),
         .target(name: "GGUFParser"),
         .target(name: "GGUFTokenizer", dependencies: ["GGUFParser"]),
         .target(name: "GGUFToolingCore", dependencies: ["GGUFParser"]),
@@ -40,11 +41,11 @@ let package = Package(
         .target(
             name: "MLXLM",
             dependencies: [
-                "GGUFParser",
-                "GGUFTokenizer",
                 "MLXCompiler",
                 .product(name: "Jinja", package: "swift-jinja"),
                 .product(name: "OrderedCollections", package: "swift-collections"),
+                .product(name: "Tokenizers", package: "swift-transformers"),
+                .product(name: "Hub", package: "swift-transformers"),
                 .product(name: "MLX", package: "mlx-swift"),
                 .product(name: "MLXNN", package: "mlx-swift"),
                 .product(name: "MLXFast", package: "mlx-swift"),
@@ -71,11 +72,11 @@ let package = Package(
             ]
         ),
         .testTarget(name: "MLXCompilerTests", dependencies: [
-            "MLXCompiler", "SwiftLM", "Models",
+            "MLXCompiler", "SwiftLM", "ModelDeclarations",
             .product(name: "TestHeartbeat", package: "swift-testing-heartbeat"),
         ]),
         .testTarget(name: "ModelsTests", dependencies: [
-            "Models", "SwiftLM",
+            "ModelDeclarations", "SwiftLM",
             .product(name: "TestHeartbeat", package: "swift-testing-heartbeat"),
         ]),
         .testTarget(name: "SwiftLMTests", dependencies: [

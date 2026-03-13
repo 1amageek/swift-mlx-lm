@@ -103,8 +103,8 @@ struct GGUFValidationTests {
         #expect(plan.actions.first?.key == "qwen35.ssm.time_step_rank")
     }
 
-    @Test("repaired file loads past hybrid config extraction failure")
-    func repairedFileLoadsPastConfigExtractionFailure() throws {
+    @Test("repaired file contains patched metadata value")
+    func repairedFileContainsPatchedMetadata() throws {
         let originalURL = try writeTemporaryFixture(
             includePartialRotaryFactor: false,
             includeAttentionKeyLength: true,
@@ -124,8 +124,8 @@ struct GGUFValidationTests {
         )
 
         let repaired = try GGUFFile.parse(url: repairedURL)
-        let config = try GGUFConfigExtractor().extract(from: repaired, architecture: .hybridDeltaNetAttention)
-        #expect(config.partialRotaryFactor == 0.25)
+        let value = repaired.metadata.first { $0.key == "qwen35.rope.partial_rotary_factor" }?.value
+        #expect(value == .float32(0.25))
     }
 
     private func makeQwen35Fixture(

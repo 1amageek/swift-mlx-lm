@@ -388,8 +388,8 @@ struct CompiledLanguageModelTests {
 @Suite("CompiledPathSanitize", .serialized, .tags(.unit, .compiled), .heartbeat)
 struct CompiledPathSanitizeTests {
 
-    @Test("Default sanitizeCompiledWeights filters rotary_emb.inv_freq")
-    func defaultSanitizeFiltersInvFreq() throws {
+    @Test("WeightSanitizer filters rotary_emb.inv_freq")
+    func sanitizeFiltersInvFreq() throws {
         let invFreq = MLXRandom.normal([2])
         let normalWeight = MLXRandom.normal([4, 4])
 
@@ -399,78 +399,11 @@ struct CompiledPathSanitizeTests {
         weights["model.layers.0.self_attn.rotary_emb.inv_freq"] = TensorData(
             shape: [2], dtype: .float32, storage: MLXTensorStorage.dense(invFreq))
 
-        let sanitized = GGUFGraphBuilder.sanitizeWeights(weights)
+        let sanitized = WeightSanitizer.filterRotaryEmbeddings(weights)
 
         #expect(sanitized.count == 1)
         #expect(sanitized["model.layers.0.self_attn.q_proj.weight"] != nil)
         #expect(sanitized["model.layers.0.self_attn.rotary_emb.inv_freq"] == nil)
-    }
-
-    @Test("Qwen35 sanitizeCompiledWeights reshapes conv1d.weight from 2D to 3D")
-    func qwen35SanitizeReshapesConv1d() throws {
-        let conv2d = MLXRandom.normal([6, 4])  // [C, K]
-        let normalWeight = MLXRandom.normal([4, 4])
-
-        var weights: [String: TensorData] = [:]
-        weights["model.layers.0.linear_attn.conv1d.weight"] = TensorData(
-            shape: [6, 4], dtype: .float16, storage: MLXTensorStorage.dense(conv2d))
-        weights["model.layers.0.self_attn.q_proj.weight"] = TensorData(
-            shape: [4, 4], dtype: .float16, storage: MLXTensorStorage.dense(normalWeight))
-
-        let sanitized = GGUFGraphBuilder.sanitizeWeights(weights)
-
-        #expect(sanitized.count == 2)
-
-        // conv1d.weight should now be 3D: [C, K, 1]
-        guard let convTD = sanitized["model.layers.0.linear_attn.conv1d.weight"] else {
-            Issue.record("conv1d.weight missing after sanitize")
-            return
-        }
-        #expect(convTD.shape == [6, 4, 1])
-
-        guard let storage = convTD.storage as? MLXTensorStorage,
-              case .dense(let array) = storage
-        else {
-            Issue.record("Expected dense MLXTensorStorage")
-            return
-        }
-        #expect(array.ndim == 3)
-        #expect(array.dim(0) == 6)
-        #expect(array.dim(1) == 4)
-        #expect(array.dim(2) == 1)
-    }
-
-    @Test("Qwen35 sanitizeCompiledWeights transposes conv1d.weight from 3D")
-    func qwen35SanitizeTransposesConv1d3D() throws {
-        let conv3d = MLXRandom.normal([6, 2, 4])  // PyTorch [O, I/G, K]
-
-        var weights: [String: TensorData] = [:]
-        weights["model.layers.0.linear_attn.conv1d.weight"] = TensorData(
-            shape: [6, 2, 4], dtype: .float16, storage: MLXTensorStorage.dense(conv3d))
-
-        let sanitized = GGUFGraphBuilder.sanitizeWeights(weights)
-
-        guard let convTD = sanitized["model.layers.0.linear_attn.conv1d.weight"] else {
-            Issue.record("conv1d.weight missing after sanitize")
-            return
-        }
-        // Transposed: [O, K, I/G]
-        #expect(convTD.shape == [6, 4, 2])
-    }
-
-    @Test("Qwen35 sanitizeCompiledWeights also filters rotary_emb.inv_freq")
-    func qwen35SanitizeFiltersInvFreq() throws {
-        var weights: [String: TensorData] = [:]
-        weights["model.layers.0.self_attn.rotary_emb.inv_freq"] = TensorData(
-            shape: [2], dtype: .float32,
-            storage: MLXTensorStorage.dense(MLXRandom.normal([2])))
-        weights["model.layers.0.self_attn.q_proj.weight"] = TensorData(
-            shape: [4, 4], dtype: .float16,
-            storage: MLXTensorStorage.dense(MLXRandom.normal([4, 4])))
-
-        let sanitized = GGUFGraphBuilder.sanitizeWeights(weights)
-        #expect(sanitized["model.layers.0.self_attn.rotary_emb.inv_freq"] == nil)
-        #expect(sanitized["model.layers.0.self_attn.q_proj.weight"] != nil)
     }
 
     @Test("Compiled model sanitize() is identity — weights are pre-bound")

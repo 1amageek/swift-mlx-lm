@@ -1,6 +1,5 @@
 import Foundation
 import MLX
-import GGUFTokenizer
 
 /// Generate text from tokenized input using a model context.
 ///

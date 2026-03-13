@@ -1,10 +1,9 @@
 import CoreImage
 import MLX
-import GGUFTokenizer
 
 /// Vision-aware input processor for VLMs.
 ///
-/// Extends the standard GGUF text processing with image preprocessing:
+/// Extends the standard text processing with image preprocessing:
 /// inserts vision placeholder tokens and builds ``LMInput/ProcessedImage``
 /// for the vision encoder. All token IDs come from ``VLMInputConfig``.
 struct VLMUserInputProcessor: UserInputProcessor {
@@ -12,7 +11,7 @@ struct VLMUserInputProcessor: UserInputProcessor {
     /// Closure that preprocesses a single image into pixel tensor + grid info.
     typealias ImagePreprocessor = @Sendable (CIImage) throws -> (MLXArray, LMInput.THW)
 
-    private let textProcessor: GGUFUserInputProcessor
+    private let textProcessor: ChatTemplateInputProcessor
     private let preprocessImage: ImagePreprocessor
     private let tokenizer: any Tokenizer
 
@@ -36,7 +35,7 @@ struct VLMUserInputProcessor: UserInputProcessor {
         self.tokenizer = tokenizer
         self.preprocessImage = preprocessImage
 
-        self.textProcessor = GGUFUserInputProcessor(
+        self.textProcessor = ChatTemplateInputProcessor(
             tokenizer: tokenizer,
             chatTemplate: chatTemplate,
             bosToken: bosToken,

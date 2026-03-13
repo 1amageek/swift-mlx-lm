@@ -1,5 +1,4 @@
 import Foundation
-import GGUFParser
 
 /// Downloads model files from Hugging Face Hub with local caching.
 ///
@@ -9,15 +8,7 @@ import GGUFParser
 ///
 /// ```swift
 /// let downloader = HuggingFaceDownloader()
-///
-/// // Single GGUF in repo — just works
-/// let url = try await downloader.download(repo: "someone/Model-GGUF")
-///
-/// // Multiple GGUFs — specify which quantization
-/// let url = try await downloader.download(
-///     repo: "someone/Model-GGUF",
-///     filename: "model-q4_k_m.gguf"
-/// )
+/// let dir = try await downloader.downloadBundle(repo: "Qwen/Qwen2.5-0.5B-Instruct")
 /// ```
 public struct HuggingFaceDownloader: Sendable {
 
@@ -25,116 +16,128 @@ public struct HuggingFaceDownloader: Sendable {
 
     public init() {}
 
-    /// Download a GGUF file from Hugging Face Hub.
+    // MARK: - HF Bundle Download
+
+    /// Download all files needed for an HF directory bundle.
     ///
-    /// When `filename` is omitted, queries the repository to find GGUF files.
-    /// If there is exactly one, it is used. If there are multiple, the best
-    /// quantization (Q4_K_M preferred) is auto-selected.
+    /// Downloads config.json, tokenizer files, safetensors weights, and optional
+    /// files (chat_template.jinja, preprocessor_config.json) to a local cache directory.
     ///
     /// - Parameters:
-    ///   - repo: Repository ID (e.g., `"someone/Model-GGUF"`).
-    ///   - filename: Explicit filename. When `nil`, auto-resolves.
+    ///   - repo: Repository ID (e.g., `"Qwen/Qwen2.5-0.5B-Instruct"`).
     ///   - revision: Git revision. Defaults to `"main"`.
     ///   - token: Optional Hugging Face access token.
     ///   - progress: Optional `Progress` for byte-level download tracking.
-    /// - Returns: Local file URL of the downloaded (or cached) file.
-    public func download(
+    /// - Returns: Local directory URL containing the downloaded files.
+    public func downloadBundle(
         repo: String,
-        filename: String? = nil,
         revision: String = "main",
         token: String? = nil,
         progress: Progress? = nil
     ) async throws -> URL {
+        let cacheDir = buildCacheDirectory(repo: repo, revision: revision)
+        try FileManager.default.createDirectory(at: cacheDir, withIntermediateDirectories: true)
 
-        // 1. Fast path: check local cache before any network calls.
-        if let filename {
-            let localURL = buildCachePath(repo: repo, filename: filename, revision: revision)
-            if FileManager.default.fileExists(atPath: localURL.path) {
-                let fileSize = (try? FileManager.default.attributesOfItem(atPath: localURL.path)[.size] as? Int64) ?? 0
-                print("[HuggingFaceDownloader] cache hit: \(filename) (\(ByteCountFormatter.string(fromByteCount: fileSize, countStyle: .file)))")
-                return localURL
+        // Check if already cached: all required files must exist
+        let requiredCacheFiles = [
+            "config.json", "tokenizer.json", "tokenizer_config.json"
+        ]
+        let allRequiredExist = requiredCacheFiles.allSatisfy { filename in
+            FileManager.default.fileExists(
+                atPath: cacheDir.appendingPathComponent(filename).path)
+        }
+        if allRequiredExist {
+            let contents = try FileManager.default.contentsOfDirectory(
+                at: cacheDir, includingPropertiesForKeys: nil)
+            let hasSafetensors = contents.contains { $0.pathExtension == "safetensors" }
+            if hasSafetensors {
+                print("[HuggingFaceDownloader] bundle cache hit: \(repo)")
+                return cacheDir
             }
+        }
+
+        // List all files in the repo
+        let allFiles = try await listRepoFiles(repo: repo, token: token)
+
+        // Required files
+        let requiredFiles = ["config.json", "tokenizer.json", "tokenizer_config.json"]
+        for filename in requiredFiles {
+            guard allFiles.contains(filename) else {
+                throw HuggingFaceDownloadError.missingBundleFile(repo: repo, filename: filename)
+            }
+        }
+
+        // Determine safetensors files to download
+        let safetensorsFiles: [String]
+        if allFiles.contains("model.safetensors.index.json") {
+            // Sharded model — download index and all shard files
+            let indexURL = try await downloadFile(
+                repo: repo, filename: "model.safetensors.index.json",
+                revision: revision, token: token, cacheDir: cacheDir, progress: nil)
+            let indexData = try Data(contentsOf: indexURL)
+            guard let index = try JSONSerialization.jsonObject(with: indexData) as? [String: Any],
+                  let weightMap = index["weight_map"] as? [String: String] else {
+                throw HuggingFaceDownloadError.invalidResponse
+            }
+            safetensorsFiles = Array(Set(weightMap.values)).sorted()
+        } else if allFiles.contains("model.safetensors") {
+            safetensorsFiles = ["model.safetensors"]
         } else {
-            let cacheDir = buildCacheDirectory(repo: repo, revision: revision)
-            if let cachedURL = findCachedGGUF(in: cacheDir) {
-                let fileSize = (try? FileManager.default.attributesOfItem(atPath: cachedURL.path)[.size] as? Int64) ?? 0
-                print("[HuggingFaceDownloader] cache hit: \(cachedURL.lastPathComponent) (\(ByteCountFormatter.string(fromByteCount: fileSize, countStyle: .file)))")
-                return cachedURL
+            // Glob for any *.safetensors
+            let stFiles = allFiles.filter { $0.hasSuffix(".safetensors") }
+            guard !stFiles.isEmpty else {
+                throw HuggingFaceDownloadError.noBundleWeights(repo: repo)
+            }
+            safetensorsFiles = stFiles
+        }
+
+        // Build download list
+        var filesToDownload = requiredFiles + safetensorsFiles
+
+        // Optional files
+        let optionalFiles = ["chat_template.jinja", "preprocessor_config.json",
+                             "model.safetensors.index.json"]
+        for filename in optionalFiles {
+            if allFiles.contains(filename) && !filesToDownload.contains(filename) {
+                filesToDownload.append(filename)
             }
         }
 
-        // 2. No local cache — resolve filename via API if needed.
-        let resolvedFilename: String
-        if let filename {
-            resolvedFilename = filename
-            print("[HuggingFaceDownloader] repo=\(repo) filename=\(filename) (explicit)")
+        // Set up progress tracking
+        let totalFiles = filesToDownload.count
+        let overallProgress: Progress?
+        if let progress {
+            overallProgress = Progress(
+                totalUnitCount: Int64(totalFiles), parent: progress,
+                pendingUnitCount: progress.totalUnitCount)
         } else {
-            print("[HuggingFaceDownloader] repo=\(repo) querying available GGUF files…")
-            let allFiles = try await listGGUFFiles(repo: repo, token: token)
-            let modelFiles = allFiles.filter { !$0.hasPrefix("mmproj") }
-            print("[HuggingFaceDownloader] repo=\(repo) found \(allFiles.count) GGUF files (\(modelFiles.count) model, \(allFiles.count - modelFiles.count) mmproj)")
-            switch modelFiles.count {
-            case 0:
-                throw HuggingFaceDownloadError.noGGUFFiles(repo: repo)
-            case 1:
-                resolvedFilename = modelFiles[0]
-                print("[HuggingFaceDownloader] auto-selected: \(resolvedFilename) (only model file)")
-            default:
-                resolvedFilename = selectPreferredFile(from: modelFiles)
-                print("[HuggingFaceDownloader] auto-selected: \(resolvedFilename) (preferred quantization)")
+            overallProgress = nil
+        }
+
+        print("[HuggingFaceDownloader] downloading bundle: \(repo) (\(totalFiles) files)")
+
+        // Download each file
+        for filename in filesToDownload {
+            _ = try await downloadFile(
+                repo: repo, filename: filename, revision: revision,
+                token: token, cacheDir: cacheDir, progress: nil)
+            overallProgress?.completedUnitCount += 1
+        }
+
+        // Verify all safetensors shards were downloaded
+        for shard in safetensorsFiles {
+            let shardURL = cacheDir.appendingPathComponent(shard)
+            guard FileManager.default.fileExists(atPath: shardURL.path) else {
+                throw HuggingFaceDownloadError.missingBundleFile(repo: repo, filename: shard)
             }
         }
 
-        // 3. Download the file.
-        let remoteURL = buildRemoteURL(repo: repo, filename: resolvedFilename, revision: revision)
-        let localURL = buildCachePath(repo: repo, filename: resolvedFilename, revision: revision)
-
-        let directory = localURL.deletingLastPathComponent()
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-
-        let resolvedToken = resolveToken(token)
-        let hasAuth = resolvedToken != nil
-        print("[HuggingFaceDownloader] downloading \(remoteURL) → \(localURL.path) auth=\(hasAuth)")
-        let delegate = DownloadDelegate(progress: progress)
-        let session = URLSession(configuration: .default, delegate: delegate, delegateQueue: nil)
-        defer { session.finishTasksAndInvalidate() }
-
-        var request = URLRequest(url: remoteURL)
-        if let token = resolvedToken {
-            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        }
-
-        progress?.kind = .file
-        progress?.fileOperationKind = .downloading
-        progress?.localizedDescription = NSLocalizedString("Downloading…", comment: "")
-        let (tempURL, response) = try await session.download(for: request)
-
-        guard let httpResponse = response as? HTTPURLResponse else {
-            throw HuggingFaceDownloadError.invalidResponse
-        }
-        guard (200..<300).contains(httpResponse.statusCode) else {
-            print("[HuggingFaceDownloader] download failed: HTTP \(httpResponse.statusCode) url=\(remoteURL)")
-            throw HuggingFaceDownloadError.httpError(statusCode: httpResponse.statusCode)
-        }
-
-        if FileManager.default.fileExists(atPath: localURL.path) {
-            try FileManager.default.removeItem(at: localURL)
-        }
-        try FileManager.default.moveItem(at: tempURL, to: localURL)
-
-        if let etag = httpResponse.value(forHTTPHeaderField: "ETag") {
-            let etagPath = localURL.appendingPathExtension("etag")
-            try etag.write(to: etagPath, atomically: true, encoding: .utf8)
-        }
-
-        let downloadedSize = (try? FileManager.default.attributesOfItem(atPath: localURL.path)[.size] as? Int64) ?? 0
-        print("[HuggingFaceDownloader] download complete: \(resolvedFilename) (\(ByteCountFormatter.string(fromByteCount: downloadedSize, countStyle: .file)))")
-
-        return localURL
+        print("[HuggingFaceDownloader] bundle download complete: \(repo)")
+        return cacheDir
     }
 
-    /// List GGUF files available in a Hugging Face repository.
-    public func listGGUFFiles(
+    /// List all files in a Hugging Face repository.
+    public func listRepoFiles(
         repo: String,
         token: String? = nil
     ) async throws -> [String] {
@@ -158,10 +161,60 @@ public struct HuggingFaceDownloader: Sendable {
         }
 
         return siblings.compactMap { sibling -> String? in
-            guard let filename = sibling["rfilename"] as? String,
-                  filename.hasSuffix(".gguf") else { return nil }
-            return filename
+            sibling["rfilename"] as? String
         }
+    }
+
+    /// Download a single file from a repo to the local cache directory.
+    private func downloadFile(
+        repo: String,
+        filename: String,
+        revision: String,
+        token: String?,
+        cacheDir: URL,
+        progress: Progress?
+    ) async throws -> URL {
+        let localURL = cacheDir.appendingPathComponent(filename)
+
+        // Skip if already cached
+        if FileManager.default.fileExists(atPath: localURL.path) {
+            return localURL
+        }
+
+        // Create subdirectories if needed (for sharded files in subdirectories)
+        let fileDir = localURL.deletingLastPathComponent()
+        try FileManager.default.createDirectory(at: fileDir, withIntermediateDirectories: true)
+
+        let remoteURL = buildRemoteURL(repo: repo, filename: filename, revision: revision)
+        let resolvedToken = resolveToken(token)
+
+        let delegate = DownloadDelegate(progress: progress)
+        let session = URLSession(configuration: .default, delegate: delegate, delegateQueue: nil)
+        defer { session.finishTasksAndInvalidate() }
+
+        var request = URLRequest(url: remoteURL)
+        if let token = resolvedToken {
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
+
+        let (tempURL, response) = try await session.download(for: request)
+
+        guard let httpResponse = response as? HTTPURLResponse,
+              (200..<300).contains(httpResponse.statusCode) else {
+            let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+            throw HuggingFaceDownloadError.httpError(statusCode: code)
+        }
+
+        if FileManager.default.fileExists(atPath: localURL.path) {
+            try FileManager.default.removeItem(at: localURL)
+        }
+        try FileManager.default.moveItem(at: tempURL, to: localURL)
+
+        let fileSize = (try? FileManager.default.attributesOfItem(
+            atPath: localURL.path)[.size] as? Int64) ?? 0
+        print("[HuggingFaceDownloader] downloaded: \(filename) (\(ByteCountFormatter.string(fromByteCount: fileSize, countStyle: .file)))")
+
+        return localURL
     }
 
     // MARK: - Private
@@ -185,24 +238,6 @@ public struct HuggingFaceDownloader: Sendable {
             .appendingPathComponent(filename)
     }
 
-    /// Find a cached GGUF model file (excluding mmproj) in the cache directory.
-    private func findCachedGGUF(in directory: URL) -> URL? {
-        guard let contents = try? FileManager.default.contentsOfDirectory(
-            at: directory, includingPropertiesForKeys: [.fileSizeKey]
-        ) else { return nil }
-
-        let ggufFiles = contents.filter {
-            $0.pathExtension == "gguf" && !$0.lastPathComponent.hasPrefix("mmproj")
-        }
-        guard !ggufFiles.isEmpty else { return nil }
-
-        // If multiple, prefer the same ranking as selectPreferredFile
-        if ggufFiles.count == 1 { return ggufFiles[0] }
-        let filenames = ggufFiles.map { $0.lastPathComponent }
-        let preferred = selectPreferredFile(from: filenames)
-        return ggufFiles.first { $0.lastPathComponent == preferred }
-    }
-
     private func resolveToken(_ explicit: String?) -> String? {
         if let explicit { return explicit }
 
@@ -220,24 +255,6 @@ public struct HuggingFaceDownloader: Sendable {
         #endif
 
         return nil
-    }
-
-    /// Select the best GGUF file from multiple candidates.
-    ///
-    /// Preference order balances quality and memory usage:
-    /// Q4_K_M > Q4_K_S > Q5_K_M > Q5_K_S > Q6_K > Q8_0 > Q3_K_M > Q4_0 > Q4_1
-    private func selectPreferredFile(from files: [String]) -> String {
-        let ranked = [
-            "Q4_K_M", "Q4_K_S", "Q5_K_M", "Q5_K_S", "Q6_K",
-            "Q8_0", "Q3_K_M", "Q4_0", "Q4_1", "Q3_K_S",
-        ]
-        let uppercased = files.map { $0.uppercased() }
-        for quantTag in ranked {
-            if let index = uppercased.firstIndex(where: { $0.contains(quantTag) }) {
-                return files[index]
-            }
-        }
-        return files[0]
     }
 
     private func fetchEtag(url: URL, token: String?) async throws -> String? {
@@ -297,8 +314,8 @@ private final class DownloadDelegate: NSObject, URLSessionDownloadDelegate, Send
 public enum HuggingFaceDownloadError: Error, CustomStringConvertible {
     case httpError(statusCode: Int)
     case invalidResponse
-    case noGGUFFiles(repo: String)
-    case multipleGGUFFiles(repo: String, available: [String])
+    case missingBundleFile(repo: String, filename: String)
+    case noBundleWeights(repo: String)
 
     public var description: String {
         switch self {
@@ -311,11 +328,10 @@ public enum HuggingFaceDownloadError: Error, CustomStringConvertible {
             }
         case .invalidResponse:
             return "Invalid response from Hugging Face Hub"
-        case .noGGUFFiles(let repo):
-            return "No GGUF files found in repository '\(repo)'"
-        case .multipleGGUFFiles(let repo, let available):
-            let list = available.map { "  - \($0)" }.joined(separator: "\n")
-            return "Multiple GGUF files in '\(repo)'. Specify one:\n\(list)"
+        case .missingBundleFile(let repo, let filename):
+            return "Required file '\(filename)' not found in repository '\(repo)'"
+        case .noBundleWeights(let repo):
+            return "No safetensors weight files found in repository '\(repo)'"
         }
     }
 }

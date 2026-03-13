@@ -1,6 +1,6 @@
 import Testing
 @testable import SwiftLM
-@testable import Models
+@testable import ModelDeclarations
 
 @Suite("Model Declaration Tests", .tags(.unit))
 struct ModelDeclarationTests {

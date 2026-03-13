@@ -27,9 +27,6 @@ enum WeightBindingError: Error, CustomStringConvertible {
 ///
 /// Usage:
 /// ```swift
-/// // 1. Convert GGUF names to MLX paths using GGUFTensorNameMapper
-/// // 2. Build RawWeights with MLX paths as keys
-/// // 3. Call binder.bind(raw, to: graph)
 /// let bound = try MLXWeightPathBinder().bind(rawWeights, to: graph)
 /// let store = try InferenceWeightStore(boundWeights: bound)
 /// ```

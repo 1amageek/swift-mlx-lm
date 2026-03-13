@@ -1,6 +1,5 @@
 import Foundation
 import MLX
-import GGUFTokenizer
 
 /// Thread-safe container providing serial access to a loaded model.
 ///

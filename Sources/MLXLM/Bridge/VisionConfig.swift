@@ -1,7 +1,7 @@
 /// Unified vision encoder configuration.
 ///
 /// Covers all supported vision encoder architectures. Fields are populated
-/// from mmproj GGUF metadata by ``GGUFVisionLoader``. Optional fields
+/// from HuggingFace preprocessor_config.json by ``HFDirectoryBundle``. Optional fields
 /// (`windowSize`, `fullAttBlockIndexes`) distinguish architecture variants:
 ///
 /// - **Window+Full hybrid** (e.g. Conv3d patch embed, SwiGLU MLP):
