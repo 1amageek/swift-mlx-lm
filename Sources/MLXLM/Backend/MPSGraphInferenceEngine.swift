@@ -6,7 +6,8 @@ import MLX
 /// Transformer inference engine built on MPSGraph.
 ///
 /// Compiles all layers into a single fused execution plan at init.
-/// Each call processes token IDs through the full model and returns logits.
+/// Supports variable sequence length via dynamic placeholder shape.
+/// Handles GQA (grouped query attention) by tiling K/V heads.
 public final class MPSGraphInferenceEngine: @unchecked Sendable {
 
     public struct Config: Sendable {
@@ -51,7 +52,6 @@ public final class MPSGraphInferenceEngine: @unchecked Sendable {
     private let inputPlaceholder: MPSGraphTensor
     private let outputTensor: MPSGraphTensor
 
-    /// Build and compile a transformer graph with the given weights.
     public init(config: Config, weights: [String: Data]) throws {
         guard let device = MTLCreateSystemDefaultDevice() else { throw Error.noMetalDevice }
         guard let queue = device.makeCommandQueue() else { throw Error.noCommandQueue }
@@ -70,11 +70,12 @@ public final class MPSGraphInferenceEngine: @unchecked Sendable {
 
     /// Forward pass: token IDs → logits.
     public func callAsFunction(_ tokenIDs: [Int32]) -> MLXArray {
+        let T = tokenIDs.count
         let data = tokenIDs.withUnsafeBufferPointer { ptr in
             MPSGraphTensorData(
                 device: MPSGraphDevice(mtlDevice: device),
                 data: Data(buffer: ptr),
-                shape: [1, tokenIDs.count as NSNumber],
+                shape: [1, T as NSNumber],
                 dataType: .int32)
         }
 
@@ -103,6 +104,7 @@ public final class MPSGraphInferenceEngine: @unchecked Sendable {
         let hd = config.headDim
         let I = config.intermediateSize
         let V = config.vocabSize
+        let repeatFactor = H / KVH
 
         func w(_ name: String, _ shape: [Int]) throws -> MPSGraphTensor {
             guard let data = weights[name] else { throw Error.missingWeight(name) }
@@ -111,8 +113,11 @@ public final class MPSGraphInferenceEngine: @unchecked Sendable {
         }
 
         let embedding = try w("model.embed_tokens.weight", [V, D])
-        let input = graph.placeholder(shape: [1, 1], dataType: .int32, name: "token_ids")
 
+        // Dynamic sequence length: shape [1, -1] allows variable T
+        let input = graph.placeholder(shape: [1, -1], dataType: .int32, name: "token_ids")
+
+        // Embedding lookup: [1, T] → [1, T, D]
         var h = graph.gatherAlongAxis(0, updates: embedding, indices: input, name: "embed")
 
         for i in 0..<config.layerCount {
@@ -128,7 +133,7 @@ public final class MPSGraphInferenceEngine: @unchecked Sendable {
                 gateW: w("\(p).mlp.gate_proj.weight", [I, D]),
                 upW: w("\(p).mlp.up_proj.weight", [I, D]),
                 downW: w("\(p).mlp.down_proj.weight", [D, I]),
-                H: H, KVH: KVH, hd: hd)
+                H: H, KVH: KVH, hd: hd, repeatFactor: repeatFactor)
         }
 
         let finalNorm = try w("model.norm.weight", [D])
@@ -143,22 +148,38 @@ public final class MPSGraphInferenceEngine: @unchecked Sendable {
         normW1: MPSGraphTensor, qW: MPSGraphTensor, kW: MPSGraphTensor,
         vW: MPSGraphTensor, oW: MPSGraphTensor, normW2: MPSGraphTensor,
         gateW: MPSGraphTensor, upW: MPSGraphTensor, downW: MPSGraphTensor,
-        H: Int, KVH: Int, hd: Int
+        H: Int, KVH: Int, hd: Int, repeatFactor: Int
     ) -> MPSGraphTensor {
         var h = input
 
-        // Attention
+        // Attention sublayer
         let n1 = rmsNorm(graph, h, normW1, "l\(i).an")
+
+        // Q: [1, T, H*hd] → [1, H, T, hd]
         let q = toHeads(graph, linear(graph, n1, qW, "l\(i).q"), H, hd, "l\(i).q")
-        let k = toHeads(graph, linear(graph, n1, kW, "l\(i).k"), KVH, hd, "l\(i).k")
-        let v = toHeads(graph, linear(graph, n1, vW, "l\(i).v"), KVH, hd, "l\(i).v")
+        // K, V: [1, T, KVH*hd] → [1, KVH, T, hd]
+        var k = toHeads(graph, linear(graph, n1, kW, "l\(i).k"), KVH, hd, "l\(i).k")
+        var v = toHeads(graph, linear(graph, n1, vW, "l\(i).v"), KVH, hd, "l\(i).v")
+
+        // GQA: tile K/V heads to match Q head count
+        if repeatFactor > 1 {
+            k = graph.tileTensor(k, withMultiplier: [1, repeatFactor, 1, 1] as [NSNumber],
+                                  name: "l\(i).k.rep")
+            v = graph.tileTensor(v, withMultiplier: [1, repeatFactor, 1, 1] as [NSNumber],
+                                  name: "l\(i).v.rep")
+        }
+
         let attn = sdpa(graph, q, k, v, hd, "l\(i)")
-        let flat = graph.reshape(
-            graph.transposeTensor(attn, dimension: 1, withDimension: 2, name: nil),
-            shape: [1, 1, (H * hd) as NSNumber], name: "l\(i).flat")
+
+        // [1, H, T, hd] → [1, T, H*hd]
+        let transposed = graph.transposeTensor(attn, dimension: 1, withDimension: 2, name: nil)
+        // Flatten last two dims: use -1 for dynamic T
+        let flat = graph.reshape(transposed, shape: [1, -1, (H * hd) as NSNumber],
+                                  name: "l\(i).flat")
+
         h = graph.addition(h, linear(graph, flat, oW, "l\(i).o"), name: "l\(i).ar")
 
-        // MLP
+        // MLP sublayer
         let n2 = rmsNorm(graph, h, normW2, "l\(i).mn")
         let gate = linear(graph, n2, gateW, "l\(i).gate")
         let up = linear(graph, n2, upW, "l\(i).up")
@@ -190,12 +211,13 @@ public final class MPSGraphInferenceEngine: @unchecked Sendable {
         return g.multiplication(g.multiplication(x, inv, name: "\(n).n"), w, name: "\(n).o")
     }
 
+    /// Reshape [1, T, heads*hd] → [1, heads, T, hd]
     private static func toHeads(
         _ g: MPSGraph, _ x: MPSGraphTensor, _ heads: Int, _ hd: Int, _ n: String
     ) -> MPSGraphTensor {
-        g.transposeTensor(
-            g.reshape(x, shape: [1, 1, heads as NSNumber, hd as NSNumber], name: nil),
-            dimension: 1, withDimension: 2, name: "\(n).h")
+        // [1, T, heads*hd] → [1, T, heads, hd] → [1, heads, T, hd]
+        let reshaped = g.reshape(x, shape: [1, -1, heads as NSNumber, hd as NSNumber], name: nil)
+        return g.transposeTensor(reshaped, dimension: 1, withDimension: 2, name: "\(n).h")
     }
 
     private static func sdpa(
