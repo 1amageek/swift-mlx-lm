@@ -2,6 +2,7 @@ import Foundation
 @preconcurrency import MLX
 import MLXCompiler
 import SwiftLM
+import MetalPerformanceShadersGraph
 
 /// Unified loading facade that constructs a `ModelContext` from any `ModelBundle`.
 ///
@@ -42,10 +43,44 @@ public struct ModelBundleLoader: Sendable {
         let architecture = try bundle.architecture()
         print("[ModelBundleLoader] config: hiddenSize=\(config.hiddenSize) layers=\(config.layerCount) arch=\(architecture) [\(String(format: "%.3f", CFAbsoluteTimeGetCurrent() - t0))s]")
 
-        // 2. Compile model
+        // 2. Assemble IR + load weights
+        var t1 = CFAbsoluteTimeGetCurrent()
+        let assembler = IRGraphAssembler()
+        let irGraph = try assembler.assemble(config: config, architecture: architecture)
+        print("[ModelBundleLoader] IR: \(irGraph.rootRegion.operations.count) ops [\(String(format: "%.3f", CFAbsoluteTimeGetCurrent() - t1))s]")
+
+        t1 = CFAbsoluteTimeGetCurrent()
         let manifest = try bundle.loadWeights()
-        let model: any LanguageModel = try loadMLX(
-            config: config, architecture: architecture, manifest: manifest)
+        let rawWeights = convertToRawWeights(manifest: manifest)
+        let sanitized = WeightSanitizer.filterRotaryEmbeddings(rawWeights.tensors)
+        let naming: WeightNamingConvention = architecture == .hybridConvAttention
+            ? .lfm2Family : .llamaFamily
+        let boundWeights = try MLXWeightPathBinder(naming: naming)
+            .bind(RawWeights(tensors: sanitized), to: irGraph)
+        print("[ModelBundleLoader] weights: \(manifest.weights.count) tensors [\(String(format: "%.3f", CFAbsoluteTimeGetCurrent() - t1))s]")
+
+        // 3. Compile — MPSGraph for dense transformers, MLX for everything else
+        t1 = CFAbsoluteTimeGetCurrent()
+        let model: any LanguageModel
+        let isQuantized = manifest.quantizationInfo.values.contains { $0.bits <= 8 }
+
+        switch architecture {
+        case .transformer where !isQuantized, .parallelAttentionMLP where !isQuantized:
+            do {
+                let compiled = try MPSGraphCompiler().compile(graph: irGraph, weights: boundWeights)
+                model = MPSGraphLanguageModel(compiled: compiled)
+                print("[ModelBundleLoader] MPSGraph compiled [\(String(format: "%.3f", CFAbsoluteTimeGetCurrent() - t1))s]")
+            } catch {
+                print("[ModelBundleLoader] MPSGraph failed (\(error.localizedDescription)), using MLX")
+                let lowered = try MLXInferenceCompiler().compile(graph: irGraph, weights: boundWeights)
+                model = CompiledLanguageModel(lowered: lowered)
+                print("[ModelBundleLoader] MLX compiled [\(String(format: "%.3f", CFAbsoluteTimeGetCurrent() - t1))s]")
+            }
+        default:
+            let lowered = try MLXInferenceCompiler().compile(graph: irGraph, weights: boundWeights)
+            model = CompiledLanguageModel(lowered: lowered)
+            print("[ModelBundleLoader] MLX compiled [\(String(format: "%.3f", CFAbsoluteTimeGetCurrent() - t1))s]")
+        }
 
         // 4. Create tokenizer
         t0 = CFAbsoluteTimeGetCurrent()
@@ -72,37 +107,7 @@ public struct ModelBundleLoader: Sendable {
         )
     }
 
-    // MARK: - MPSGraph Loading
-
-    // MARK: - MLX Loading
-
-    private func loadMLX(
-        config: ModelConfig,
-        architecture: DetectedArchitecture,
-        manifest: WeightManifest
-    ) throws -> CompiledLanguageModel {
-        var t0 = CFAbsoluteTimeGetCurrent()
-        let assembler = IRGraphAssembler()
-        let graph = try assembler.assemble(config: config, architecture: architecture)
-        print("[ModelBundleLoader] IR assembled: \(graph.rootRegion.operations.count) ops [\(String(format: "%.3f", CFAbsoluteTimeGetCurrent() - t0))s]")
-
-        t0 = CFAbsoluteTimeGetCurrent()
-        let rawWeights = convertToRawWeights(manifest: manifest)
-        print("[ModelBundleLoader] weights: \(manifest.weights.count) tensors [\(String(format: "%.3f", CFAbsoluteTimeGetCurrent() - t0))s]")
-
-        // 4. Sanitize, bind, and compile
-        t0 = CFAbsoluteTimeGetCurrent()
-        let sanitizedTensors = WeightSanitizer.filterRotaryEmbeddings(rawWeights.tensors)
-        let sanitizedWeights = RawWeights(tensors: sanitizedTensors)
-        let naming: WeightNamingConvention = architecture == .hybridConvAttention
-            ? .lfm2Family : .llamaFamily
-        let binder = MLXWeightPathBinder(naming: naming)
-        let boundWeights = try binder.bind(sanitizedWeights, to: graph)
-        let lowered = try MLXInferenceCompiler().compile(graph: graph, weights: boundWeights)
-        print("[ModelBundleLoader] compiled: cacheSlots=\(lowered.metadata.cacheSlotCount) [\(String(format: "%.3f", CFAbsoluteTimeGetCurrent() - t0))s]")
-
-        return CompiledLanguageModel(lowered: lowered)
-    }
+    // MARK: - Private
 
     /// Load a compiled model and wrap in a `ModelContainer`.
     ///
