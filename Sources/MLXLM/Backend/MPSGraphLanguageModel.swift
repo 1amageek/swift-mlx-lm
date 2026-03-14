@@ -10,9 +10,9 @@ import MLXCompiler
 /// Each forward pass replays the full token history (no incremental KV cache).
 public final class MPSGraphLanguageModel: Module, LanguageModel, @unchecked Sendable {
 
-    private let compiled: MPSGraphCompiledModel
+    private let compiled: MPSGraphInferenceModel
 
-    public init(compiled: MPSGraphCompiledModel) {
+    public init(compiled: MPSGraphInferenceModel) {
         self.compiled = compiled
         super.init()
     }

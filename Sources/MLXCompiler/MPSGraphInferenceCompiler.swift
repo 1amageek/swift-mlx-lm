@@ -9,11 +9,11 @@ import SwiftLM
 /// Uses the same IR walk pattern as `MLXInferenceCompiler`:
 /// - Phase 1: Scan (reuses `MLXInferenceCompiler.scan()`)
 /// - Phase 2: Compile (recursive region/operation walk → MPSGraph ops)
-/// - Phase 3: Wrap (MPSGraphCompiledModel)
+/// - Phase 3: Wrap (MPSGraphInferenceModel)
 ///
 /// Shares IR, weight binding, and cache discovery with MLX path.
 /// Only the compilation target differs: MPSGraph ops instead of LoweredSteps.
-public struct MPSGraphCompiler: Sendable {
+public struct MPSGraphInferenceCompiler: Sendable {
 
     public init() {}
 
@@ -23,7 +23,7 @@ public struct MPSGraphCompiler: Sendable {
     /// Caller should catch and fall back to MLX path.
     public func compile(
         graph modelGraph: ModelGraph, weights: BoundWeights
-    ) throws -> MPSGraphCompiledModel {
+    ) throws -> MPSGraphInferenceModel {
         guard let device = MTLCreateSystemDefaultDevice() else {
             throw CompilerError.invalidGraphStructure("No Metal device available")
         }
@@ -49,7 +49,7 @@ public struct MPSGraphCompiler: Sendable {
             input: input,
             context: &context)
 
-        return MPSGraphCompiledModel(
+        return MPSGraphInferenceModel(
             graph: mpsGraph, device: device, commandQueue: queue,
             inputPlaceholder: input, outputTensor: output,
             metadata: InferenceMetadata(

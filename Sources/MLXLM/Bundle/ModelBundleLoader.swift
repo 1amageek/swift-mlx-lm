@@ -67,7 +67,7 @@ public struct ModelBundleLoader: Sendable {
         switch architecture {
         case .transformer where !isQuantized, .parallelAttentionMLP where !isQuantized:
             do {
-                let compiled = try MPSGraphCompiler().compile(graph: irGraph, weights: boundWeights)
+                let compiled = try MPSGraphInferenceCompiler().compile(graph: irGraph, weights: boundWeights)
                 model = MPSGraphLanguageModel(compiled: compiled)
                 print("[ModelBundleLoader] MPSGraph compiled [\(String(format: "%.3f", CFAbsoluteTimeGetCurrent() - t1))s]")
             } catch {

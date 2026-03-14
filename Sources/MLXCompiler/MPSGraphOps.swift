@@ -6,7 +6,7 @@ import MetalPerformanceShadersGraph
 ///
 /// Static functions that build MPSGraph tensor operations matching
 /// the semantics of SwiftLM IR OperationKind primitives.
-/// Used by `MPSGraphCompiler` during IR-to-MPSGraph compilation.
+/// Used by `MPSGraphInferenceCompiler` during IR-to-MPSGraph compilation.
 enum MPSGraphOps {
 
     // MARK: - Linear Projection

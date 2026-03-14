@@ -8,7 +8,7 @@ import MetalPerformanceShadersGraph
 /// Contains the full transformer graph (all layers) as a single MPSGraph
 /// with kernel fusion and memory aliasing. Each `forward()` call executes
 /// the entire model in one dispatch.
-public struct MPSGraphCompiledModel: @unchecked Sendable {
+public struct MPSGraphInferenceModel: @unchecked Sendable {
 
     let graph: MPSGraph
     let device: MTLDevice
