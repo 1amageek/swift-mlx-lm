@@ -32,8 +32,7 @@ public struct ModelBundleLoader: Sendable {
     /// - Returns: A fully initialized `ModelContext` ready for generation.
     public func loadCompiled(
         bundle: any ModelBundle,
-        configOverride: ModelConfigurationOverride? = nil,
-        backend: InferenceBackend = .auto
+        configOverride: ModelConfigurationOverride? = nil
     ) throws -> ModelContext {
         let loadStart = CFAbsoluteTimeGetCurrent()
 
@@ -43,27 +42,9 @@ public struct ModelBundleLoader: Sendable {
         let architecture = try bundle.architecture()
         print("[ModelBundleLoader] config: hiddenSize=\(config.hiddenSize) layers=\(config.layerCount) arch=\(architecture) [\(String(format: "%.3f", CFAbsoluteTimeGetCurrent() - t0))s]")
 
-        // 2. Resolve backend
-        let resolvedBackend = resolveBackend(backend, architecture: architecture)
-        print("[ModelBundleLoader] backend: \(resolvedBackend)")
-
-        // 3. Compile model using selected backend
-        let model: any LanguageModel
-
-        switch resolvedBackend {
-        case .mpsgraph:
-            do {
-                model = try loadMPSGraph(config: config, architecture: architecture)
-            } catch {
-                // MPSGraph not yet fully integrated — fallback to MLX
-                print("[ModelBundleLoader] MPSGraph unavailable, falling back to MLX: \(error.localizedDescription)")
-                model = try loadMLX(config: config, architecture: architecture, bundle: bundle)
-            }
-        case .mlx:
-            model = try loadMLX(config: config, architecture: architecture, bundle: bundle)
-        case .auto:
-            model = try loadMLX(config: config, architecture: architecture, bundle: bundle)
-        }
+        // 2. Compile model
+        let model: any LanguageModel = try loadMLX(
+            config: config, architecture: architecture, bundle: bundle)
 
         // 4. Create tokenizer
         t0 = CFAbsoluteTimeGetCurrent()
@@ -80,7 +61,7 @@ public struct ModelBundleLoader: Sendable {
             tokenizer: tokenizer, chatTemplate: chatTemplate)
 
         let totalTime = CFAbsoluteTimeGetCurrent() - loadStart
-        print("[ModelBundleLoader] ready: \(modelConfig.name) eos=\(modelConfig.eosTokenIds) backend=\(resolvedBackend) [\(String(format: "%.3f", totalTime))s]")
+        print("[ModelBundleLoader] ready: \(modelConfig.name) eos=\(modelConfig.eosTokenIds) [\(String(format: "%.3f", totalTime))s]")
 
         return ModelContext(
             configuration: modelConfig,
@@ -90,36 +71,7 @@ public struct ModelBundleLoader: Sendable {
         )
     }
 
-    // MARK: - Backend Resolution
-
-    private func resolveBackend(
-        _ requested: InferenceBackend,
-        architecture: DetectedArchitecture
-    ) -> InferenceBackend {
-        switch requested {
-        case .mlx: return .mlx
-        case .mpsgraph: return .mpsgraph
-        case .auto:
-            // MPSGraph for pure attention models (graph compiler fusion is 1.6x faster)
-            // MLX for hybrid models (recurrent state not supported in MPSGraph)
-            // Currently defaults to MLX until MPSGraph integration is complete
-            return .mlx
-        }
-    }
-
-    // MARK: - MPSGraph Loading
-
-    private func loadMPSGraph(
-        config: ModelConfig,
-        architecture: DetectedArchitecture
-    ) throws -> CompiledLanguageModel {
-        // MPSGraph backend: build graph → compile → wrap
-        // TODO: Full MPSGraph integration with weight loading
-        // For now, falls back to MLX path until MPSGraph LanguageModel adapter is complete
-        throw MPSGraphInferenceEngine.Error.noMetalDevice
-    }
-
-    // MARK: - MLX Loading (existing path)
+    // MARK: - MLX Loading
 
     private func loadMLX(
         config: ModelConfig,
@@ -158,10 +110,9 @@ public struct ModelBundleLoader: Sendable {
     /// and wraps the result in a `ModelContainer`.
     public func load(
         bundle: any ModelBundle,
-        configOverride: ModelConfigurationOverride? = nil,
-        backend: InferenceBackend = .auto
+        configOverride: ModelConfigurationOverride? = nil
     ) throws -> ModelContainer {
-        let context = try loadCompiled(bundle: bundle, configOverride: configOverride, backend: backend)
+        let context = try loadCompiled(bundle: bundle, configOverride: configOverride)
         return ModelContainer(context: context)
     }
 
@@ -179,14 +130,13 @@ public struct ModelBundleLoader: Sendable {
         repo: String,
         token: String? = nil,
         configOverride: ModelConfigurationOverride? = nil,
-        backend: InferenceBackend = .auto,
         progress: Progress? = nil
     ) async throws -> ModelContainer {
         let downloader = HuggingFaceDownloader()
         let directory = try await downloader.downloadBundle(
             repo: repo, token: token, progress: progress)
         let bundle = try HFDirectoryBundle(directory: directory)
-        return try load(bundle: bundle, configOverride: configOverride, backend: backend)
+        return try load(bundle: bundle, configOverride: configOverride)
     }
 
     // MARK: - Private
