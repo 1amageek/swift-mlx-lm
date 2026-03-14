@@ -93,8 +93,8 @@ public struct ModelBundleLoader: Sendable {
         for (name, array) in manifest.weights {
             let f16 = array.asType(.float16)
             eval(f16)
-            let bytes: [Float16] = f16.asArray(Float16.self)
-            weightData[name] = bytes.withUnsafeBytes { Data($0) }
+            // Single copy: MLXArray GPU buffer → [Float16] → Data
+            weightData[name] = f16.asArray(Float16.self).withUnsafeBytes { Data($0) }
         }
 
         let engine = try MPSGraphInferenceEngine(

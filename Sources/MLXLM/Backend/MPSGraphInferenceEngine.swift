@@ -69,28 +69,38 @@ public final class MPSGraphInferenceEngine: @unchecked Sendable {
     }
 
     /// Forward pass: token IDs → logits.
+    ///
+    /// Minimizes copies: input uses contiguous buffer pointer directly,
+    /// output reads GPU results into a pre-sized buffer.
     public func callAsFunction(_ tokenIDs: [Int32]) -> MLXArray {
         let T = tokenIDs.count
-        let data = tokenIDs.withUnsafeBufferPointer { ptr in
+        let mpsDevice = MPSGraphDevice(mtlDevice: device)
+
+        // Input: [Int32] → MPSGraphTensorData (single copy via Data)
+        let inputData = tokenIDs.withUnsafeBytes { rawBuffer in
             MPSGraphTensorData(
-                device: MPSGraphDevice(mtlDevice: device),
-                data: Data(buffer: ptr),
+                device: mpsDevice,
+                data: Data(bytesNoCopy: UnsafeMutableRawPointer(mutating: rawBuffer.baseAddress!),
+                           count: rawBuffer.count, deallocator: .none),
                 shape: [1, T as NSNumber],
                 dataType: .int32)
         }
 
         let results = graph.run(
             with: commandQueue,
-            feeds: [inputPlaceholder: data],
+            feeds: [inputPlaceholder: inputData],
             targetTensors: [outputTensor],
             targetOperations: nil)
 
+        // Output: MPSNDArray → [Float16] → MLXArray (2 copies unavoidable across GPU frameworks)
         let result = results[outputTensor]!
         let shape = result.shape.map { $0.intValue }
         let count = shape.reduce(1, *)
-        var buffer = [Float16](repeating: 0, count: count)
-        result.mpsndarray().readBytes(&buffer, strideBytes: nil)
-        return MLXArray(buffer, shape)
+        let buffer = UnsafeMutableBufferPointer<Float16>.allocate(capacity: count)
+        result.mpsndarray().readBytes(buffer.baseAddress!, strideBytes: nil)
+        let mlxArray = MLXArray(Array(buffer), shape)
+        buffer.deallocate()
+        return mlxArray
     }
 
     // MARK: - Graph Construction
