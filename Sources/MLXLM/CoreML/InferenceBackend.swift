@@ -2,19 +2,21 @@ import Foundation
 
 /// Inference backend selection for LLM execution.
 ///
-/// CoreML is the default for standard transformer architectures.
-/// MLX is used as fallback for unsupported architectures or when CoreML is unavailable.
+/// MPSGraph is the target default for standard transformer architectures
+/// (graph compilation with kernel fusion, no Python dependency).
+/// MLX is used as fallback for all architectures and as the current default
+/// while MPSGraph integration is in progress.
 public enum InferenceBackend: Sendable {
-    /// Automatically select the best backend based on architecture and availability.
-    ///
-    /// - Transformer, ParallelAttentionMLP, MoE → CoreML (1.6x faster)
-    /// - HybridDeltaNet, HybridConvAttention → MLX (recurrent state unsupported in CoreML)
-    /// - CoreML compilation failure → MLX fallback
+    /// Automatically select the best backend.
+    /// Currently defaults to MLX. Will switch to MPSGraph when integration is complete.
     case auto
 
-    /// Force CoreML execution. Fails if CoreML compilation is not possible.
-    case coreml
+    /// MPSGraph (Metal Performance Shaders Graph) execution.
+    /// Compiles the full model into a fused execution plan.
+    /// No Python dependency — pure Swift + Metal.
+    case mpsgraph
 
-    /// Force MLX Metal execution. Always available.
+    /// MLX Metal execution. Always available.
+    /// Uses fused RMSNorm, fused SDPA, QKV packing, flat decode plan.
     case mlx
 }

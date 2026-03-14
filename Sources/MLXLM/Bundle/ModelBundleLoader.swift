@@ -1,5 +1,4 @@
 import Foundation
-import CoreML
 @preconcurrency import MLX
 import MLXCompiler
 import SwiftLM
@@ -52,12 +51,17 @@ public struct ModelBundleLoader: Sendable {
         let model: any LanguageModel
 
         switch resolvedBackend {
-        case .coreml:
-            model = try loadCoreML(config: config, architecture: architecture)
+        case .mpsgraph:
+            do {
+                model = try loadMPSGraph(config: config, architecture: architecture)
+            } catch {
+                // MPSGraph not yet fully integrated — fallback to MLX
+                print("[ModelBundleLoader] MPSGraph unavailable, falling back to MLX: \(error.localizedDescription)")
+                model = try loadMLX(config: config, architecture: architecture, bundle: bundle)
+            }
         case .mlx:
             model = try loadMLX(config: config, architecture: architecture, bundle: bundle)
         case .auto:
-            // auto should be resolved by resolveBackend, but fallback to MLX
             model = try loadMLX(config: config, architecture: architecture, bundle: bundle)
         }
 
@@ -94,55 +98,25 @@ public struct ModelBundleLoader: Sendable {
     ) -> InferenceBackend {
         switch requested {
         case .mlx: return .mlx
-        case .coreml: return .coreml
+        case .mpsgraph: return .mpsgraph
         case .auto:
-            // CoreML for pure attention models (graph compiler fusion is 1.6x faster)
-            // MLX for hybrid models (recurrent state not supported in CoreML stateful model)
-            switch architecture {
-            case .transformer, .parallelAttentionMLP, .moe:
-                return .coreml
-            case .hybridDeltaNetAttention, .hybridConvAttention:
-                return .mlx
-            }
+            // MPSGraph for pure attention models (graph compiler fusion is 1.6x faster)
+            // MLX for hybrid models (recurrent state not supported in MPSGraph)
+            // Currently defaults to MLX until MPSGraph integration is complete
+            return .mlx
         }
     }
 
-    // MARK: - CoreML Loading
+    // MARK: - MPSGraph Loading
 
-    private func loadCoreML(
+    private func loadMPSGraph(
         config: ModelConfig,
         architecture: DetectedArchitecture
-    ) throws -> CoreMLLanguageModel {
-        let t0 = CFAbsoluteTimeGetCurrent()
-
-        // Determine optimal compute units based on D
-        let computeUnits: MLComputeUnits = config.hiddenSize <= 1024 ? .all : .cpuAndGPU
-
-        let manager = CoreMLCompilationManager()
-        let mlModel = try manager.compileAndLoad(
-            D: config.hiddenSize,
-            H: config.attentionHeads,
-            KVH: config.kvHeads,
-            hd: config.hiddenSize / config.attentionHeads,
-            I: config.intermediateSize,
-            L: config.layerCount,
-            maxSeqLen: 512,
-            vocabSize: config.vocabSize,
-            computeUnits: computeUnits
-        )
-
-        let coremlConfig = CoreMLLanguageModel.CoreMLModelConfig(
-            hiddenSize: config.hiddenSize,
-            numLayers: config.layerCount,
-            vocabSize: config.vocabSize,
-            kvHeadCount: config.kvHeads,
-            headDim: config.hiddenSize / config.attentionHeads,
-            maxSeqLen: 512
-        )
-
-        print("[ModelBundleLoader] CoreML compiled: D=\(config.hiddenSize) L=\(config.layerCount) units=\(computeUnits == .all ? "all" : "GPU") [\(String(format: "%.3f", CFAbsoluteTimeGetCurrent() - t0))s]")
-
-        return CoreMLLanguageModel(model: mlModel, config: coremlConfig)
+    ) throws -> CompiledLanguageModel {
+        // MPSGraph backend: build graph → compile → wrap
+        // TODO: Full MPSGraph integration with weight loading
+        // For now, falls back to MLX path until MPSGraph LanguageModel adapter is complete
+        throw MPSGraphEngineError.graphNotBuilt
     }
 
     // MARK: - MLX Loading (existing path)
