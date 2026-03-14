@@ -3,19 +3,15 @@ import CoreML
 
 /// Manages CoreML model compilation from SwiftLM IR via Python coremltools.
 ///
-/// Handles:
-/// - Invoking the Python compilation script
-/// - Caching compiled .mlpackage files
-/// - Loading compiled MLModel instances
-///
-/// The compilation script (`scripts/compile_full_model.py`) generates a stateful
-/// CoreML model with KV cache from model configuration parameters.
+/// On macOS, invokes `scripts/compile_full_model.py` to generate stateful
+/// CoreML models. On iOS, only pre-compiled .mlpackage files are supported
+/// (Python is not available).
 public struct CoreMLCompilationManager: Sendable {
 
     /// Directory where compiled .mlpackage files are cached.
     private let cacheDir: URL
 
-    /// Path to the Python compilation script.
+    /// Path to the Python compilation script (macOS only).
     private let scriptPath: String
 
     public init(cacheDir: URL? = nil, scriptPath: String? = nil) {
@@ -25,18 +21,6 @@ public struct CoreMLCompilationManager: Sendable {
     }
 
     /// Compile a CoreML model from model parameters, or load from cache.
-    ///
-    /// - Parameters:
-    ///   - D: Hidden dimension
-    ///   - H: Number of attention heads
-    ///   - KVH: Number of KV heads
-    ///   - hd: Head dimension
-    ///   - I: Intermediate (FFN) dimension
-    ///   - L: Number of layers
-    ///   - maxSeqLen: Maximum sequence length for KV cache
-    ///   - vocabSize: Vocabulary size
-    ///   - computeUnits: CoreML compute units to use
-    /// - Returns: Loaded MLModel ready for inference
     public func compileAndLoad(
         D: Int, H: Int, KVH: Int, hd: Int, I: Int, L: Int,
         maxSeqLen: Int = 512, vocabSize: Int = 32000,
@@ -45,12 +29,17 @@ public struct CoreMLCompilationManager: Sendable {
         let name = "full_D\(D)_L\(L)_seq\(maxSeqLen)"
         let packagePath = cacheDir.appendingPathComponent("\(name).mlpackage")
 
-        // Check cache
         if !FileManager.default.fileExists(atPath: packagePath.path) {
+            #if os(macOS)
             try compileModel(
                 D: D, H: H, KVH: KVH, hd: hd, I: I, L: L,
                 maxSeqLen: maxSeqLen, vocabSize: vocabSize,
                 outputDir: cacheDir)
+            #else
+            throw CoreMLCompilationError.compilationFailed(
+                "On-device compilation is not supported on iOS. "
+                + "Pre-compile the model on macOS and include the .mlpackage in your app bundle.")
+            #endif
         }
 
         guard FileManager.default.fileExists(atPath: packagePath.path) else {
@@ -58,7 +47,6 @@ public struct CoreMLCompilationManager: Sendable {
                 "Model not found after compilation: \(packagePath.path)")
         }
 
-        // Compile to mlmodelc and load
         let compiledURL = try MLModel.compileModel(at: packagePath)
         let config = MLModelConfiguration()
         config.computeUnits = computeUnits
@@ -72,8 +60,9 @@ public struct CoreMLCompilationManager: Sendable {
         return FileManager.default.fileExists(atPath: path.path)
     }
 
-    // MARK: - Private
+    // MARK: - macOS Compilation
 
+    #if os(macOS)
     private func compileModel(
         D: Int, H: Int, KVH: Int, hd: Int, I: Int, L: Int,
         maxSeqLen: Int, vocabSize: Int, outputDir: URL
@@ -116,9 +105,10 @@ public struct CoreMLCompilationManager: Sendable {
 
         print("[CoreMLCompilationManager] compiled in \(String(format: "%.1f", elapsed))s")
     }
+    #endif
 
     private static func findScript() -> String {
-        // Look for script relative to the package root
+        #if os(macOS)
         let candidates = [
             "scripts/compile_full_model.py",
             "../scripts/compile_full_model.py",
@@ -132,7 +122,7 @@ public struct CoreMLCompilationManager: Sendable {
                 return url.path
             }
         }
-        // Fallback: assume it's in the PATH or specified explicitly
+        #endif
         return "scripts/compile_full_model.py"
     }
 }
