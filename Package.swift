@@ -2,12 +2,12 @@
 import PackageDescription
 
 let package = Package(
-    name: "swift-mlx-lm",
+    name: "swift-lm",
     platforms: [.macOS(.v15), .iOS(.v18), .visionOS(.v2)],
     products: [
         .library(name: "SwiftLM", targets: ["SwiftLM"]),
         .library(name: "ModelDeclarations", targets: ["ModelDeclarations"]),
-        .library(name: "MLXLM", targets: ["MLXLM"]),
+        .library(name: "LMInference", targets: ["LMInference"]),
     ],
     dependencies: [
         .package(url: "https://github.com/ml-explore/mlx-swift", .upToNextMinor(from: "0.30.6")),
@@ -26,9 +26,9 @@ let package = Package(
         ),
         .target(name: "ModelDeclarations", dependencies: ["SwiftLM"], path: "Sources/Models"),
         .target(
-            name: "MLXLM",
+            name: "LMInference",
             dependencies: [
-                "MLXCompiler",
+                "LMCompiler",
                 .product(name: "Jinja", package: "swift-jinja"),
                 .product(name: "OrderedCollections", package: "swift-collections"),
                 .product(name: "Tokenizers", package: "swift-transformers"),
@@ -40,7 +40,7 @@ let package = Package(
             ]
         ),
         .target(
-            name: "MLXCompiler",
+            name: "LMCompiler",
             dependencies: [
                 "SwiftLM",
                 .product(name: "MLX", package: "mlx-swift"),
@@ -49,8 +49,8 @@ let package = Package(
                 .product(name: "MLXLinalg", package: "mlx-swift"),
             ]
         ),
-        .testTarget(name: "MLXCompilerTests", dependencies: [
-            "MLXCompiler", "SwiftLM", "ModelDeclarations",
+        .testTarget(name: "LMCompilerTests", dependencies: [
+            "LMCompiler", "SwiftLM", "ModelDeclarations",
             .product(name: "TestHeartbeat", package: "swift-testing-heartbeat"),
         ]),
         .testTarget(name: "ModelsTests", dependencies: [
@@ -61,13 +61,13 @@ let package = Package(
             "SwiftLM",
             .product(name: "TestHeartbeat", package: "swift-testing-heartbeat"),
         ]),
-        .testTarget(name: "MLXLMTests", dependencies: [
-            "MLXLM",
+        .testTarget(name: "LMInferenceTests", dependencies: [
+            "LMInference",
             .product(name: "MLXNN", package: "mlx-swift"),
             .product(name: "TestHeartbeat", package: "swift-testing-heartbeat"),
         ]),
-        .testTarget(name: "MLXLMDiagnosticTests", dependencies: [
-            "MLXLM",
+        .testTarget(name: "LMInferenceDiagnosticTests", dependencies: [
+            "LMInference",
             .product(name: "MLXNN", package: "mlx-swift"),
             .product(name: "TestHeartbeat", package: "swift-testing-heartbeat"),
         ]),

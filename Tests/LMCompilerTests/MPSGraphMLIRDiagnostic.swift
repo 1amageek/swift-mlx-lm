@@ -6,7 +6,7 @@ import MLXNN
 import Metal
 import MetalPerformanceShadersGraph
 @testable import SwiftLM
-@testable import MLXCompiler
+@testable import LMCompiler
 
 /// Diagnostic tests to isolate the MPSGraph MLIR crash.
 /// Progressively builds larger graphs to find the exact failure point.

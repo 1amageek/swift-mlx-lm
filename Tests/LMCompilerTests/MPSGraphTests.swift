@@ -6,7 +6,7 @@ import MLXNN
 import Metal
 import MetalPerformanceShadersGraph
 @testable import SwiftLM
-@testable import MLXCompiler
+@testable import LMCompiler
 
 // MARK: - Shared Helpers
 

@@ -3,8 +3,8 @@ import TestHeartbeat
 @preconcurrency import MLX
 import MLXFast
 import MLXNN
-@testable import MLXLM
-@testable import MLXCompiler
+@testable import LMInference
+@testable import LMCompiler
 @testable import SwiftLM
 
 // MARK: - Test Helpers

@@ -1,7 +1,7 @@
 import MLX
 import MLXNN
 import Testing
-@testable import MLXLM
+@testable import LMInference
 
 @Suite("Prefix Reuse", .tags(.unit))
 struct PrefixReuseTests {

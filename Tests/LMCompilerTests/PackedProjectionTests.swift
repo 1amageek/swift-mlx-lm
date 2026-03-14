@@ -2,7 +2,7 @@ import Testing
 import TestHeartbeat
 @preconcurrency import MLX
 @testable import SwiftLM
-@testable import MLXCompiler
+@testable import LMCompiler
 
 @Suite("PackedProjection Tests", .tags(.unit, .compiled), .heartbeat)
 struct PackedProjectionTests {

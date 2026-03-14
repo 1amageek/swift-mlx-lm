@@ -1,7 +1,7 @@
 import Testing
 import Foundation
 import MLX
-@testable import MLXLM
+@testable import LMInference
 
 // MARK: - LMInput Tests
 

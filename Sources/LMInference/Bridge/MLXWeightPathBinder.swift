@@ -1,4 +1,4 @@
-import MLXCompiler
+import LMCompiler
 import SwiftLM
 
 /// Weight binding error for the inference compiler path.

@@ -3,7 +3,7 @@ import Testing
 import MLXFast
 import MLXNN
 @testable import SwiftLM
-@testable import MLXCompiler
+@testable import LMCompiler
 
 
 // MARK: - Test Helpers

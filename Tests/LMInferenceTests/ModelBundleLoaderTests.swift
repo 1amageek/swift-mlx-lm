@@ -1,8 +1,8 @@
 import Foundation
 import Testing
 import SwiftLM
-import MLXCompiler
-@testable import MLXLM
+import LMCompiler
+@testable import LMInference
 
 /// Tests for ModelBundleLoader's WeightManifest → RawWeights conversion
 /// and pipeline assembly (config → IR → compile).

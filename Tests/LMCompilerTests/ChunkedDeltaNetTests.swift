@@ -1,6 +1,6 @@
 import Testing
 @preconcurrency import MLX
-@testable import MLXCompiler
+@testable import LMCompiler
 
 // MARK: - Reference: token-by-token recurrence
 

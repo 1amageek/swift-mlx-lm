@@ -2,7 +2,7 @@ import Foundation
 import MLX
 import Testing
 import TestHeartbeat
-@testable import MLXLM
+@testable import LMInference
 
 /// Diagnostic tests for HFDirectoryBundle loading with real cached models.
 ///

@@ -1,5 +1,5 @@
 import MLX
-import MLXCompiler
+import LMCompiler
 
 /// Snapshot of KV cache state for prefix reuse across generations.
 public struct PromptCacheSnapshot: @unchecked Sendable {

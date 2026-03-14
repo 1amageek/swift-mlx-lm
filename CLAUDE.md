@@ -4,27 +4,27 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Goal
 
-swift-mlx-lm は Apple Silicon 上での高速 LLM 推論パッケージ。[AnyFoundationModels](https://github.com/1amageek) の `MLXFoundationModels` バックエンドとして消費される。3つの層で構成される:
+swift-lm は Apple Silicon 上での高速 LLM 推論パッケージ。[AnyFoundationModels](https://github.com/1amageek) の `MLXFoundationModels` バックエンドとして消費される。3つの層で構成される:
 
 1. **SwiftLM** — モデルアーキテクチャを宣言的に記述する DSL と IR。フォーマットにもランタイムにも依存しない
-2. **MLXCompiler** — SwiftLM IR を MLX/Metal 上で最適化された推論エンジンにコンパイルする（MLX バックエンド）
-3. **MLXLM** — HF ディレクトリからの重み読み込み、トークナイザ、生成パイプライン、**CoreML / MLX バックエンド選択**を提供する
+2. **LMCompiler** — SwiftLM IR を MLX/MPSGraph 上で最適化された推論エンジンにコンパイルする
+3. **LMInference** — HF ディレクトリからの重み読み込み、トークナイザ、生成パイプライン、MPSGraph / MLX バックエンド選択を提供する
 
 ### 推論バックエンド
 
-**CoreML がデフォルト**（transformer / parallelAttentionMLP / MoE）。MLX は hybrid モデル（DeltaNet / ShortConv）のフォールバック。
+**MPSGraph がデフォルト**（transformer / parallelAttentionMLP / MoE）。MLX は hybrid モデル（DeltaNet / ShortConv）のフォールバック。
 
 ```
 ModelBundleLoader(backend: .auto)
-  ├── .coreml (default): CoreMLCompilationManager → .mlpackage → MLModel + MLState
+  ├── .mpsgraph (default): MPSGraphInferenceCompiler → MPSGraphInferenceModel
   │   → MPSGraph グラフコンパイラ。全層を fused 実行計画に。MLX の 1.62x 高速
-  └── .mlx (fallback): MLXInferenceCompiler → MLXLoweredInferenceModel
+  └── .mlx (fallback): MLXInferenceCompiler → MLXInferenceModel
       → fused RMSNorm, fused SDPA, QKV packing, flat decode plan。全最適化済み
 ```
 
 ベンチマーク根拠（M4 Max, D=896, 24L, 全層 1 実行）:
 - MLX: 8.04ms (0.335ms/layer) — lazy eval + fused kernels
-- CoreML GPU: 4.97ms (0.207ms/layer) — MPSGraph compiled plan
+- MPSGraph: 4.97ms (0.207ms/layer) — MPSGraph compiled plan
 - 詳細: `reports/full-model-coreml-vs-mlx.md`
 
 ## Build & Test
@@ -53,59 +53,53 @@ Swift tools version: 6.2. Platforms: macOS 15, iOS 18, visionOS 2.
 
 ```bash
 # Step 1: GPU 非依存モジュール（高速）
-xcodebuild test -scheme swift-mlx-lm-Package -destination 'platform=macOS' \
-  -only-testing:GGUFParserTests -maximum-test-execution-time-allowance 60
-
-xcodebuild test -scheme swift-mlx-lm-Package -destination 'platform=macOS' \
-  -only-testing:GGUFTokenizerTests -maximum-test-execution-time-allowance 60
-
-xcodebuild test -scheme swift-mlx-lm-Package -destination 'platform=macOS' \
+xcodebuild test -scheme swift-lm-Package -destination 'platform=macOS' \
   -only-testing:SwiftLMTests -maximum-test-execution-time-allowance 60
 
-xcodebuild test -scheme swift-mlx-lm-Package -destination 'platform=macOS' \
+xcodebuild test -scheme swift-lm-Package -destination 'platform=macOS' \
   -only-testing:ModelsTests -maximum-test-execution-time-allowance 60
 
 # Step 2: GPU 依存モジュール（スイート単位で分割）
-xcodebuild test -scheme swift-mlx-lm-Package -destination 'platform=macOS' \
-  -only-testing:MLXCompilerTests -maximum-test-execution-time-allowance 60
+xcodebuild test -scheme swift-lm-Package -destination 'platform=macOS' \
+  -only-testing:LMCompilerTests -maximum-test-execution-time-allowance 60
 
-# Step 3: MLXLMTests — スイート群ごとに分割実行
+# Step 3: LMInferenceTests — スイート群ごとに分割実行
 # 3a: Core（GPU 不要）
-xcodebuild test -scheme swift-mlx-lm-Package -destination 'platform=macOS' \
-  -only-testing:MLXLMTests/LMInputTests \
-  -only-testing:MLXLMTests/ChatMessageTests \
-  -only-testing:MLXLMTests/UserInputTests \
-  -only-testing:MLXLMTests/GenerateParametersTests \
-  -only-testing:MLXLMTests/ModelConfigurationTests \
-  -only-testing:MLXLMTests/GenerationTests \
-  -only-testing:MLXLMTests/StringOrNumberTests \
-  -only-testing:MLXLMTests/ChatTemplateRendererTests \
+xcodebuild test -scheme swift-lm-Package -destination 'platform=macOS' \
+  -only-testing:LMInferenceTests/LMInputTests \
+  -only-testing:LMInferenceTests/ChatMessageTests \
+  -only-testing:LMInferenceTests/UserInputTests \
+  -only-testing:LMInferenceTests/GenerateParametersTests \
+  -only-testing:LMInferenceTests/ModelConfigurationTests \
+  -only-testing:LMInferenceTests/GenerationTests \
+  -only-testing:LMInferenceTests/StringOrNumberTests \
+  -only-testing:LMInferenceTests/ChatTemplateRendererTests \
   -maximum-test-execution-time-allowance 60
 
 # 3b: ModelBundleLoader + IR Assembly
-xcodebuild test -scheme swift-mlx-lm-Package -destination 'platform=macOS' \
-  -only-testing:MLXLMTests/ModelBundleLoaderTests \
+xcodebuild test -scheme swift-lm-Package -destination 'platform=macOS' \
+  -only-testing:LMInferenceTests/ModelBundleLoaderTests \
   -maximum-test-execution-time-allowance 60
 
 # 3c: Compiled path
-xcodebuild test -scheme swift-mlx-lm-Package -destination 'platform=macOS' \
-  -only-testing:MLXLMTests/CompiledKVCacheTests \
-  -only-testing:MLXLMTests/CompiledLanguageModelTests \
-  -only-testing:MLXLMTests/CompiledPathSanitizeTests \
-  -only-testing:MLXLMTests/CompiledKVCacheSnapshotTests \
-  -only-testing:MLXLMTests/CompiledPathBinderTests \
-  -only-testing:MLXLMTests/CompiledPipelineIntegrationTests \
+xcodebuild test -scheme swift-lm-Package -destination 'platform=macOS' \
+  -only-testing:LMInferenceTests/CompiledKVCacheTests \
+  -only-testing:LMInferenceTests/CompiledLanguageModelTests \
+  -only-testing:LMInferenceTests/CompiledPathSanitizeTests \
+  -only-testing:LMInferenceTests/CompiledKVCacheSnapshotTests \
+  -only-testing:LMInferenceTests/CompiledPathBinderTests \
+  -only-testing:LMInferenceTests/CompiledPipelineIntegrationTests \
   -maximum-test-execution-time-allowance 60
 
 # 3d: KVCache + PrefixReuse
-xcodebuild test -scheme swift-mlx-lm-Package -destination 'platform=macOS' \
-  -only-testing:MLXLMTests/KVCacheTests \
-  -only-testing:MLXLMTests/PrefixReuseTests \
+xcodebuild test -scheme swift-lm-Package -destination 'platform=macOS' \
+  -only-testing:LMInferenceTests/KVCacheTests \
+  -only-testing:LMInferenceTests/PrefixReuseTests \
   -maximum-test-execution-time-allowance 60
 
 # Step 4: Diagnostic（実モデル使用、最も重い）
-xcodebuild test -scheme swift-mlx-lm-Package -destination 'platform=macOS' \
-  -only-testing:MLXLMDiagnosticTests -maximum-test-execution-time-allowance 60
+xcodebuild test -scheme swift-lm-Package -destination 'platform=macOS' \
+  -only-testing:LMInferenceDiagnosticTests -maximum-test-execution-time-allowance 60
 ```
 
 ### ハング検知
@@ -124,21 +118,20 @@ xcodebuild test -scheme swift-mlx-lm-Package -destination 'platform=macOS' \
 HF ディレクトリ (config.json + *.safetensors + tokenizer.json)
      │
      ▼
-ModelBundleLoader (MLXLM)
+ModelBundleLoader (LMInference)
   ├── HFConfigDecoder: config.json → ModelConfig
   ├── HFArchitectureDetector: model_type → DetectedArchitecture
   ├── IRGraphAssembler: (ModelConfig, DetectedArchitecture) → ModelGraph (IR)
   │
-  ├── [CoreML path — default for transformer/MoE]
-  │   └── CoreMLCompilationManager → compile_full_model.py
-  │       → MIL (stateful KV cache + fused SDPA) → .mlpackage
-  │       → CoreMLLanguageModel (MLModel + MLState)
+  ├── [MPSGraph path — default for transformer/MoE]
+  │   └── MPSGraphInferenceCompiler → MPSGraphInferenceModel
+  │       → MPSGraphLanguageModel
   │
   └── [MLX path — fallback for hybrid/recurrent]
       ├── HFDirectoryBundle: safetensors → WeightManifest → RawWeights
       ├── MLXWeightPathBinder: RawWeights → BoundWeights
-      └── MLXInferenceCompiler: (ModelGraph, BoundWeights) → MLXLoweredInferenceModel
-          → CompiledLanguageModel
+      └── MLXInferenceCompiler: (ModelGraph, BoundWeights) → MLXInferenceModel
+          → MLXLanguageModel
            │
            ▼
      ModelContainer → TokenIterator → generate()
@@ -151,21 +144,21 @@ ModelBundleLoader (MLXLM)
 - **消費者は何も知らなくてよい** — HuggingFace repo ID を渡すだけ。`CompiledModelEntry` や `ModelComponent` の指定は不要
 - **mlx-community の事前量子化モデル** — safetensors に MLX ネイティブ形式で格納済み。GGUF 量子化パッキングコード（270KB+）が不要
 - **コンパイル時カーネル選択** — 重みのストレージ型を見て `quantizedMatmul` or `matmul` を静的に確定。実行時の型判定が不要
-- **IR と実行の分離** — モデル構造（ModelGraph IR）とランタイム（MLXCompiler / CoreML）が独立。バックエンド追加がモデル定義に影響しない
-- **CoreML がデフォルト** — MPSGraph のグラフコンパイラが Metal op-at-a-time より 1.6x 高速（全層 1 実行のベンチマークで実証済み）
+- **IR と実行の分離** — モデル構造（ModelGraph IR）とランタイム（LMCompiler）が独立。バックエンド追加がモデル定義に影響しない
+- **MPSGraph がデフォルト** — MPSGraph のグラフコンパイラが Metal op-at-a-time より 1.6x 高速（全層 1 実行のベンチマークで実証済み）
 
 ### SwiftLM の役割
 
 SwiftLM は2つの目的を持つ:
 
-1. **IR スキーマ** — `ModelGraph`, `OperationKind`, `Attributes` 等の型定義。config.json → IR 変換と MLXCompiler の両方が依存する共通語彙
+1. **IR スキーマ** — `ModelGraph`, `OperationKind`, `Attributes` 等の型定義。config.json → IR 変換と LMCompiler の両方が依存する共通語彙
 2. **DSL（ModelComponent）** — 人間が新アーキテクチャを設計・トレーニングする際の宣言的記述。推論ロードパスでは使わない
 
 ```
 SwiftLM
 ├── IR スキーマ (ModelGraph, OperationKind, Attributes)
 │   ├── ← IRGraphAssembler が IR を構築
-│   └── ← MLXCompiler が IR を消費
+│   └── ← LMCompiler が IR を消費
 │
 └── DSL (ModelComponent, @ModelComponentBuilder)
     └── ← Models/ の宣言で使用（トレーニング、設計用途）
@@ -173,7 +166,7 @@ SwiftLM
 
 ### Family と Model の境界
 
-新しいモデルが論文とともに導入する新規性は、まず **paper-level architecture family** として捉えること。`Qwen35` や `Cohere` のような商品名・モデル名を DSL や GGUF bridge の抽象名に使ってはいけない。
+新しいモデルが論文とともに導入する新規性は、まず **paper-level architecture family** として捉えること。`Qwen35` や `Cohere` のような商品名・モデル名を DSL や bridge の抽象名に使ってはいけない。
 
 - **Family**: 今後他モデルでも再利用されうる計算グラフ上の単位
   - 例: `DeltaNet`, `parallel attention + MLP`, `MoE`, `windowed vision transformer`, `full-attention vision transformer`
@@ -182,7 +175,7 @@ SwiftLM
 
 ルール:
 
-- `SwiftLM/Declaration` と `MLXLM/Bridge`, `MLXLM/IR` には **family-level の名前だけ** を置く
+- `SwiftLM/Declaration` と `LMInference/Bridge`, `LMInference/IR` には **family-level の名前だけ** を置く
 - 固有名 (`Qwen*`, `Cohere`, `Llama`, `Gemma`, `Mixtral` 等) を持ってよいのは `Sources/Models/` のみ
 - 新しいモデル対応で追加するのは、まず **新しい family component / mapper / lowering rule** であり、商品名ではない
 - `DeltaNet` のような family は `ModelComponent` として明示し、raw string の variant 判定や固有モデル名で隠蔽しない
@@ -275,22 +268,15 @@ ModelDeclarations (depends: SwiftLM)│
       (Qwen35, LFM2, etc.)        │
       ※ トレーニング・設計用途     │
                                    │
-MLXCompiler (depends: SwiftLM) ────┤
-  └── IR → MLX 推論エンジン        │
+LMCompiler (depends: SwiftLM) ─────┤
+  ├── MLXInferenceCompiler         │
+  └── MPSGraphInferenceCompiler    │
                                    │
-MLXLM (depends: SwiftLM, MLXCompiler, CoreML)
+LMInference (depends: SwiftLM, LMCompiler)
   ├── ModelBundleLoader: HF config → IR → backend selection
-  │     ├── CoreML path: CoreMLCompilationManager → CoreMLLanguageModel
-  │     └── MLX path: MLXInferenceCompiler → CompiledLanguageModel
+  │     ├── MPSGraph path: MPSGraphInferenceCompiler → MPSGraphLanguageModel
+  │     └── MLX path: MLXInferenceCompiler → MLXLanguageModel
   └── ※ ModelDeclarations には依存しない
-
-scripts/compile_full_model.py (coremltools)
-  └── CoreML stateful model 生成（Python tooling、runtime 依存ではない）
-
-GGUFParser ─────────────────────────┐
-GGUFTokenizer ──────────────────────┤ (独立ツールモジュール)
-GGUFValidation (depends: GGUFParser, MLXLM)
-  └── GGUF ファイル検証ツール用
 ```
 
 ### 下流パイプライン互換性
@@ -305,30 +291,27 @@ GGUFValidation (depends: GGUFParser, MLXLM)
 
 ## Architecture
 
-コアは3モジュール（SwiftLM + MLXCompiler + MLXLM）。外部依存は `mlx-swift` と `swift-jinja` のみ。詳細は `/skeleton` で確認すること。
+コアは3モジュール（SwiftLM + LMCompiler + LMInference）。外部依存は `mlx-swift` と `swift-jinja` のみ。詳細は `/skeleton` で確認すること。
 
 | モジュール | 役割 | 依存先 |
 |---|---|---|
 | SwiftLM | IR スキーマ + DSL | なし |
 | ModelDeclarations | DSL モデル宣言（設計・トレーニング用） | SwiftLM |
-| MLXCompiler | IR → MLX 推論エンジン | SwiftLM |
-| MLXLM | HF ローダー・生成パイプライン・**CoreML/MLX バックエンド選択** | SwiftLM, MLXCompiler, CoreML |
-| GGUFParser | GGUF v2/v3 パーサー（ツール用） | なし |
-| GGUFTokenizer | BPE/SPM トークナイザ（ツール用） | GGUFParser |
-| GGUFValidation | GGUF ファイル検証（ツール用） | GGUFParser, MLXLM |
+| LMCompiler | IR → 推論エンジン（MLX + MPSGraph） | SwiftLM |
+| LMInference | HF ローダー・生成パイプライン・バックエンド選択 | SwiftLM, LMCompiler |
 
-**重要**: MLXLM は ModelDeclarations / GGUFParser / GGUFTokenizer に依存しない。config.json → IR は `IRGraphAssembler` が直接構築する。
+**重要**: LMInference は ModelDeclarations に依存しない。config.json → IR は `IRGraphAssembler` が直接構築する。
 
 ### 推論バックエンドの使い分け
 
 | バックエンド | 対象アーキテクチャ | 利点 | 制約 |
 |---|---|---|---|
-| **CoreML** (default) | transformer, parallelAttentionMLP, MoE | MPSGraph fused execution (1.6x) | 固定 shape、weight bake、Python (coremltools) 必要 |
+| **MPSGraph** (default) | transformer, parallelAttentionMLP, MoE | MPSGraph fused execution (1.6x) | Pure Swift、Python 不要 |
 | **MLX** (fallback) | hybridDeltaNet, hybridConvAttention, 全て | 動的 shape、LoRA、量子化、常時利用可 | op-at-a-time dispatch |
 
 ```swift
 // 使い方
-let container = try await ModelBundleLoader().load(repo: "...", backend: .auto)  // default: CoreML
+let container = try await ModelBundleLoader().load(repo: "...", backend: .auto)  // default: MPSGraph
 let container = try await ModelBundleLoader().load(repo: "...", backend: .mlx)   // force MLX
 ```
 
@@ -379,11 +362,11 @@ MLXNN Module              ModelGraph (text-only と同一)
 (別モデル)                tokenEmbedding → decoder → outputHead
      │                         │
      ▼                         ▼
-vision embeddings         MLXLoweredInferenceModel
+vision embeddings         MLXInferenceModel
      │                    (コンパイルパス使用)
      └──────┐                  │
             ▼                  ▼
-      CompiledLanguageModel.prepare()
+      MLXLanguageModel.prepare()
       → sequential chunk processing
 ```
 
@@ -406,29 +389,24 @@ llama.cpp の `llama_batch` と同じ方式。text decoder に対して token ID
 
 **実行エンジンへの影響:**
 
-- `MLXLoweredInferenceModel` に `embeddings` 入力を追加（token embedding skip）
-- `MLXLoweredInferenceModel` に `positionIds` 入力を追加（M-RoPE 対応）
+- `MLXInferenceModel` に `embeddings` 入力を追加（token embedding skip）
+- `MLXInferenceModel` に `positionIds` 入力を追加（M-RoPE 対応）
 - `CompiledVisionLanguageModel` + `MLXExecutor` による VLM パスを削除
-- `CompiledLanguageModel` が text-only と VLM の両方を処理
+- `MLXLanguageModel` が text-only と VLM の両方を処理
 
 ## Weight Loading Flow
 
-### CoreML パス（デフォルト）
+### MPSGraph パス（デフォルト）
 
 ```
-config.json → ModelConfig → CoreMLCompilationManager
-     │                           │
-     │                    scripts/compile_full_model.py
-     │                    (coremltools MIL Builder)
-     │                           │
-     │                           ▼
-     │                    .mlpackage (stateful KV cache)
-     │                           │
-     │                           ▼
-     └──────────────────→ MLModel + MLState → CoreMLLanguageModel
+HF ディレクトリ (config.json + *.safetensors)
+     │
+     ▼
+ModelBundleLoader → IR assembly → MPSGraphInferenceCompiler
+     │
+     ▼
+MPSGraphInferenceModel → MPSGraphLanguageModel
 ```
-
-重みは Python スクリプト内で numpy ランダム初期化（現状）。実モデル対応には safetensors → CoreML weight 変換が必要（Phase 3）。
 
 ### MLX パス（フォールバック）
 
@@ -448,12 +426,12 @@ ModelBundleLoader.convertToRawWeights()
 WeightSanitizer.filterRotaryEmbeddings → MLXWeightPathBinder.bind()
      │
      ▼
-MLXInferenceCompiler.compile() → MLXLoweredInferenceModel
+MLXInferenceCompiler.compile() → MLXInferenceModel
 ```
 
 MLX パスは全最適化済み: fused RMSNorm (`MLXFast.rmsNorm`), fused SDPA (`MLXFast.scaledDotProductAttention`), QKV packing, Gate+Up packing, flat decode plan, 全層 lazy eval (1 eval)。
 
-## MLXCompiler 実装規則
+## LMCompiler 実装規則
 
 ### 禁止: `MLXFast.rmsNorm` に `1 + weight` を渡す
 

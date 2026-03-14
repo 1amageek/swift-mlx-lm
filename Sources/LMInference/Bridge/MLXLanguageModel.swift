@@ -1,7 +1,7 @@
 @preconcurrency import MLX
 import MLXFast
 import MLXNN
-import MLXCompiler
+import LMCompiler
 import SwiftLM
 
 // MARK: - MLXInferenceKVCache

@@ -101,7 +101,7 @@ public actor ModelContainer {
 
         if let cache {
             // External cache management (caller controls lifecycle)
-            return try MLXLM.generate(
+            return try LMInference.generate(
                 input: input,
                 cache: cache,
                 parameters: parameters,
@@ -110,7 +110,7 @@ public actor ModelContainer {
         }
 
         if !usesAutomaticPrefixReuse(for: input) {
-            return try MLXLM.generate(
+            return try LMInference.generate(
                 input: input,
                 parameters: parameters,
                 context: context

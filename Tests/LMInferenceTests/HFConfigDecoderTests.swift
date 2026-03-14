@@ -1,6 +1,6 @@
 import Testing
 import SwiftLM
-@testable import MLXLM
+@testable import LMInference
 
 @Suite("HFConfigDecoder")
 struct HFConfigDecoderTests {

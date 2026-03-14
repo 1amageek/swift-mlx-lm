@@ -3,7 +3,7 @@ import TestHeartbeat
 @preconcurrency import MLX
 import MLXFast
 @testable import SwiftLM
-@testable import MLXCompiler
+@testable import LMCompiler
 
 // MARK: - Benchmark Helpers
 

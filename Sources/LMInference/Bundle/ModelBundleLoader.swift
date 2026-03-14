@@ -1,6 +1,6 @@
 import Foundation
 @preconcurrency import MLX
-import MLXCompiler
+import LMCompiler
 import SwiftLM
 import MetalPerformanceShadersGraph
 

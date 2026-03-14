@@ -2,7 +2,7 @@ import Foundation
 import MLX
 import MLXNN
 import MLXFast
-import MLXCompiler
+import LMCompiler
 
 /// LanguageModel backed by a compiled MPSGraph.
 ///

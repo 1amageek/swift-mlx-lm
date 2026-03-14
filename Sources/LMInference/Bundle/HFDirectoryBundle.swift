@@ -219,7 +219,7 @@ public struct HFDirectoryBundle: ModelBundle {
 // MARK: - HFTokenizerAdapter
 
 /// Bridges swift-transformers `Tokenizers.Tokenizer` to our `Tokenizer` protocol.
-struct HFTokenizerAdapter: MLXLM.Tokenizer {
+struct HFTokenizerAdapter: LMInference.Tokenizer {
 
     private let wrapped: Tokenizers.Tokenizer
     let vocabularySize: Int
