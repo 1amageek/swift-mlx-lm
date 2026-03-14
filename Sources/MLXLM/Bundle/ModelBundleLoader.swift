@@ -6,7 +6,7 @@ import MetalPerformanceShadersGraph
 
 /// Unified loading facade that constructs a `ModelContext` from any `ModelBundle`.
 ///
-/// Supports the compiled inference path (IR → MLXInferenceCompiler → MLXLoweredInferenceModel).
+/// Supports the compiled inference path (IR → MLXInferenceCompiler → MLXInferenceModel).
 /// HF bundles flow through:
 ///
 /// ```
@@ -14,7 +14,7 @@ import MetalPerformanceShadersGraph
 /// bundle.architecture()   → DetectedArchitecture
 /// IRGraphAssembler.assemble() → ModelGraph
 /// bundle.loadWeights()    → WeightManifest → RawWeights
-/// bind + compile          → MLXLoweredInferenceModel
+/// bind + compile          → MLXInferenceModel
 /// bundle.tokenizer()      → Tokenizer
 /// bundle.chatTemplate()   → ChatTemplateRenderer
 /// → ModelContext

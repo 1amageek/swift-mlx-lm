@@ -98,7 +98,7 @@ private func buildInferenceModel(
     headDim: Int,
     intermediateSize: Int,
     vocabSize: Int = 32000
-) throws -> MLXLoweredInferenceModel {
+) throws -> MLXInferenceModel {
     let model = BenchTransformer(
         layerCount: layerCount,
         vocabSize: vocabSize,

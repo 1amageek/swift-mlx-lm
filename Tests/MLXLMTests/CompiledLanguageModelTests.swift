@@ -292,7 +292,7 @@ struct MLXLanguageModelTests {
         #expect(compiledCache.offset == 7)
     }
 
-    @Test("Compiled model output matches direct MLXLoweredInferenceModel output")
+    @Test("Compiled model output matches direct MLXInferenceModel output")
     func outputMatchesDirect() throws {
         MLXRandom.seed(42)
 

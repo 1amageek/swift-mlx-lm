@@ -121,12 +121,12 @@ public struct InferenceMetadata: Sendable {
 ///
 /// Usage:
 /// ```swift
-/// let model: MLXLoweredInferenceModel = try compiler.compile(graph:weights:)
+/// let model: MLXInferenceModel = try compiler.compile(graph:weights:)
 /// var state = model.makeState()
 /// let (prefillLogits, state2) = model.prefill(tokenIDs: prompt, state: state)
 /// let (decodeLogits, state3) = model.decode(tokenIDs: nextToken, state: state2)
 /// ```
-public struct MLXLoweredInferenceModel: @unchecked Sendable {
+public struct MLXInferenceModel: @unchecked Sendable {
 
     /// Plan for processing the full prompt.
     public let prefill: PrefillPlan

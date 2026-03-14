@@ -61,7 +61,7 @@ public struct MLXInferenceCompiler: Sendable {
     /// `LoweredProjection` will use `quantizedMatmul` instead of `matmul`.
     public func compile(
         graph: ModelGraph, weights: BoundWeights
-    ) throws -> MLXLoweredInferenceModel {
+    ) throws -> MLXInferenceModel {
         let store = try InferenceWeightStore(boundWeights: weights)
 
         // Phase 1: Scan — discover caches, embeddings, tied output heads
@@ -145,7 +145,7 @@ public struct MLXInferenceCompiler: Sendable {
             compilationStats: stats
         )
 
-        return MLXLoweredInferenceModel(
+        return MLXInferenceModel(
             prefill: prefillPlan,
             decode: decodePlan,
             metadata: metadata

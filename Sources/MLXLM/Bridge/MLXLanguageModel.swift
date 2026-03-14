@@ -239,7 +239,7 @@ struct VLMConfig: @unchecked Sendable {
 
 // MARK: - MLXLanguageModel
 
-/// Adapts `MLXLoweredInferenceModel` to the `LanguageModel` protocol.
+/// Adapts `MLXInferenceModel` to the `LanguageModel` protocol.
 ///
 /// Handles both text-only and VLM (vision-language) models through the
 /// same lowered inference path. For VLM:
@@ -253,7 +253,7 @@ struct VLMConfig: @unchecked Sendable {
 /// back to the shared `MLXInferenceKVCache` reference.
 class MLXLanguageModel: Module, LanguageModel, @unchecked Sendable {
 
-    let lowered: MLXLoweredInferenceModel
+    let lowered: MLXInferenceModel
 
     /// Optional VLM configuration. When set, enables vision-language processing.
     let vlmConfig: VLMConfig?
@@ -262,7 +262,7 @@ class MLXLanguageModel: Module, LanguageModel, @unchecked Sendable {
     /// Only used when `vlmConfig` is non-nil.
     var mropeNextPosition: Int = 0
 
-    init(lowered: MLXLoweredInferenceModel, vlmConfig: VLMConfig? = nil) {
+    init(lowered: MLXInferenceModel, vlmConfig: VLMConfig? = nil) {
         self.lowered = lowered
         self.vlmConfig = vlmConfig
         super.init()
