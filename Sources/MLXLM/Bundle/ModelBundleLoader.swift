@@ -73,12 +73,12 @@ public struct ModelBundleLoader: Sendable {
             } catch {
                 print("[ModelBundleLoader] MPSGraph failed (\(error.localizedDescription)), using MLX")
                 let lowered = try MLXInferenceCompiler().compile(graph: irGraph, weights: boundWeights)
-                model = CompiledLanguageModel(lowered: lowered)
+                model = MLXLanguageModel(lowered: lowered)
                 print("[ModelBundleLoader] MLX compiled [\(String(format: "%.3f", CFAbsoluteTimeGetCurrent() - t1))s]")
             }
         default:
             let lowered = try MLXInferenceCompiler().compile(graph: irGraph, weights: boundWeights)
-            model = CompiledLanguageModel(lowered: lowered)
+            model = MLXLanguageModel(lowered: lowered)
             print("[ModelBundleLoader] MLX compiled [\(String(format: "%.3f", CFAbsoluteTimeGetCurrent() - t1))s]")
         }
 

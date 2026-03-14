@@ -122,7 +122,7 @@ public final class PrefixCachePool {
 
             if trimCount == 0 {
                 // Exact prefix match — safe for all cache types including
-                // non-trimmable (DeltaNet recurrent state, CompiledKVCache).
+                // non-trimmable (DeltaNet recurrent state, MLXInferenceKVCache).
                 // This is the common multi-turn chat pattern.
                 slots.remove(at: candidate.index)
                 return (slot.cache, candidate.prefixLen)

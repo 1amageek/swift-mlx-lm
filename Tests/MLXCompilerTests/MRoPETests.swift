@@ -738,7 +738,7 @@ private struct TestTHW {
     let t: Int, h: Int, w: Int
 }
 
-/// Standalone position ID computation matching CompiledLanguageModel M-RoPE.
+/// Standalone position ID computation matching MLXLanguageModel M-RoPE.
 private func computeTestMRoPEPositionIds(
     inputIds: MLXArray,
     imageTokenId: Int, videoTokenId: Int, spatialMergeSize: Int,

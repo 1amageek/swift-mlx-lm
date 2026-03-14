@@ -4,17 +4,17 @@ import MLXNN
 import MLXCompiler
 import SwiftLM
 
-// MARK: - CompiledKVCache
+// MARK: - MLXInferenceKVCache
 
 /// Adapts `InferenceState` (value-type) to `KVCache` (reference-type protocol).
 ///
-/// A single `CompiledKVCache` instance wraps the entire `InferenceState` for
+/// A single `MLXInferenceKVCache` instance wraps the entire `InferenceState` for
 /// the compiled model. All cache slots are managed internally — the `KVCache`
 /// protocol interface provides just enough surface for `TokenIterator` to work.
 ///
-/// Design: `LanguageModel.newCache()` returns `[CompiledKVCache]` (single element).
+/// Design: `LanguageModel.newCache()` returns `[MLXInferenceKVCache]` (single element).
 /// `callAsFunction` reads/writes through this shared reference.
-final class CompiledKVCache: KVCache, Updatable, @unchecked Sendable {
+final class MLXInferenceKVCache: KVCache, Updatable, @unchecked Sendable {
 
     /// The mutable inference state (contains all layer caches + position).
     var inferenceState: InferenceState
@@ -43,7 +43,7 @@ final class CompiledKVCache: KVCache, Updatable, @unchecked Sendable {
     }
 
     func update(keys: MLXArray, values: MLXArray) -> (MLXArray, MLXArray) {
-        fatalError("CompiledKVCache does not support direct KV updates")
+        fatalError("MLXInferenceKVCache does not support direct KV updates")
     }
 
     @discardableResult
@@ -216,7 +216,7 @@ final class CompiledKVCache: KVCache, Updatable, @unchecked Sendable {
 
 // MARK: - VLM Configuration
 
-/// Vision-language model configuration for CompiledLanguageModel.
+/// Vision-language model configuration for MLXLanguageModel.
 ///
 /// When present, enables sequential chunk processing: text chunks use
 /// token embedding lookup, vision chunks use pre-computed embeddings
@@ -237,7 +237,7 @@ struct VLMConfig: @unchecked Sendable {
     let spatialMergeSize: Int
 }
 
-// MARK: - CompiledLanguageModel
+// MARK: - MLXLanguageModel
 
 /// Adapts `MLXLoweredInferenceModel` to the `LanguageModel` protocol.
 ///
@@ -248,10 +248,10 @@ struct VLMConfig: @unchecked Sendable {
 /// - Sequential chunk processing: text → vision → text, each updating KV cache
 ///
 /// The compiled model uses `InferenceState` (value-type) internally, which is
-/// wrapped in a `CompiledKVCache` (reference-type) for `KVCache` protocol
+/// wrapped in a `MLXInferenceKVCache` (reference-type) for `KVCache` protocol
 /// compatibility. On each forward pass, the state is read from and written
-/// back to the shared `CompiledKVCache` reference.
-class CompiledLanguageModel: Module, LanguageModel, @unchecked Sendable {
+/// back to the shared `MLXInferenceKVCache` reference.
+class MLXLanguageModel: Module, LanguageModel, @unchecked Sendable {
 
     let lowered: MLXLoweredInferenceModel
 
@@ -276,7 +276,7 @@ class CompiledLanguageModel: Module, LanguageModel, @unchecked Sendable {
     func callAsFunction(
         _ input: LMInput.Text, cache: [KVCache]?, state: LMOutput.State?
     ) -> LMOutput {
-        guard let compiledCache = cache?.first as? CompiledKVCache else {
+        guard let compiledCache = cache?.first as? MLXInferenceKVCache else {
             let freshState = lowered.makeState()
             let (logits, _) = lowered.prefill(
                 tokenIDs: input.tokens,
@@ -333,7 +333,7 @@ class CompiledLanguageModel: Module, LanguageModel, @unchecked Sendable {
     func newCache(parameters: GenerateParameters?) -> [KVCache] {
         let state = lowered.makeState()
         mropeNextPosition = 0
-        return [CompiledKVCache(inferenceState: state)]
+        return [MLXInferenceKVCache(inferenceState: state)]
     }
 
     func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {
@@ -359,7 +359,7 @@ class CompiledLanguageModel: Module, LanguageModel, @unchecked Sendable {
         let tokens = input.text.tokens
         let tokenCount = tokens.dim(tokens.ndim - 1)
 
-        guard let compiledCache = cache.first as? CompiledKVCache else {
+        guard let compiledCache = cache.first as? MLXInferenceKVCache else {
             let output = callAsFunction(input.text, cache: cache, state: nil)
             return .logits(output)
         }
@@ -447,7 +447,7 @@ class CompiledLanguageModel: Module, LanguageModel, @unchecked Sendable {
         image: LMInput.ProcessedImage,
         video: LMInput.ProcessedVideo?,
         vlmConfig: VLMConfig,
-        compiledCache: CompiledKVCache
+        compiledCache: MLXInferenceKVCache
     ) -> LMOutput {
         // 1. Compute M-RoPE position IDs for full sequence
         let (fullPositionIds, nextTextPos) = computeMRoPEPositionIds(

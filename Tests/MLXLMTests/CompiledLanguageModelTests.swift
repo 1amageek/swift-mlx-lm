@@ -105,19 +105,19 @@ private func tinyLlamaWeights(layerCount: Int) -> BoundWeights {
     return bind(dict)
 }
 
-/// Compile a TinyLlama into a CompiledLanguageModel.
-private func compileModel(layerCount: Int) throws -> CompiledLanguageModel {
+/// Compile a TinyLlama into a MLXLanguageModel.
+private func compileModel(layerCount: Int) throws -> MLXLanguageModel {
     let model = TinyLlama(layerCount: layerCount)
     let graph = try model.makeModelGraph()
     let weights = tinyLlamaWeights(layerCount: layerCount)
     let lowered = try MLXInferenceCompiler().compile(graph: graph, weights: weights)
-    return CompiledLanguageModel(lowered: lowered)
+    return MLXLanguageModel(lowered: lowered)
 }
 
-// MARK: - CompiledKVCache Tests
+// MARK: - MLXInferenceKVCache Tests
 
-@Suite("CompiledKVCache", .serialized, .tags(.unit, .compiled), .heartbeat)
-struct CompiledKVCacheTests {
+@Suite("MLXInferenceKVCache", .serialized, .tags(.unit, .compiled), .heartbeat)
+struct MLXInferenceKVCacheTests {
 
     @Test("Offset reflects nextPosition from InferenceState")
     func offsetReflectsPosition() throws {
@@ -126,8 +126,8 @@ struct CompiledKVCacheTests {
         let caches = model.newCache(parameters: nil)
 
         #expect(caches.count == 1)
-        guard let compiledCache = caches.first as? CompiledKVCache else {
-            Issue.record("Expected CompiledKVCache")
+        guard let compiledCache = caches.first as? MLXInferenceKVCache else {
+            Issue.record("Expected MLXInferenceKVCache")
             return
         }
 
@@ -145,8 +145,8 @@ struct CompiledKVCacheTests {
         MLXRandom.seed(42)
         let model = try compileModel(layerCount: 2)
         let caches = model.newCache(parameters: nil)
-        guard let compiledCache = caches.first as? CompiledKVCache else {
-            Issue.record("Expected CompiledKVCache")
+        guard let compiledCache = caches.first as? MLXInferenceKVCache else {
+            Issue.record("Expected MLXInferenceKVCache")
             return
         }
 
@@ -166,8 +166,8 @@ struct CompiledKVCacheTests {
     func maskBehavior() throws {
         let model = try compileModel(layerCount: 1)
         let caches = model.newCache(parameters: nil)
-        guard let compiledCache = caches.first as? CompiledKVCache else {
-            Issue.record("Expected CompiledKVCache")
+        guard let compiledCache = caches.first as? MLXInferenceKVCache else {
+            Issue.record("Expected MLXInferenceKVCache")
             return
         }
 
@@ -185,10 +185,10 @@ struct CompiledKVCacheTests {
     }
 }
 
-// MARK: - CompiledLanguageModel Protocol Conformance Tests
+// MARK: - MLXLanguageModel Protocol Conformance Tests
 
-@Suite("CompiledLanguageModel", .serialized, .tags(.integration, .compiled), .heartbeat)
-struct CompiledLanguageModelTests {
+@Suite("MLXLanguageModel", .serialized, .tags(.integration, .compiled), .heartbeat)
+struct MLXLanguageModelTests {
 
     @Test("Conforms to LanguageModel protocol")
     func conformsToProtocol() throws {
@@ -196,13 +196,13 @@ struct CompiledLanguageModelTests {
         let _: any LanguageModel = model
     }
 
-    @Test("newCache returns single CompiledKVCache")
+    @Test("newCache returns single MLXInferenceKVCache")
     func newCacheReturnsSingleCache() throws {
         let model = try compileModel(layerCount: 2)
         let caches = model.newCache(parameters: nil)
 
         #expect(caches.count == 1)
-        #expect(caches.first is CompiledKVCache)
+        #expect(caches.first is MLXInferenceKVCache)
     }
 
     @Test("layerCount returns cache slot count")
@@ -229,8 +229,8 @@ struct CompiledLanguageModelTests {
         #expect(output.logits.dim(2) == 8)
 
         // Cache should reflect 3 prefilled tokens
-        guard let compiledCache = caches.first as? CompiledKVCache else {
-            Issue.record("Expected CompiledKVCache")
+        guard let compiledCache = caches.first as? MLXInferenceKVCache else {
+            Issue.record("Expected MLXInferenceKVCache")
             return
         }
         #expect(compiledCache.offset == 3)
@@ -256,8 +256,8 @@ struct CompiledLanguageModelTests {
         #expect(output.logits.dim(2) == 8)
 
         // Position should be 4 (3 prefill + 1 decode)
-        guard let compiledCache = caches.first as? CompiledKVCache else {
-            Issue.record("Expected CompiledKVCache")
+        guard let compiledCache = caches.first as? MLXInferenceKVCache else {
+            Issue.record("Expected MLXInferenceKVCache")
             return
         }
         #expect(compiledCache.offset == 4)
@@ -285,8 +285,8 @@ struct CompiledLanguageModelTests {
             for v in vals { #expect(v.isFinite, "Non-finite at decode step \(i - 2)") }
         }
 
-        guard let compiledCache = caches.first as? CompiledKVCache else {
-            Issue.record("Expected CompiledKVCache")
+        guard let compiledCache = caches.first as? MLXInferenceKVCache else {
+            Issue.record("Expected MLXInferenceKVCache")
             return
         }
         #expect(compiledCache.offset == 7)
@@ -309,7 +309,7 @@ struct CompiledLanguageModelTests {
         let (directDecode, _) = lowered.decode(tokenIDs: nextToken, state: directState2)
 
         // Adapter path
-        let compiled = CompiledLanguageModel(lowered: lowered)
+        let compiled = MLXLanguageModel(lowered: lowered)
         let caches = compiled.newCache(parameters: nil)
         let adapterPrefill = compiled.callAsFunction(
             LMInput.Text(tokens: prompt), cache: caches, state: nil)
@@ -428,16 +428,16 @@ struct CompiledPathSanitizeTests {
 
 // MARK: - P2: PromptCacheSnapshot Interop Tests
 
-@Suite("CompiledKVCacheSnapshot", .serialized, .tags(.integration, .compiled), .heartbeat)
-struct CompiledKVCacheSnapshotTests {
+@Suite("MLXInferenceKVCacheSnapshot", .serialized, .tags(.integration, .compiled), .heartbeat)
+struct MLXInferenceKVCacheSnapshotTests {
 
     @Test("state getter returns non-empty arrays after prefill")
     func stateGetterAfterPrefill() throws {
         MLXRandom.seed(42)
         let model = try compileModel(layerCount: 2)
         let caches = model.newCache(parameters: nil)
-        guard let compiledCache = caches.first as? CompiledKVCache else {
-            Issue.record("Expected CompiledKVCache")
+        guard let compiledCache = caches.first as? MLXInferenceKVCache else {
+            Issue.record("Expected MLXInferenceKVCache")
             return
         }
 
@@ -459,8 +459,8 @@ struct CompiledKVCacheSnapshotTests {
         MLXRandom.seed(42)
         let model = try compileModel(layerCount: 2)
         let caches = model.newCache(parameters: nil)
-        guard let compiledCache = caches.first as? CompiledKVCache else {
-            Issue.record("Expected CompiledKVCache")
+        guard let compiledCache = caches.first as? MLXInferenceKVCache else {
+            Issue.record("Expected MLXInferenceKVCache")
             return
         }
 
@@ -477,7 +477,7 @@ struct CompiledKVCacheSnapshotTests {
         #expect(meta.count == 2 + 2 * 3)
     }
 
-    @Test("capturePromptCache produces valid snapshot for CompiledKVCache")
+    @Test("capturePromptCache produces valid snapshot for MLXInferenceKVCache")
     func captureProducesValidSnapshot() throws {
         MLXRandom.seed(42)
         let model = try compileModel(layerCount: 2)
@@ -492,11 +492,11 @@ struct CompiledKVCacheSnapshotTests {
 
         #expect(snapshot.prefixTokenCount == 3)
         #expect(snapshot.cacheClasses.count == 1)
-        #expect(snapshot.cacheClasses[0] == "CompiledKVCache")
+        #expect(snapshot.cacheClasses[0] == "MLXInferenceKVCache")
         #expect(snapshot.cacheState[0].count > 0, "Snapshot should capture non-empty state")
     }
 
-    @Test("materializePromptCache restores CompiledKVCache from snapshot")
+    @Test("materializePromptCache restores MLXInferenceKVCache from snapshot")
     func materializeRestoresCompiledCache() throws {
         MLXRandom.seed(42)
         let model = try compileModel(layerCount: 2)
@@ -513,8 +513,8 @@ struct CompiledKVCacheSnapshotTests {
         // Materialize
         let restored = materializePromptCache(from: snapshot)
         #expect(restored.count == 1)
-        guard let restoredCache = restored.first as? CompiledKVCache else {
-            Issue.record("Expected restored cache to be CompiledKVCache")
+        guard let restoredCache = restored.first as? MLXInferenceKVCache else {
+            Issue.record("Expected restored cache to be MLXInferenceKVCache")
             return
         }
 
@@ -523,7 +523,7 @@ struct CompiledKVCacheSnapshotTests {
 
         // Verify state arrays were restored
         let restoredState = restoredCache.state
-        let originalState = (caches.first as! CompiledKVCache).state
+        let originalState = (caches.first as! MLXInferenceKVCache).state
         #expect(restoredState.count == originalState.count)
 
         for (orig, rest) in zip(originalState, restoredState) {
@@ -661,8 +661,8 @@ struct CompiledPipelineIntegrationTests {
         }
 
         // Verify position tracking
-        guard let compiledCache = caches.first as? CompiledKVCache else {
-            Issue.record("Expected CompiledKVCache")
+        guard let compiledCache = caches.first as? MLXInferenceKVCache else {
+            Issue.record("Expected MLXInferenceKVCache")
             return
         }
         #expect(compiledCache.offset == 6, "3 prefill + 3 decode = 6")

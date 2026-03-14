@@ -82,8 +82,8 @@ public func materializePromptCache(
 
 private func cacheClassName(_ cache: KVCache) -> String {
     switch cache {
-    case is CompiledKVCache:
-        return "CompiledKVCache"
+    case is MLXInferenceKVCache:
+        return "MLXInferenceKVCache"
     case is KVCacheSimple:
         return "KVCacheSimple"
     case is RotatingKVCache:
@@ -97,7 +97,7 @@ private func cacheClassName(_ cache: KVCache) -> String {
 
 private func instantiateCache(className: String, metaState: [String]) -> KVCache {
     switch className {
-    case "CompiledKVCache":
+    case "MLXInferenceKVCache":
         // Reconstruct InferenceState from metaState
         // Format: [nextPosition, cacheCount, type0, offset0, step0, ...]
         let nextPos = metaState.count >= 1 ? (Int(metaState[0]) ?? 0) : 0
@@ -122,7 +122,7 @@ private func instantiateCache(className: String, metaState: [String]) -> KVCache
             }
         }
         let state = InferenceState(caches: caches, nextPosition: nextPos)
-        return CompiledKVCache(inferenceState: state)
+        return MLXInferenceKVCache(inferenceState: state)
     case "RotatingKVCache":
         let maxSize = metaState.count >= 2 ? (Int(metaState[1]) ?? 4096) : 4096
         let keep = metaState.count >= 1 ? (Int(metaState[0]) ?? 0) : 0
