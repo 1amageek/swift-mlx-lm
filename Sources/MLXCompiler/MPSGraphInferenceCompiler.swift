@@ -113,7 +113,7 @@ public struct MPSGraphInferenceCompiler: Sendable {
             let table = try resolveWeight(context.store, slot: ParameterSlot(path: path, role: .embeddingTable),
                                            shape: [attrs.vocabSize, attrs.embeddingSize], graph: g)
             context.embeddingTensor = table
-            return g.gatherAlongAxis(0, updates: table, indices: input, name: "embed")
+            return g.gather(withUpdatesTensor: table, indicesTensor: input, axis: 0, batchDimensions: 0, name: "embed")
 
         case .rmsNorm(let attrs):
             let w = try resolveWeight(context.store, slot: ParameterSlot(path: path, role: .scale),
