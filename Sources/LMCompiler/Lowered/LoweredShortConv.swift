@@ -64,33 +64,44 @@ public struct LoweredShortConv: @unchecked Sendable {
         }
 
         // Create SSM conv Metal kernel — llama.cpp-style dot product per channel.
-        // Input: padded [B, K+T-1, D] (channels-last), Weight: [D, K]
-        // Output: [B, T, D] where each output[b,t,d] = sum_{k=0}^{K-1} input[b,t+k,d] * weight[d,k]
+        //
+        // Auto-generated signature by MLX (from source string analysis):
+        //   const device T* input [[buffer(0)]],
+        //   const constant int* input_shape [[buffer(1)]],      ← auto-added (source contains "input_shape")
+        //   device T* output [[buffer(2)]],
+        //   uint3 thread_position_in_grid [[thread_position_in_grid]]
+        //
+        // Input: padded [B, L_in, D] row-contiguous (channels-last). L_in = K-1 + T.
+        // Weight: [D, K] row-contiguous.
+        // Output: [B, T, D] where output[b,t,d] = sum_{k=0}^{K-1} input[b,t+k,d] * weight[d,k]
+        //
+        // Template params: CONV_K (kernel size), HIDDEN_D (hidden dimension) — compile-time constants.
+        // Grid: (D, T, B). Each thread computes one output element.
+        let K = attrs.kernelSize
+        let D = attrs.hiddenSize
         self.ssmConvKernel = MLXFast.metalKernel(
-            name: "ssm_conv",
+            name: "ssm_conv_k\(K)_d\(D)",
             inputNames: ["input", "weight"],
             outputNames: ["output"],
             source: """
-                // SSM conv: depthwise causal convolution as dot product per channel.
-                // grid: (D, T, B)
-                uint d = thread_position_in_grid.x;  // channel index
-                uint t = thread_position_in_grid.y;  // output token index
-                uint b = thread_position_in_grid.z;  // batch index
+                // grid: (D, T, B). Each thread computes one output[b, t, d].
+                uint d = thread_position_in_grid.x;
+                uint t = thread_position_in_grid.y;
+                uint b = thread_position_in_grid.z;
 
-                uint D = output_shape[2];  // hidden size
-                uint T = output_shape[1];  // output sequence length
-                uint K = weight_shape[1];  // kernel size
+                // input: [B, L_in, D] row-contiguous. L_in = input_shape[1].
+                uint L_in = (uint)input_shape[1];
+                uint in_base = b * L_in * HIDDEN_D;
 
                 float sum = 0.0f;
-                for (uint k = 0; k < K; k++) {
-                    // input[b, t + k, d] * weight[d, k]
-                    uint in_idx = b * input_strides[0] + (t + k) * input_strides[1] + d;
-                    uint w_idx = d * weight_strides[0] + k;
-                    sum += float(input[in_idx]) * float(weight[w_idx]);
+                for (uint k = 0; k < (uint)CONV_K; k++) {
+                    sum += (float)input[in_base + (t + k) * HIDDEN_D + d]
+                         * (float)weight[d * CONV_K + k];
                 }
 
-                uint out_idx = b * output_strides[0] + t * output_strides[1] + d;
-                output[out_idx] = sum;
+                // output: [B, T, D] row-contiguous. T = L_in - CONV_K + 1.
+                uint out_T = L_in - CONV_K + 1;
+                output[b * out_T * HIDDEN_D + t * HIDDEN_D + d] = sum;
             """,
             ensureRowContiguous: true
         )
@@ -144,10 +155,12 @@ public struct LoweredShortConv: @unchecked Sendable {
         let T = x.dim(1)
         let convOut = ssmConvKernel(
             [bx, convWeight],
+            template: [("CONV_K", K), ("HIDDEN_D", D)],
             grid: (D, T, B),
             threadGroup: (min(D, 256), 1, 1),
             outputShapes: [[B, T, D]],
-            outputDTypes: [bx.dtype]
+            outputDTypes: [bx.dtype],
+            verbose: false
         )[0]
 
         // Store updated cache
