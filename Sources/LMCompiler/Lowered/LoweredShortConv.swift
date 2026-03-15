@@ -30,8 +30,9 @@ public struct LoweredShortConv: @unchecked Sendable {
     /// Output projection (D -> D) with compile-time resolved kernel.
     public let outProj: LoweredProjection
 
-    /// Depthwise conv1d weight: [D, 1, K] where K = kernelSize.
+    /// Depthwise conv1d weight in MLX layout: [D, K, 1] (C_out, kernel, C_in/groups).
     public let convWeight: MLXArray
+
 
     /// Short convolution attributes (hiddenSize, kernelSize).
     public let attrs: ShortConvAttributes
@@ -42,13 +43,20 @@ public struct LoweredShortConv: @unchecked Sendable {
     public init(
         inProj: LoweredProjection,
         outProj: LoweredProjection,
-        convWeight: MLXArray,
+        convWeight rawWeight: MLXArray,
         attrs: ShortConvAttributes,
         cacheSlotIndex: Int
     ) {
         self.inProj = inProj
         self.outProj = outProj
-        self.convWeight = convWeight
+        // Pre-compute weight layout at compile time (not per-token).
+        // Raw weight from safetensors: [D, 1, K]
+        // MLX conv1d (channels-last) expects: [C_out, K, C_in/groups] = [D, K, 1]
+        if rawWeight.ndim == 3 {
+            self.convWeight = rawWeight.transposed(0, 2, 1)  // [D, K, 1]
+        } else {
+            self.convWeight = rawWeight.expandedDimensions(axis: -1)  // [D, K, 1]
+        }
         self.attrs = attrs
         self.cacheSlotIndex = cacheSlotIndex
     }
@@ -58,79 +66,50 @@ public struct LoweredShortConv: @unchecked Sendable {
         let D = attrs.hiddenSize
         let K = attrs.kernelSize
         let B = x.dim(0)
-        let T = x.dim(1)
 
         // in_proj: [B, T, D] -> [B, T, 3D] — compile-time kernel selection
         let bcx = inProj.apply(x)
 
-        // Chunk into B-gate, C-gate, x-input along last dimension
-        let bGate = bcx[0..., 0..., ..<D]
-        let cGate = bcx[0..., 0..., D..<(2 * D)]
-        let xInput = bcx[0..., 0..., (2 * D)...]
+        // Split into B-gate, C-gate, x-input (single op, zero-copy)
+        let parts = bcx.split(parts: 3, axis: -1)
+        let bGate = parts[0]
+        let cGate = parts[1]
+        let xInput = parts[2]
 
         // First gate: element-wise multiply (plain, not sigmoid)
-        let bx = bGate * xInput  // [B, T, D]
+        var bx = bGate * xInput  // [B, T, D]
 
-        // Transpose to [B, D, T] for conv operations
-        let bxT = bx.transposed(0, 2, 1)
-
-        // Extract cache
-        var convState: MLXArray?
+        // Extract cache state or initialize with zeros
+        var state: MLXArray?
         var cacheOffset: Int = 0
         switch caches[cacheSlotIndex] {
         case .recurrent(let cache):
-            convState = cache.convState
+            state = cache.convState
             cacheOffset = cache.offset
         default:
             break
         }
-
-        // Depthwise causal conv1d
-        let convOut: MLXArray
-        let newConvState: MLXArray
-
-        if let existingState = convState {
-            // Decode path: use rolling cache
-            let prefix = existingState.asType(bxT.dtype)
-            let combined = concatenated([prefix, bxT], axis: 2)  // [B, D, prevK + T]
-
-            // Store last K timesteps as new cache
-            let totalLen = combined.dim(2)
-            newConvState = combined[0..., 0..., (totalLen - K)...]
-
-            if T == 1 {
-                // Single token: direct dot product for maximum efficiency
-                let w = convWeight.squeezed(axis: 1)  // [D, K]
-                let state = newConvState  // [B, D, K]
-                convOut = sum(state.asType(bxT.dtype) * w, axis: 2)
-                    .expandedDimensions(axis: 1)  // [B, 1, D]
-            } else {
-                // Multi-token with cache: full conv over combined input
-                let w3d = convWeight.ndim == 2
-                    ? convWeight.expandedDimensions(axis: -1)
-                    : convWeight
-                let raw = conv1d(combined, w3d, stride: 1, padding: 0, groups: D)
-                let rawLen = raw.dim(1)
-                convOut = raw[0..., (rawLen - T)..., 0...]  // [B, T, D]
-            }
-        } else {
-            // Prefill: causal conv1d with zero padding
-            let prefix = MLXArray.zeros([B, D, K - 1])
-            let padded = concatenated([prefix, bxT], axis: 2)
-            let w3d = convWeight.ndim == 2
-                ? convWeight.expandedDimensions(axis: -1)
-                : convWeight
-            convOut = conv1d(padded, w3d, stride: 1, padding: 0, groups: D)
-
-            // Initialize cache with last K timesteps
-            newConvState = bxT[0..., 0..., (T - min(K, T))...]
+        if state == nil {
+            state = MLXArray.zeros([B, K - 1, D], dtype: bx.dtype)
         }
 
-        // Update cache (conv-only, no recurrent state)
+        // Concatenate cache + input (zero-copy views)
+        bx = concatenated([state!, bx], axis: -2)
+
+        // Update cache: last K-1 timesteps
+        // Cache stores K-1 elements. After concat with T new tokens, total length = (K-1) + T.
+        // We need the last K-1 from that, so start = T.
+        // For decode (T=1): start = 1, for prefill: start = T.
+        let newConvState = bx[0..., x.dim(1)..., 0...]
+
+        // Depthwise causal conv1d
+        let convOut = conv1d(bx, convWeight, stride: 1, padding: 0, groups: D)
+
+        // Store updated cache
         caches[cacheSlotIndex] = .recurrent(LoweredRecurrentCache(
             convState: newConvState,
             recurrentState: nil,
-            offset: cacheOffset + T
+            offset: cacheOffset + x.dim(1)
         ))
 
         // Second gate: element-wise multiply (plain, not sigmoid)

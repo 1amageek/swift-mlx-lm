@@ -274,7 +274,7 @@ struct ModelDeclarationTests {
         let graph = try LFM2(config: TestConfigs.lfm2_350M).makeModelGraph()
 
         let convCount = countOperations(in: graph.rootRegion) { kind in
-            if case .stateSpace = kind { return true }
+            if case .shortConv = kind { return true }
             return false
         }
         let attnCount = countOperations(in: graph.rootRegion) { kind in

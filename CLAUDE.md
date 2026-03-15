@@ -138,31 +138,45 @@ ModelGraph (IR) + WeightNameMapper
         ModelContainer → TokenIterator → generate()
 ```
 
+### config.json と safetensors の役割
+
+config.json と safetensors はそれぞれ異なる役割を持ち、両方からモデルを構築する:
+
+- **config.json → モデルの構造** — hidden_size、layer_types、num_attention_heads 等の構造パラメータ。IR（ModelGraph）を構築するために必須
+- **safetensors → weight の実体** — どのテンソルが存在するかの正規ソース。weight binding に使う
+
+config.json だけではモデルの完全な記述にならない。例: LFM2 の config.json に `use_qk_norm` フラグがないが、safetensors には `q_layernorm.weight` が存在する。**safetensors のテンソルキーが weight 構造の正規ソース。**
+
+設計ルール:
+- IR の weight slot はオプショナルに宣言する（QK norm 等）
+- safetensors にテンソルがあればバインド、なければスキップ
+- 必須 weight が safetensors に無い場合はエラー
+- config.json のフラグで weight slot の有無を決めない — safetensors が正規ソース
+
 ### なぜ HF ディレクトリ駆動か
 
-- **config.json が正規ソース** — 完全なメタデータ。GGUF metadata のような converter 依存の不完全コピーではない
-- **Known model は ModelComponent で保証** — config.json の `model_type` で検証済み ModelComponent を選択。config.json → Model.Config → makeModelGraph() で IR を構築
-- **Unknown model は AnyModel でベストエフォート** — 既存コンポーネントの組み合わせで可能な限り動作。動作保証なし
-- **消費者は何も知らなくてよい** — HuggingFace repo ID を渡すだけ。`CompiledModelEntry` や `ModelComponent` の指定は不要
-- **mlx-community の事前量子化モデル** — safetensors に MLX ネイティブ形式で格納済み。GGUF 量子化パッキングコード（270KB+）が不要
+- **消費者は何も知らなくてよい** — HuggingFace repo ID を渡すだけ
+- **mlx-community の事前量子化モデル** — safetensors に MLX ネイティブ形式で格納済み。`quantizedMatmul` が直接使用可能
 - **コンパイル時カーネル選択** — 重みのストレージ型を見て `quantizedMatmul` or `matmul` を静的に確定。実行時の型判定が不要
 - **IR と実行の分離** — モデル構造（ModelGraph IR）とランタイム（LMCompiler）が独立。バックエンド追加がモデル定義に影響しない
 
 ### SwiftLM の役割
 
-SwiftLM は2つの目的を持つ:
+SwiftLM は3つの目的を持つ:
 
-1. **IR スキーマ** — `ModelGraph`, `OperationKind`, `Attributes` 等の型定義。config.json → IR 変換と LMCompiler の両方が依存する共通語彙
-2. **DSL（ModelComponent）** — 人間が新アーキテクチャを設計・トレーニングする際の宣言的記述。推論ロードパスでは使わない
+1. **IR スキーマ** — `ModelGraph`, `OperationKind`, `Attributes` 等の型定義。ModelComponent と LMCompiler の両方が依存する共通語彙
+2. **DSL（ModelComponent）** — モデルアーキテクチャの宣言的記述。推論パスで `makeModelGraph()` により IR を構築する
+3. **ModelConfig** — config.json の構造パラメータを保持する汎用型。全モジュールが共有
 
 ```
 SwiftLM
 ├── IR スキーマ (ModelGraph, OperationKind, Attributes)
-│   ├── ← IRGraphAssembler が IR を構築
 │   └── ← LMCompiler が IR を消費
-│
-└── DSL (ModelComponent, @ModelComponentBuilder)
-    └── ← Models/ の宣言で使用（トレーニング、設計用途）
+├── DSL (ModelComponent, @ModelComponentBuilder)
+│   └── ← Models/ の宣言 + AnyModel で使用。推論パスで IR を構築
+└── ModelConfig
+    ├── ← HFConfigDecoder が config.json から構築
+    └── ← Models/ が直接受け取り ModelComponent を構成
 ```
 
 ### Family と Model の境界
@@ -301,7 +315,18 @@ LMInference (depends: SwiftLM, LMCompiler)
 | LMCompiler | IR → 推論エンジン（MLX + MPSGraph） | SwiftLM |
 | LMInference | HF ローダー・生成パイプライン・バックエンド選択 | SwiftLM, LMCompiler |
 
-**重要**: LMInference は ModelDeclarations に依存しない。config.json → IR は `IRGraphAssembler` が直接構築する。
+**重要**: LMInference は ModelDeclarations に依存する。config.json → ModelConfig → ModelComponent.makeModelGraph() で IR を構築する。
+
+### 新しい Model を追加するとき
+
+**必ず `OperationKind` を確認してから実装する。** DSL コンポーネント（`Sources/SwiftLM/Declaration/Components/`）と IR の `OperationKind`（`Sources/SwiftLM/IR/ModelGraph.swift`）は 1:1 で対応する。対応するコンポーネントが無い `OperationKind` を使う場合はコンパイラが未対応でエラーになる。
+
+手順:
+
+1. **`OperationKind` を確認** — 使いたい計算ノードに対応する case があるか確認する（`attention`, `mlp`, `moe`, `stateSpace`, `shortConv` 等）
+2. **DSL コンポーネントを確認** — 対応する `ModelComponent`（`Attention`, `MLP`, `MoE`, `StateSpace`, `ShortConv` 等）が `Sources/SwiftLM/Declaration/Components/` に存在するか確認する
+3. **無ければ作る** — `PrimitiveComponent` に準拠した新コンポーネントを作成し、`operationKind` で正しい `OperationKind` case を返す
+4. **`StateSpace` の variant に新しい文字列を入れて別の operation を代用しない** — `stateSpace(variant: "short_conv")` のように別の operation kind を誤用すると、コンパイラが未知の variant としてエラーを出す
 
 ### 推論バックエンドの使い分け
 
@@ -475,3 +500,45 @@ queries = perHead[0..., 0..., 0..., 0..<headDim].reshaped(B, L, -1)
 1. 参照実装の forward pass を読み、各操作の入出力テンソル形状・dtype を確認する
 2. テンソルの次元レイアウト（per-head interleaved vs contiguous）を特定する
 3. API の慣例（`MLXFast.rmsNorm` の weight 処理等）をソースレベルで検証する — ドキュメントやコメントではなく C++ 実装を確認する
+
+### Lowered Op 実装の原則
+
+新しい `Lowered*` 型を実装する際は、必ず [mlx-swift-lm](https://github.com/ml-explore/mlx-swift-lm) の対応実装を参照すること。独自最適化を入れる前にまず参照実装と同一のロジックで動作させる。
+
+#### mlx-swift-lm を参照する理由
+
+- mlx-swift-lm は MLX Swift の公式サンプル。MLX の API（`conv1d`, `split`, `concatenated` 等）の正しい使い方を示している
+- ゼロコピー操作（`split`, スライス）と MLX の lazy evaluation を前提とした設計になっている
+- 独自最適化（dot product 展開、layout 変換等）は MLX の内部最適化と競合し、逆に遅くなることがある
+
+#### 実装手順
+
+1. **mlx-swift-lm の対応モジュールを読む** — forward pass のロジック、テンソル layout、cache 管理を確認する
+2. **同一のロジックで実装する** — layout 変換や独自最適化を入れない。MLX の lazy eval が最適化を行う
+3. **MLX API を正しく使う**:
+   - `split(parts:axis:)` でゼロコピー分割（スライスを 3 回呼ぶより効率的）
+   - `concatenated(axis: -2)` で cache 結合
+   - `conv1d` は channels-last `[N, L, C]` layout。weight は `[C_out, K, C_in/groups]`
+   - weight の layout 変換は `init` 時に 1 回だけ行い、`apply` 内では行わない
+4. **decode パスの独自最適化を避ける** — T=1 の特殊パス（dot product 展開等）は MLX の graph fusion と競合する。conv1d を直接呼ぶ方が MLX が内部で最適化できる
+5. **中間テンソルの `eval()` を呼ばない** — 全層の計算グラフが構築されてから 1 回の `eval()` で実行されるべき
+6. **`dim()` 呼び出しを最小化する** — dynamic shape の `dim()` は eval を trigger する可能性がある
+
+#### ShortConv の正しい実装パターン（mlx-swift-lm 準拠）
+
+```swift
+// init: weight layout を 1 回だけ変換
+convWeight = rawWeight.transposed(0, 2, 1)  // [D, 1, K] → [D, K, 1]
+
+// apply: ゼロコピー分割 + concat + conv1d
+let parts = inProj.apply(x).split(parts: 3, axis: -1)
+var bx = parts[0] * parts[2]
+
+// cache concat（state は [B, K-1, D]）
+bx = concatenated([state, bx], axis: -2)
+cache = bx[0..., (bx.dim(-2) - (K - 1))..., 0...]  // 次回用 cache
+let convOut = conv1d(bx, convWeight, stride: 1, padding: 0, groups: D)
+
+let y = parts[1] * convOut
+return outProj.apply(y)
+```

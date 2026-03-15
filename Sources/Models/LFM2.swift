@@ -133,7 +133,7 @@ public struct LFM2: ModelComponent {
     public var body: some ModelComponent {
         TokenEmbedding(vocabSize: config.vocabSize, embeddingSize: config.hiddenSize)
 
-        ForEach(layerDescriptors) { layer in
+        LayerStack(layerDescriptors) { layer in
             if layer.isConvolution {
                 LFM2ConvDecoderLayer(config: config, convLCache: convLCache, useMoE: layer.useMoE)
             } else {
@@ -230,13 +230,7 @@ struct LFM2ConvDecoderLayer: ModelComponent {
     var body: some ModelComponent {
         Residual {
             RMSNorm(dimension: config.hiddenSize, epsilon: config.normEps)
-            StateSpace(
-                hiddenSize: config.hiddenSize,
-                numHeads: 1,
-                keyHeadDim: convLCache,
-                valueHeadDim: convLCache,
-                variant: "short_conv"
-            )
+            ShortConv(hiddenSize: config.hiddenSize, kernelSize: convLCache)
         }
         Residual {
             RMSNorm(dimension: config.hiddenSize, epsilon: config.normEps)

@@ -16,6 +16,9 @@ struct HFBundleDiagnosticTests {
     private static let qwen35_4B_dir = URL(fileURLWithPath: NSHomeDirectory())
         .appendingPathComponent("Library/Containers/team.stamp.JARDIS.ml/Data/Library/Caches/huggingface/models/mlx-community/Qwen3.5-4B-MLX-4bit")
 
+    private static let lfm25_1_2B_dir = URL(fileURLWithPath: NSHomeDirectory())
+        .appendingPathComponent("Library/Containers/team.stamp.JARDIS.ml/Data/.cache/huggingface/hub/LiquidAI--LFM2.5-1.2B-Thinking/main")
+
     private func requireModel(at dir: URL) throws -> URL {
         let configPath = dir.appendingPathComponent("config.json").path
         guard FileManager.default.fileExists(atPath: configPath) else {
@@ -399,5 +402,44 @@ struct HFBundleDiagnosticTests {
         print("[HFBundle] chat generation (\(tokens.count) tokens): '\(generatedText)'")
         #expect(!tokens.isEmpty, "Model should generate at least one token")
         #expect(!generatedText.isEmpty, "Generated text should not be empty")
+    }
+
+    // MARK: - LFM2.5-1.2B-Thinking Tests
+
+    @Test("HFDirectoryBundle: LFM2.5-1.2B full compiled pipeline")
+    func lfm2FullCompiledPipeline() throws {
+        let dir = try requireModel(at: Self.lfm25_1_2B_dir)
+        let bundle = try HFDirectoryBundle(directory: dir)
+
+        let loader = ModelBundleLoader()
+        let context = try loader.loadCompiled(bundle: bundle)
+
+        let tokenizer = context.tokenizer
+        let tokens = tokenizer.encode(text: "Hello, world!")
+        print("[HFBundle/LFM2] input tokens: \(tokens)")
+        #expect(!tokens.isEmpty)
+
+        // Forward pass: prefill
+        let tokenArray = MLXArray(tokens.map { Int32($0) }).reshaped([1, tokens.count])
+        let input = LMInput.Text(tokens: tokenArray)
+        let model = context.model
+        let caches = model.newCache(parameters: nil)
+        let output = model.callAsFunction(input, cache: caches, state: nil)
+        eval(output.logits)
+
+        // Verify logits shape
+        #expect(output.logits.dim(0) == 1)
+        #expect(output.logits.dim(1) == tokens.count)
+        #expect(output.logits.dim(2) == 65536)
+
+        let hasNaN = MLX.any(MLX.isNaN(output.logits)).item(Bool.self)
+        #expect(!hasNaN, "LFM2 logits contain NaN")
+
+        // Decode one token
+        let lastLogits = output.logits[0..., (tokens.count - 1)..<tokens.count, 0...]
+        eval(lastLogits)
+        let nextToken = MLX.argMax(lastLogits.reshaped(-1), axis: 0).item(Int.self)
+        print("[HFBundle/LFM2] next token: \(nextToken) = '\(tokenizer.decode(tokens: [nextToken]))'")
+        #expect(nextToken >= 0 && nextToken < 65536)
     }
 }

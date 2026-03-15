@@ -192,10 +192,11 @@ public struct MPSGraphInferenceCompiler: Sendable {
             default: return results.dropFirst().reduce(results[0]) { g.addition($0, $1, name: nil) }
             }
 
+        case .shortConv(let attrs):
+            return try compileShortConv(attrs, path: path, input: input, context: &context)
+
         case .stateSpace:
             throw CompilerError.unsupportedOperation("stateSpace (MPSGraph)")
-        case .shortConv:
-            throw CompilerError.unsupportedOperation("shortConv (MPSGraph)")
         case .moe:
             throw CompilerError.unsupportedOperation("moe (MPSGraph)")
         case .repeating:
@@ -337,6 +338,72 @@ public struct MPSGraphInferenceCompiler: Sendable {
         }
 
         return MPSGraphOps.linear(g, input: activated, weight: downW, name: "\(n).down")
+    }
+
+    // MARK: - ShortConv
+
+    private func compileShortConv(
+        _ attrs: ShortConvAttributes, path: StructuralPath,
+        input: MPSGraphTensor, context: inout CompilationContext
+    ) throws -> MPSGraphTensor {
+        let g = context.graph
+        let D = attrs.hiddenSize
+        let K = attrs.kernelSize
+        let n = "\(path)"
+
+        // in_proj: [B, T, D] → [B, T, 3D]
+        let inW = try resolveProjectionWeight(context.store, path: path, field: "in_proj",
+                                               shape: [3 * D, D], graph: g)
+        let bcx = MPSGraphOps.linear(g, input: input, weight: inW, name: "\(n).in")
+
+        // Chunk into B-gate [B,T,D], C-gate [B,T,D], x [B,T,D]
+        let bGate = g.sliceTensor(bcx, dimension: 2, start: 0, length: D, name: "\(n).B")
+        let cGate = g.sliceTensor(bcx, dimension: 2, start: D, length: D, name: "\(n).C")
+        let xInput = g.sliceTensor(bcx, dimension: 2, start: 2 * D, length: D, name: "\(n).x")
+
+        // First gate: B * x
+        let bx = g.multiplication(bGate, xInput, name: "\(n).Bx")
+
+        // Causal depthwise conv1d via shifted-sum approach.
+        // For small kernel (K=3..4), this is more efficient than a general conv op.
+        //
+        // weight: [D, 1, K] from safetensors → squeeze to [D, K] → [K, D] for time-shifts
+        // For each kernel position k: shift bx right by (K-1-k), multiply by weight[k], sum
+        let convW = try resolveWeight(
+            context.store,
+            slot: ParameterSlot(path: path.appending(.field("conv")), role: .weight),
+            shape: [D, 1, K], graph: g)
+        // [D, 1, K] → [D, K] → transpose → [K, D]
+        let convWSq = g.squeeze(convW, axes: [1], name: "\(n).cw.sq")
+
+        // Causal padding: prepend K-1 zeros
+        let zeroShape: [NSNumber] = [1, (K - 1) as NSNumber, D as NSNumber]
+        let zeroPad = g.constant(0.0, shape: zeroShape, dataType: .float16)
+        let padded = g.concatTensors([zeroPad, bx], dimension: 1, name: "\(n).pad")
+
+        // Shifted sum: for each kernel tap k, slice padded[k..k+T] * weight[k]
+        var convOut: MPSGraphTensor?
+        for k in 0..<K {
+            // weight slice: convW[D, K] → column k → [1, 1, D] for broadcast
+            let wk = g.sliceTensor(convWSq, dimension: 1, start: k, length: 1, name: "\(n).w\(k)")
+            // Padded input shifted: padded[:, k:k+T, :] — length T from position k
+            let shifted = g.sliceTensor(padded, dimension: 1, start: k, length: -1, name: "\(n).sh\(k)")
+            let term = g.multiplication(shifted, wk, name: "\(n).t\(k)")
+            if let acc = convOut {
+                convOut = g.addition(acc, term, name: "\(n).sum\(k)")
+            } else {
+                convOut = term
+            }
+        }
+        let convResult = convOut!
+
+        // Second gate: C * conv_out
+        let y = g.multiplication(cGate, convResult, name: "\(n).Cy")
+
+        // out_proj: [B, T, D] → [B, T, D]
+        let outW = try resolveProjectionWeight(context.store, path: path, field: "out_proj",
+                                                shape: [D, D], graph: g)
+        return MPSGraphOps.linear(g, input: y, weight: outW, name: "\(n).out")
     }
 
     // MARK: - Helpers
