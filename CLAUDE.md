@@ -501,44 +501,45 @@ queries = perHead[0..., 0..., 0..., 0..<headDim].reshaped(B, L, -1)
 2. テンソルの次元レイアウト（per-head interleaved vs contiguous）を特定する
 3. API の慣例（`MLXFast.rmsNorm` の weight 処理等）をソースレベルで検証する — ドキュメントやコメントではなく C++ 実装を確認する
 
-### Lowered Op 実装の原則
+### Kernel Fusion の原則: 全 element-wise 操作は 1 kernel
 
-新しい `Lowered*` 型を実装する際は、必ず [mlx-swift-lm](https://github.com/ml-explore/mlx-swift-lm) の対応実装を参照すること。独自最適化を入れる前にまず参照実装と同一のロジックで動作させる。
+**matmul 境界間の全ての element-wise 操作を `MetalCodeGenerator` で 1 つの Metal kernel に fuse する。** 個別の MLX API 呼び出し（`split`, `*`, `+`, `silu`, `rmsNorm`, residual add 等）を並べるのは禁止。
 
-#### mlx-swift-lm を参照する理由
+llama.cpp は `rms_norm + mul + add` を 1 kernel に fuse している。swift-lm も同等以上の fusion を行う。
 
-- mlx-swift-lm は MLX Swift の公式サンプル。MLX の API（`conv1d`, `split`, `concatenated` 等）の正しい使い方を示している
-- ゼロコピー操作（`split`, スライス）と MLX の lazy evaluation を前提とした設計になっている
-- 独自最適化（dot product 展開、layout 変換等）は MLX の内部最適化と競合し、逆に遅くなることがある
-
-#### 実装手順
-
-1. **mlx-swift-lm の対応モジュールを読む** — forward pass のロジック、テンソル layout、cache 管理を確認する
-2. **同一のロジックで実装する** — layout 変換や独自最適化を入れない。MLX の lazy eval が最適化を行う
-3. **MLX API を正しく使う**:
-   - `split(parts:axis:)` でゼロコピー分割（スライスを 3 回呼ぶより効率的）
-   - `concatenated(axis: -2)` で cache 結合
-   - `conv1d` は channels-last `[N, L, C]` layout。weight は `[C_out, K, C_in/groups]`
-   - weight の layout 変換は `init` 時に 1 回だけ行い、`apply` 内では行わない
-4. **decode パスの独自最適化を避ける** — T=1 の特殊パス（dot product 展開等）は MLX の graph fusion と競合する。conv1d を直接呼ぶ方が MLX が内部で最適化できる
-5. **中間テンソルの `eval()` を呼ばない** — 全層の計算グラフが構築されてから 1 回の `eval()` で実行されるべき
-6. **`dim()` 呼び出しを最小化する** — dynamic shape の `dim()` は eval を trigger する可能性がある
-
-#### ShortConv の正しい実装パターン（mlx-swift-lm 準拠）
+#### 禁止パターン
 
 ```swift
-// init: weight layout を 1 回だけ変換
-convWeight = rawWeight.transposed(0, 2, 1)  // [D, 1, K] → [D, K, 1]
-
-// apply: ゼロコピー分割 + concat + conv1d
-let parts = inProj.apply(x).split(parts: 3, axis: -1)
-var bx = parts[0] * parts[2]
-
-// cache concat（state は [B, K-1, D]）
-bx = concatenated([state, bx], axis: -2)
-cache = bx[0..., (bx.dim(-2) - (K - 1))..., 0...]  // 次回用 cache
-let convOut = conv1d(bx, convWeight, stride: 1, padding: 0, groups: D)
-
-let y = parts[1] * convOut
-return outProj.apply(y)
+// ✗ WRONG — element-wise 操作を個別に dispatch
+let normed = MLXFast.rmsNorm(x, weight: w, eps: eps)
+let result = normed + residual  // ← 別の dispatch
 ```
+
+#### 正しいパターン
+
+```swift
+// ✓ CORRECT — MetalCodeGenerator で 1 kernel に fuse
+let fusedOps: [MetalCodeGenerator.FusableOp] = [
+    .rmsNorm(dst: "normed", src: "x", weight: "w"),
+    .add(dst: "out", lhs: "normed", rhs: "residual"),
+    .store(variable: "out", output: 0),
+]
+// コンパイル時に 1 つの Metal kernel を生成
+```
+
+#### 設計ルール
+
+1. **matmul / SDPA / RoPE は fuse しない** — MLX/MLXFast の最適化済みカーネルを使う
+2. **matmul 間の全 element-wise 操作は 1 kernel に fuse する** — `MetalCodeGenerator` で Metal source を生成
+3. **`FusedSubLayer` は Metal kernel レベルの fusion** — Swift レベルの関数統合ではなく、Metal kernel を 1 つ生成して dispatch する
+4. **コンパイル時に kernel を生成** — `LoweredOp.init()` で `MetalCodeGenerator` → `FusedKernel` を構築。実行時のオーバーヘッドゼロ
+5. **新しい fusable op を追加するには** `MetalCodeGenerator.FusableOp` に case を追加し、`generate()` に Metal code 変換ルールを追加する
+
+#### 各層の目標 dispatch 数
+
+| 層タイプ | matmul | fused kernel | 合計 |
+|---|---|---|---|
+| Conv (ShortConv + MLP) | inProj + outProj + gate/up + down = 4 | [norm+gate+conv+gate+cache+residual] + [norm+silu*up+residual] = 2 | **6** |
+| Attention + MLP | QKV + oProj + gate/up + down = 4 | [norm+head reshape] + RoPE + SDPA + [gate+residual] + [norm+silu*up+residual] = 5 | **9** |
+
+**目標: 全モデルで dispatch 数を最小化する。matmul 以外は全て fused kernel。**
