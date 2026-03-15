@@ -67,23 +67,30 @@ public struct LoweredMLP: @unchecked Sendable {
             up = upProj?.apply(x)
         }
 
-        let activated: MLXArray
-        switch activation {
-        case .silu, .swish:
-            activated = silu(gate)
-        case .gelu:
-            activated = gelu(gate)
-        case .relu:
-            activated = relu(gate)
-        case .custom:
-            activated = silu(gate)
-        }
-
         let gated: MLXArray
         if let up {
-            gated = activated * up
+            switch activation {
+            case .silu, .swish:
+                // Fused SiLU + gate multiply in single Metal kernel
+                gated = FusedSiLUGateKernel.call(gate: gate, up: up)
+            case .gelu:
+                gated = gelu(gate) * up
+            case .relu:
+                gated = relu(gate) * up
+            case .custom:
+                gated = FusedSiLUGateKernel.call(gate: gate, up: up)
+            }
         } else {
-            gated = activated
+            switch activation {
+            case .silu, .swish:
+                gated = silu(gate)
+            case .gelu:
+                gated = gelu(gate)
+            case .relu:
+                gated = relu(gate)
+            case .custom:
+                gated = silu(gate)
+            }
         }
 
         return downProj.apply(gated)

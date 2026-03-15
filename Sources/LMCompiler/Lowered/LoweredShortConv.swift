@@ -117,18 +117,10 @@ public struct LoweredShortConv: @unchecked Sendable {
         let D = attrs.hiddenSize
         let K = attrs.kernelSize
         let B = x.dim(0)
+        let T = x.dim(1)
 
         // in_proj: [B, T, D] -> [B, T, 3D] — compile-time kernel selection
         let bcx = inProj.apply(x)
-
-        // Split into B-gate, C-gate, x-input (single op, zero-copy)
-        let parts = bcx.split(parts: 3, axis: -1)
-        let bGate = parts[0]
-        let cGate = parts[1]
-        let xInput = parts[2]
-
-        // First gate: element-wise multiply (plain, not sigmoid)
-        var bx = bGate * xInput  // [B, T, D]
 
         // Extract cache state or initialize with zeros
         var state: MLXArray?
@@ -140,42 +132,62 @@ public struct LoweredShortConv: @unchecked Sendable {
         default:
             break
         }
-        if state == nil {
-            state = MLXArray.zeros([B, K - 1, D], dtype: bx.dtype)
+
+        let convOut: MLXArray
+        let newConvState: MLXArray
+
+        if T == 1 && B == 1 {
+            // ── Fused decode path ──
+            // Single Metal kernel: split + B-gate + conv1d + C-gate + cache update
+            // Eliminates 5+ intermediate MLX dispatches
+            if state == nil {
+                state = MLXArray.zeros([1, K - 1, D], dtype: bcx.dtype)
+            }
+            let (fusedOut, fusedState) = FusedShortConvKernel.call(
+                bcx: bcx,
+                state: state!,
+                weight: convWeight,
+                hiddenSize: D,
+                kernelSize: K,
+                dtype: bcx.dtype)
+            convOut = fusedOut
+            newConvState = fusedState
+        } else {
+            // ── Prefill / multi-token path ──
+            // Use SSM conv Metal kernel (handles variable sequence length)
+            let parts = bcx.split(parts: 3, axis: -1)
+            let bGate = parts[0]
+            let cGate = parts[1]
+            let xInput = parts[2]
+
+            var bx = bGate * xInput
+            if state == nil {
+                state = MLXArray.zeros([B, K - 1, D], dtype: bx.dtype)
+            }
+            bx = concatenated([state!, bx], axis: -2)
+            newConvState = bx[0..., T..., 0...]
+
+            let ssmOut = ssmConvKernel(
+                [bx, convWeight],
+                template: [("CONV_K", K), ("HIDDEN_D", D), ("DType", bx.dtype)],
+                grid: (D, T, B),
+                threadGroup: (min(D, 256), 1, 1),
+                outputShapes: [[B, T, D]],
+                outputDTypes: [bx.dtype],
+                verbose: false
+            )[0]
+
+            convOut = cGate * ssmOut
         }
-
-        // Concatenate cache + input (zero-copy views)
-        bx = concatenated([state!, bx], axis: -2)
-
-        // Update cache: last K-1 timesteps
-        // Cache stores K-1 elements. After concat with T new tokens, total length = (K-1) + T.
-        // We need the last K-1 from that, so start = T.
-        // For decode (T=1): start = 1, for prefill: start = T.
-        let newConvState = bx[0..., x.dim(1)..., 0...]
-
-        // SSM conv via custom Metal kernel — replaces generic conv1d(groups: D)
-        let T = x.dim(1)
-        let convOut = ssmConvKernel(
-            [bx, convWeight],
-            template: [("CONV_K", K), ("HIDDEN_D", D), ("DType", bx.dtype)],
-            grid: (D, T, B),
-            threadGroup: (min(D, 256), 1, 1),
-            outputShapes: [[B, T, D]],
-            outputDTypes: [bx.dtype],
-            verbose: false
-        )[0]
 
         // Store updated cache
         caches[cacheSlotIndex] = .recurrent(LoweredRecurrentCache(
             convState: newConvState,
             recurrentState: nil,
-            offset: cacheOffset + x.dim(1)
+            offset: cacheOffset + T
         ))
 
-        // Second gate: element-wise multiply (plain, not sigmoid)
-        let y = cGate * convOut
-
-        // out_proj: [B, T, D] -> [B, T, D] — compile-time kernel selection
-        return outProj.apply(y)
+        // out_proj: [B, T, D] -> [B, T, D]
+        return outProj.apply(convOut)
     }
 }
