@@ -145,4 +145,48 @@ public struct LoweredMLP: @unchecked Sendable {
 
         return downProj.apply(gated)
     }
+
+    /// Apply MLP with residual add fused into downProj via addMM.
+    /// `output = residual + downProj(activation(gate) * up)` — no separate add dispatch.
+    public func applyWithResidual(_ x: MLXArray, residual: MLXArray) -> MLXArray {
+        let gate: MLXArray
+        let up: MLXArray?
+
+        if let gateUpPacked {
+            let parts = gateUpPacked.apply(x)
+            gate = parts[0]
+            up = parts[1]
+        } else {
+            gate = gateProj!.apply(x)
+            up = upProj?.apply(x)
+        }
+
+        let gated: MLXArray
+        if let up, let fusedKernel = fusedActivationKernel {
+            let N = gate.shape.reduce(1, *)
+            gated = fusedKernel.call(
+                inputs: [gate.reshaped(-1), up.reshaped(-1)],
+                gridSize: N,
+                outputShapes: [gate.shape],
+                dtype: gate.dtype
+            )[0]
+        } else if let up {
+            let activated: MLXArray
+            switch activation {
+            case .silu, .swish, .custom: activated = silu(gate)
+            case .gelu: activated = gelu(gate)
+            case .relu: activated = relu(gate)
+            }
+            gated = activated * up
+        } else {
+            switch activation {
+            case .silu, .swish, .custom: gated = silu(gate)
+            case .gelu: gated = gelu(gate)
+            case .relu: gated = relu(gate)
+            }
+        }
+
+        // downProj + residual fused via addMM
+        return downProj.applyWithResidual(gated, residual: residual)
+    }
 }

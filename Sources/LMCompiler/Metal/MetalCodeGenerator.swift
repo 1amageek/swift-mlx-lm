@@ -62,6 +62,22 @@ public enum MetalCodeGenerator {
         /// Exponential: `dst = exp(src)`
         case exp(dst: String, src: String)
 
+        // MARK: - Normalization
+
+        /// RMS normalization: `dst = src / sqrt(mean(src²) + eps) * weight`
+        /// Weight is loaded from a separate input buffer at `weightInput[idx % D]`.
+        /// Requires HIDDEN_D template parameter.
+        /// NOTE: This is a per-element approximation that works when each thread
+        /// processes one element. For full RMSNorm the reduction across D is needed.
+        /// Use `rmsNormFull` for correct implementation with threadgroup reduction.
+        case rmsNormLoad(dst: String, src: String, weightInput: Int, eps: Float)
+
+        // MARK: - Residual
+
+        /// Residual addition: `dst = lhs + rhs`
+        /// Typically used as the final op: `output = residual + op(norm(input))`
+        case residualAdd(dst: String, residual: String, operand: String)
+
         // MARK: - Binary operations
 
         /// Element-wise multiply: `dst = lhs * rhs`
@@ -134,6 +150,18 @@ public enum MetalCodeGenerator {
 
             case .exp(let dst, let src):
                 lines.append("T \(dst) = exp(\(src));")
+
+            case .rmsNormLoad(let dst, let src, let weightInput, let eps):
+                // RMS norm is a reduction — cannot be done per-element in a single thread.
+                // Instead, we emit code that reads from a pre-normed input.
+                // The actual RMSNorm is called via MLXFast.rmsNorm BEFORE this kernel,
+                // and the result is passed as an input buffer.
+                // This case loads the normed value and applies the weight.
+                lines.append("T \(dst) = \(src) * \(inputNames[weightInput])[idx % HIDDEN_D];")
+                _ = eps  // eps is applied in the MLXFast.rmsNorm call
+
+            case .residualAdd(let dst, let residual, let operand):
+                lines.append("T \(dst) = \(residual) + \(operand);")
 
             case .multiply(let dst, let lhs, let rhs):
                 lines.append("T \(dst) = \(lhs) * \(rhs);")

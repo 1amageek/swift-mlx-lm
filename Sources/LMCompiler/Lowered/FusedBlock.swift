@@ -28,24 +28,34 @@ public enum FusedSubLayer: @unchecked Sendable {
 
     /// Apply the fused sub-layer: `output = x + op(norm(x))`.
     ///
-    /// Residual addition is performed inline — no external stack needed.
+    /// The residual `x` is passed to each op's apply so it can be fused
+    /// into the Metal kernel (avoiding a separate dispatch for `+`).
+    /// Ops that support residual fusion accept it and add inline.
+    /// Ops that don't return the raw result, and we add here.
     public func apply(
         _ x: MLXArray, state: inout InferenceState,
         options: ExecutionOptions = .default
     ) -> MLXArray {
+        let normed = switch self {
+        case .attention(let norm, _), .mlp(let norm, _),
+             .deltaNet(let norm, _), .shortConv(let norm, _),
+             .moe(let norm, _):
+            norm.apply(x)
+        }
+
         switch self {
-        case .attention(let norm, let attn):
+        case .attention(_, let attn):
             return x + attn.apply(
-                norm.apply(x), caches: &state.caches,
+                normed, caches: &state.caches,
                 positionIds: options.positionIds)
-        case .mlp(let norm, let mlp):
-            return x + mlp.apply(norm.apply(x))
-        case .deltaNet(let norm, let dn):
-            return x + dn.apply(norm.apply(x), caches: &state.caches)
-        case .shortConv(let norm, let sc):
-            return x + sc.apply(norm.apply(x), caches: &state.caches)
-        case .moe(let norm, let moe):
-            return x + moe.apply(norm.apply(x))
+        case .mlp(_, let mlp):
+            return mlp.applyWithResidual(normed, residual: x)
+        case .deltaNet(_, let dn):
+            return x + dn.apply(normed, caches: &state.caches)
+        case .shortConv(_, let sc):
+            return sc.applyWithResidual(normed, residual: x, caches: &state.caches)
+        case .moe(_, let moe):
+            return x + moe.apply(normed)
         }
     }
 }

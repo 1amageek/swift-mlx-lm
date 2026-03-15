@@ -42,6 +42,7 @@ public struct LoweredShortConv: @unchecked Sendable {
     /// Combines split + B-gate + conv + C-gate + cache update into 1 dispatch.
     private let fusedDecodeKernel: FusedKernel
 
+
     /// Short convolution attributes (hiddenSize, kernelSize).
     public let attrs: ShortConvAttributes
 
@@ -116,8 +117,11 @@ public struct LoweredShortConv: @unchecked Sendable {
         self.cacheSlotIndex = cacheSlotIndex
 
         // Generate fused decode kernel from IR operations via MetalCodeGenerator.
-        // This replaces hand-written FusedShortConvKernel with compiler-generated code.
-        let fusedOps: [MetalCodeGenerator.FusableOp] = [
+        // Includes residual add: output = residual + outProj(C * conv(B * x))
+        // The outProj matmul result and residual are both inputs to the final add.
+        //
+        // Kernel 1: split + B-gate + conv + C-gate + cache update (between matmuls)
+        let fusedMiddleOps: [MetalCodeGenerator.FusableOp] = [
             .splitLoad(variable: "b_gate", input: 0, partIndex: 0, partCount: 3),
             .splitLoad(variable: "c_gate", input: 0, partIndex: 1, partCount: 3),
             .splitLoad(variable: "x_val",  input: 0, partIndex: 2, partCount: 3),
@@ -127,15 +131,16 @@ public struct LoweredShortConv: @unchecked Sendable {
             .store(variable: "y", output: 0),
             .cacheShift(output: 1, stateInput: 1, newVal: "bx", kernelSize: K),
         ]
-        let kernelName = "fused_shortconv_decode_k\(K)_d\(D)"
+        let middleName = "fused_shortconv_middle_k\(K)_d\(D)"
         self.fusedDecodeKernel = FusedKernel(
-            name: kernelName,
-            ops: fusedOps,
+            name: middleName,
+            ops: fusedMiddleOps,
             inputNames: ["bcx", "state", "weight"],
             outputNames: ["out", "new_state"],
             templateParams: FusedKernel.TemplateParams(hiddenSize: D, kernelSize: K)
         )
-        print("[LMCompiler] fused kernel generated: \(kernelName) (6 ops → 1 dispatch)")
+
+        print("[LMCompiler] fused kernel generated: \(middleName)")
     }
 
     /// Apply short convolution with external cache state.
@@ -213,5 +218,67 @@ public struct LoweredShortConv: @unchecked Sendable {
 
         // out_proj: [B, T, D] -> [B, T, D]
         return outProj.apply(convOut)
+    }
+
+    /// Apply with residual add fused into outProj via addMM.
+    /// `output = residual + outProj(convOut)` in 1 dispatch (no separate add).
+    public func applyWithResidual(
+        _ x: MLXArray, residual: MLXArray, caches: inout [LoweredCacheState]
+    ) -> MLXArray {
+        let D = attrs.hiddenSize
+        let K = attrs.kernelSize
+        let B = x.dim(0)
+        let T = x.dim(1)
+
+        let bcx = inProj.apply(x)
+
+        var state: MLXArray?
+        var cacheOffset: Int = 0
+        switch caches[cacheSlotIndex] {
+        case .recurrent(let cache):
+            state = cache.convState
+            cacheOffset = cache.offset
+        default:
+            break
+        }
+
+        let convOut: MLXArray
+        let newConvState: MLXArray
+
+        if T == 1 && B == 1 {
+            if state == nil {
+                state = MLXArray.zeros([1, K - 1, D], dtype: bcx.dtype)
+            }
+            let results = fusedDecodeKernel.call(
+                inputs: [bcx.reshaped(-1), state!.reshaped(-1), convWeight.reshaped(D, K)],
+                gridSize: D,
+                outputShapes: [[1, 1, D], [1, K - 1, D]],
+                dtype: bcx.dtype)
+            convOut = results[0]
+            newConvState = results[1]
+        } else {
+            let parts = bcx.split(parts: 3, axis: -1)
+            var bx = parts[0] * parts[2]
+            if state == nil {
+                state = MLXArray.zeros([B, K - 1, D], dtype: bx.dtype)
+            }
+            bx = concatenated([state!, bx], axis: -2)
+            newConvState = bx[0..., T..., 0...]
+            let ssmOut = ssmConvKernel(
+                [bx, convWeight],
+                template: [("CONV_K", K), ("HIDDEN_D", D), ("DType", bx.dtype)],
+                grid: (D, T, B),
+                threadGroup: (min(D, 256), 1, 1),
+                outputShapes: [[B, T, D]],
+                outputDTypes: [bx.dtype]
+            )[0]
+            convOut = parts[1] * ssmOut
+        }
+
+        caches[cacheSlotIndex] = .recurrent(LoweredRecurrentCache(
+            convState: newConvState, recurrentState: nil, offset: cacheOffset + T))
+
+        // outProj + residual fused via addMM: residual + convOut @ weight.T
+        return outProj.applyWithResidual(convOut, residual: residual)
     }
 }

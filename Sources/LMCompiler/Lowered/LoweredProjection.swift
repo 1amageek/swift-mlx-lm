@@ -100,4 +100,24 @@ public struct LoweredProjection: @unchecked Sendable {
         }
         return result
     }
+
+    /// Apply projection with residual add fused: `output = residual + Wx`.
+    ///
+    /// For dense weights, uses `addMM` to fuse matmul + add in 1 dispatch.
+    /// For quantized weights, falls back to separate add (quantizedMM doesn't support addMM).
+    public func applyWithResidual(_ x: MLXArray, residual: MLXArray) -> MLXArray {
+        switch kernel {
+        case .dense(let w):
+            // addMM: C = alpha * (A @ B) + beta * C
+            // residual + x @ w.T = addMM(residual, x, w.T, alpha: 1, beta: 1)
+            var result = addMM(residual, x, w.T)
+            if let bias {
+                result = result + bias
+            }
+            return result
+        case .affineQuantized, .dequantizeMatmul:
+            // quantizedMM doesn't support addMM — fall back to separate add
+            return residual + apply(x)
+        }
+    }
 }
