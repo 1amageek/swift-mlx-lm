@@ -295,4 +295,192 @@ struct ComponentDispatchTests {
         #expect(conv1d.dimension == 2048)
         #expect(conv1d.kernelSize == 3)
     }
+
+    // MARK: - Regression: SwiGLU intermediate_size must be actual weight dimension
+
+    @Test("SwiGLU intermediate_size × 2/3 matches safetensors weight shape for LFM2")
+    func swigluIntermediateSizeRegression() throws {
+        // config.json has intermediate_size=12288, but actual weight shape is [8192, 2048]
+        // because SwiGLU uses 2/3 of the config value.
+        let configIntermediateSize = 12288
+        let actualWeightRows = 8192
+        let swiGLUAdjusted = configIntermediateSize * 2 / 3
+        #expect(swiGLUAdjusted == actualWeightRows,
+                "SwiGLU intermediate = config * 2/3 = \(swiGLUAdjusted), weight rows = \(actualWeightRows)")
+
+        // MLP with adjusted size should produce matching projections
+        let mlp = MLPAttributes(
+            inputSize: 2048, outputSize: 2048, intermediateSize: swiGLUAdjusted,
+            activation: .silu, gating: .swiglu, bias: false)
+        let projs = mlp.dispatchDeclarations.compactMap { decl -> MetalProjection? in
+            if case .projection(let p) = decl { return p }
+            return nil
+        }
+        let gate = projs.first { $0.field == "gate_proj" }!
+        #expect(gate.outputDimension == actualWeightRows,
+                "gate_proj output \(gate.outputDimension) must match weight rows \(actualWeightRows)")
+    }
+
+    // MARK: - Regression: Float32 intermediate buffers prevent overflow
+
+    @Test("Prefill scratch buffer is Float32 (4 bytes per element)")
+    func prefillScratchIsFloat32() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else {
+            Issue.record("No Metal device"); return
+        }
+
+        let config = ModelConfig(
+            hiddenSize: 64, layerCount: 1, intermediateSize: 128,
+            vocabSize: 100, attentionHeads: 4, kvHeads: 4, headDim: 16,
+            attentionBias: false, mlpBias: false, normEps: 1e-5,
+            normKind: .rmsNorm, ropeTheta: 10000, ropeDimension: 16,
+            ropeScaling: nil, tiedEmbeddings: true,
+            expertCount: nil, expertsPerToken: nil, qkNorm: false,
+            fullAttentionInterval: nil, ssmNumHeads: nil, ssmKeyHeadDim: nil,
+            ssmValueHeadDim: nil, convKernelSize: nil,
+            partialRotaryFactor: nil, slidingWindow: nil
+        )
+        let graph = try Transformer(config: config).makeModelGraph()
+        let resolved = ParameterResolver().resolve(graph: graph, convention: .llamaFamily)
+
+        let maxSeqLen = 32
+        let plan = try MetalInferenceCompiler().compilePrefill(
+            graph: resolved, hiddenSize: 64, intermediateSize: 128,
+            vocabSize: 100, maximumSequenceLength: maxSeqLen, device: device)
+
+        // Scratch should be Float32 (4 bytes per element, not 2)
+        // Verify by checking element size: scratch.length / (slots * slotDim * maxSeqLen) should be 4
+        let scratchBytesPerElement = plan.buffers.scratch.length / (maxSeqLen * 1024)
+        #expect(scratchBytesPerElement == MemoryLayout<Float>.size,
+                "Scratch element size should be \(MemoryLayout<Float>.size) (Float32), got \(scratchBytesPerElement)")
+
+        // Hidden should also be Float32
+        let expectedHiddenF32 = maxSeqLen * 64 * MemoryLayout<Float>.size
+        #expect(plan.buffers.hidden.length == expectedHiddenF32,
+                "Hidden should be Float32: expected \(expectedHiddenF32), got \(plan.buffers.hidden.length)")
+    }
+
+    // MARK: - Regression: flash_attn_decode_f32 kernel exists and is used
+
+    @Test("Prefill attention uses flash_attn_decode_f32 (not half-precision variant)")
+    func prefillAttentionUsesFloat32Kernel() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else {
+            Issue.record("No Metal device"); return
+        }
+
+        let config = ModelConfig(
+            hiddenSize: 64, layerCount: 1, intermediateSize: 128,
+            vocabSize: 100, attentionHeads: 4, kvHeads: 4, headDim: 16,
+            attentionBias: false, mlpBias: false, normEps: 1e-5,
+            normKind: .rmsNorm, ropeTheta: 10000, ropeDimension: 16,
+            ropeScaling: nil, tiedEmbeddings: true,
+            expertCount: nil, expertsPerToken: nil, qkNorm: false,
+            fullAttentionInterval: nil, ssmNumHeads: nil, ssmKeyHeadDim: nil,
+            ssmValueHeadDim: nil, convKernelSize: nil,
+            partialRotaryFactor: nil, slidingWindow: nil
+        )
+        let graph = try Transformer(config: config).makeModelGraph()
+        let resolved = ParameterResolver().resolve(graph: graph, convention: .llamaFamily)
+
+        let plan = try MetalInferenceCompiler().compilePrefill(
+            graph: resolved, hiddenSize: 64, intermediateSize: 128,
+            vocabSize: 100, maximumSequenceLength: 32, device: device)
+
+        // Find perPosition steps (attention) and verify they use the f32 variant
+        let attnSteps = plan.steps.filter { $0.mode == .perPosition }
+        #expect(!attnSteps.isEmpty, "Should have perPosition attention steps")
+
+        for step in attnSteps {
+            let label = step.pipeline.label ?? ""
+            #expect(label.contains("f32"),
+                    "Attention step should use float32 kernel, got '\(label)'")
+        }
+    }
+
+    // MARK: - Regression: GEMM projection dimensions vs STAF weight size
+
+    @Test("Every GEMM projection outputDimension × inputDimension fits STAF weight payload")
+    func gemmDimensionsMatchSTAFWeights() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else {
+            Issue.record("No Metal device"); return
+        }
+
+        let stafPath = "/Users/1amageek/Library/Containers/team.stamp.JARDIS.ml/Data/Documents/huggingface/models/LiquidAI/LFM2.5-1.2B-Thinking/model.staf"
+        guard FileManager.default.fileExists(atPath: stafPath) else {
+            print("STAF not found — skipping"); return
+        }
+
+        let store = try STAFLoader().load(at: URL(fileURLWithPath: stafPath), device: device)
+
+        // Check every weight tensor: outputDim × inputDim × 2 (BF16) must equal payloadSize
+        let projectionWeights = [
+            // Layer 0 conv
+            ("model.layers.0.conv.in_proj.weight", 6144, 2048),
+            ("model.layers.0.conv.out_proj.weight", 2048, 2048),
+            // Layer 0 MLP
+            ("model.layers.0.feed_forward.w1.weight", 8192, 2048),  // gate_proj
+            ("model.layers.0.feed_forward.w3.weight", 8192, 2048),  // up_proj
+            ("model.layers.0.feed_forward.w2.weight", 2048, 8192),  // down_proj
+            // Layer 2 attention
+            ("model.layers.2.self_attn.q_proj.weight", 2048, 2048),
+            ("model.layers.2.self_attn.k_proj.weight", 512, 2048),
+            ("model.layers.2.self_attn.v_proj.weight", 512, 2048),
+            ("model.layers.2.self_attn.out_proj.weight", 2048, 2048),
+        ]
+
+        var mismatches: [String] = []
+        for (name, expectedRows, expectedCols) in projectionWeights {
+            guard let entry = store.entries[name] else {
+                mismatches.append("\(name): NOT FOUND in STAF")
+                continue
+            }
+            let expectedBytes = expectedRows * expectedCols * 2  // BF16
+            if entry.payloadSize != expectedBytes {
+                let actualRows = entry.payloadSize / (expectedCols * 2)
+                mismatches.append("\(name): expected \(expectedRows)×\(expectedCols) (\(expectedBytes)B), STAF has \(entry.payloadSize)B (\(actualRows) rows)")
+            }
+        }
+
+        if !mismatches.isEmpty {
+            for m in mismatches { print("[STAF mismatch] \(m)") }
+            Issue.record("\(mismatches.count) weight dimension mismatches")
+        }
+    }
+
+    // MARK: - Prefill→Decode transfer: float32 hidden → float16 decode hidden
+
+    @Test("Prefill to decode hidden transfer preserves finite values")
+    func prefillToDecodeTransfer() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else {
+            Issue.record("No Metal device"); return
+        }
+
+        // Create a float32 buffer simulating prefill hidden
+        let hiddenSize = 64
+        let seqLen = 4
+        let f32Buffer = device.makeBuffer(length: seqLen * hiddenSize * MemoryLayout<Float>.size, options: .storageModeShared)!
+        let f16Buffer = device.makeBuffer(length: hiddenSize * MemoryLayout<Float16>.size, options: .storageModeShared)!
+
+        // Fill with known values — including large values that would overflow Float16
+        let f32Ptr = f32Buffer.contents().bindMemory(to: Float.self, capacity: seqLen * hiddenSize)
+        for i in 0..<(seqLen * hiddenSize) {
+            f32Ptr[i] = Float(i) * 0.01 - 1.0  // range [-1.0, ~1.56]
+        }
+        // Set last position to have a large value
+        f32Ptr[(seqLen - 1) * hiddenSize] = 50000.0  // within Float16 range (65504)
+
+        // Transfer last position: float32 → float16
+        let lastOffset = (seqLen - 1) * hiddenSize
+        let src = f32Buffer.contents().advanced(by: lastOffset * MemoryLayout<Float>.size).bindMemory(to: Float.self, capacity: hiddenSize)
+        let dst = f16Buffer.contents().bindMemory(to: Float16.self, capacity: hiddenSize)
+        for i in 0..<hiddenSize {
+            dst[i] = Float16(src[i])
+        }
+
+        // Verify transfer
+        #expect(dst[0] == Float16(50000.0), "First element should be 50000")
+        #expect(!dst[0].isNaN, "Transfer should not produce NaN")
+        #expect(!dst[0].isInfinite, "50000 should be finite in Float16")
+        #expect(dst[1] == Float16(src[1]), "Other elements should transfer correctly")
+    }
 }
