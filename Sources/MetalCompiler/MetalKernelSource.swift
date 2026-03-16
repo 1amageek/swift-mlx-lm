@@ -114,6 +114,7 @@ public enum MetalKernelSource {
         KernelRegistryEntry(functionName: "rope_seq_f32", source: ropeSeqF32Source),
         KernelRegistryEntry(functionName: "qk_rms_norm_seq_f32", source: qkRMSNormSeqF32Source),
         KernelRegistryEntry(functionName: "conv1d_f32", source: conv1dF32Source),
+        KernelRegistryEntry(functionName: "conv_state_update", source: convStateUpdateSource),
         KernelRegistryEntry(functionName: "flash_attn_decode_f32", source: flashAttentionDecodeF32Source),
         KernelRegistryEntry(functionName: "gemm_bf16_f32_to_half", source: gemmBF16F32ToHalfSource),
     ]
@@ -2672,6 +2673,38 @@ public enum MetalKernelSource {
             sum += input[k * dimension + gid] * float(weight[gid * kernelSize + k]);
         }
         output[gid] = sum;
+    }
+    """
+
+    /// Update conv state: shift temporal window left, append new in_proj output.
+    /// Then run depthwise conv1d on the updated state.
+    /// conv_state layout: [kernelSize × dimension] per layer
+    /// new_input: first `dimension` elements of in_proj output (from scratch[slot1])
+    private static let convStateUpdateSource = """
+    kernel void conv_state_update(
+        device half* convState           [[buffer(0)]],  // [kernelSize × dimension] for this layer
+        device const half* newInput      [[buffer(1)]],  // in_proj output [dimension] (first chunk)
+        device const half* weight        [[buffer(2)]],  // conv weight [dimension × kernelSize]
+        device half* output              [[buffer(3)]],  // conv output [dimension]
+        constant uint& dimension         [[buffer(4)]],
+        constant uint& kernelSize        [[buffer(5)]],
+        uint gid                         [[thread_position_in_grid]]
+    ) {
+        if (gid >= dimension) return;
+
+        // Shift state left: slot[k] = slot[k+1] for k = 0..kernelSize-2
+        for (uint k = 0; k < kernelSize - 1; k++) {
+            convState[k * dimension + gid] = convState[(k + 1) * dimension + gid];
+        }
+        // Append new input to last slot
+        convState[(kernelSize - 1) * dimension + gid] = newInput[gid];
+
+        // Depthwise conv1d: dot product along temporal axis
+        float sum = 0.0f;
+        for (uint k = 0; k < kernelSize; k++) {
+            sum += float(convState[k * dimension + gid]) * float(weight[gid * kernelSize + k]);
+        }
+        output[gid] = half(sum);
     }
     """
 
