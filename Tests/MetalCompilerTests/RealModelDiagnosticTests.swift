@@ -162,12 +162,12 @@ struct RealModelDiagnosticTests {
             }
 
             // Check hidden at position 0
-            let hiddenPtr = prefillPlan.buffers.hidden.contents().bindMemory(to: Float16.self, capacity: hiddenSize)
+            let hiddenPtr = prefillPlan.buffers.hidden.contents().bindMemory(to: Float.self, capacity: hiddenSize)
             let hasNaN = (0..<hiddenSize).contains { hiddenPtr[$0].isNaN }
             let sample = (0..<min(4, hiddenSize)).map { Float(hiddenPtr[$0]) }
 
             // Check scratch at position 0
-            let scratchPtr = prefillPlan.buffers.scratch.contents().bindMemory(to: Float16.self, capacity: hiddenSize)
+            let scratchPtr = prefillPlan.buffers.scratch.contents().bindMemory(to: Float.self, capacity: hiddenSize)
             let scratchNaN = (0..<hiddenSize).contains { scratchPtr[$0].isNaN }
 
             let modeStr: String

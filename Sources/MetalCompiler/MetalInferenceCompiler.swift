@@ -419,7 +419,6 @@ public struct MetalInferenceCompiler: Sendable {
         let slotDimension = max(hiddenSize, resolvedIntermediateSize, maxProjectionOutputDimension)
         let maxSeq = maximumSequenceLength
         let scratchElementCount = max(slotDimension * 4, resolvedIntermediateSize * 4)
-        print("[Compiler] prefill: resolvedIntermediate=\(resolvedIntermediateSize) maxProjOutput=\(maxProjectionOutputDimension) slotDim=\(slotDimension) scratchElements=\(scratchElementCount) scratch=\(maxSeq * scratchElementCount * elementSize)")
         let gpuOptions: MTLResourceOptions = [.storageModeShared]
 
         let f32ElementSize = MemoryLayout<Float>.size  // 4 bytes — all intermediate buffers are float32
@@ -526,24 +525,13 @@ public struct MetalInferenceCompiler: Sendable {
             let embOp = op as! EmbeddingLookupOperation
             let (weightBuffer, weightOffset) = resolveWeight(role: "embedding_table")
             // Determine kernel variant (BF16 or FP16)
-            var kernelName = "embedding_lookup_seq_f32"  // FP16 default with float32 output
-            if let staf = stafWeightStore {
-                if let binding = entry.parameterBindings.first(where: { $0.role == "embedding_table" }) {
-                    if let info = staf.tensor(for: binding.tensorName) {
-                        print("[Prefill compiler] embedding '\(binding.tensorName)' scheme=\(info.format.schemeIdentifier) kernel→\(info.format.schemeIdentifier == .bf16RowMajor ? "embedding_lookup_seq_bf16" : "embedding_lookup_seq")")
-                        if info.format.schemeIdentifier == .bf16RowMajor {
-                            kernelName = "embedding_lookup_seq_bf16_f32"
-                        }
-                    } else {
-                        print("[Prefill compiler] WARNING: embedding '\(binding.tensorName)' NOT FOUND in STAF")
-                    }
-                } else {
-                    print("[Prefill compiler] WARNING: no 'embedding_table' binding in parameterBindings: \(entry.parameterBindings.map(\.role))")
-                }
-            } else {
-                print("[Prefill compiler] WARNING: no STAF weight store")
+            var kernelName = "embedding_lookup_seq_f32"
+            if let staf = stafWeightStore,
+               let binding = entry.parameterBindings.first(where: { $0.role == "embedding_table" }),
+               let info = staf.tensor(for: binding.tensorName),
+               info.format.schemeIdentifier == .bf16RowMajor {
+                kernelName = "embedding_lookup_seq_bf16_f32"
             }
-            print("[Prefill compiler] embedding kernel selected: \(kernelName)")
             let pipeline = try getPipeline(kernelName)
             let dim = embOp.embeddingDimension
             let tgSize = min(256, pipeline.maxTotalThreadsPerThreadgroup)
@@ -606,11 +594,6 @@ public struct MetalInferenceCompiler: Sendable {
                 inputOffset = 0
             }
 
-            // Log projection details for debugging
-            let bindingName = entry.parameterBindings.first(where: { $0.role == projection.field })?.tensorName ?? "?"
-            let inputSrc = routingState.lastOutputIsHidden ? "hidden" : "scratch"
-            let outputDst = isOutput ? (projection.outputDimension > hiddenSize ? "logits" : "hidden") : "scratch[\(routingState.projectionIndex + 1)]"
-            print("[Prefill proj] \(bindingName) in=\(projection.inputDimension) out=\(projection.outputDimension) \(inputSrc)→\(outputDst) isOutput=\(isOutput)")
 
             let outputBuffer: MTLBuffer
             let outputOffset: Int
@@ -700,7 +683,6 @@ public struct MetalInferenceCompiler: Sendable {
                let info = staf.tensor(for: binding.tensorName),
                info.format.schemeIdentifier == .bf16RowMajor {
                 normKernelName = "rms_norm_seq_bf16_f32_inplace"
-                print("[Prefill compiler] norm '\(binding.tensorName)' scheme=bf16 → \(normKernelName)")
             }
             let pipeline = try getPipeline(normKernelName)
             let threads = min(roundUp(min(max(normOp.dimension, 1), 1024), to: pipeline.threadExecutionWidth), pipeline.maxTotalThreadsPerThreadgroup)
@@ -1169,7 +1151,6 @@ public struct MetalInferenceCompiler: Sendable {
 
         // MARK: Default — skip unsupported ops in prefill
         default:
-            print("[Prefill compiler] WARNING: unhandled operation skipped: \(entry.kind)")
             return []
         }
     }

@@ -166,14 +166,14 @@ struct PrefillNaNDiagnosticTests {
 
             // Check hidden buffer for NaN at position 0
             let hiddenPtr = prefillPlan.buffers.hidden.contents().bindMemory(
-                to: Float16.self, capacity: hiddenSize)
+                to: Float.self, capacity: hiddenSize)
             let hasNaN = (0..<hiddenSize).contains { hiddenPtr[$0].isNaN }
             let hasFinite = (0..<hiddenSize).contains { hiddenPtr[$0].isFinite && hiddenPtr[$0] != 0 }
             let sample = (0..<min(4, hiddenSize)).map { Float(hiddenPtr[$0]) }
 
             // Also check scratch
             let scratchPtr = prefillPlan.buffers.scratch.contents().bindMemory(
-                to: Float16.self, capacity: hiddenSize)
+                to: Float.self, capacity: hiddenSize)
             let scratchHasNaN = (0..<hiddenSize).contains { scratchPtr[$0].isNaN }
             let scratchSample = (0..<min(4, hiddenSize)).map { Float(scratchPtr[$0]) }
 
@@ -342,7 +342,7 @@ struct PrefillNaNDiagnosticTests {
                 return
             }
 
-            let hiddenPtr = prefillPlan.buffers.hidden.contents().bindMemory(to: Float16.self, capacity: hiddenSize)
+            let hiddenPtr = prefillPlan.buffers.hidden.contents().bindMemory(to: Float.self, capacity: hiddenSize)
             let hasNaN = (0..<hiddenSize).contains { hiddenPtr[$0].isNaN }
             let sample = (0..<min(4, hiddenSize)).map { Float(hiddenPtr[$0]) }
 
