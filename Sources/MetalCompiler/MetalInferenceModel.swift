@@ -181,11 +181,33 @@ public struct MetalInferenceModel: @unchecked Sendable {
             let modeStr = step.mode == .batch ? "B" : step.mode == .perPosition ? "P" : "L"
             let kernelLabel = step.pipeline.label ?? "?"
 
-            // Log every step
+            // Log every step — for steps 10-13 also scan full scratch for NaN/inf
             if stepIndex < 20 || hasNaN || scratchNaN || stepIndex % 50 == 0 {
                 let hs = (0..<min(4, hiddenSize)).map { hp[$0] }
                 let ss = (0..<min(4, hiddenSize)).map { sp[$0] }
-                print("[Prefill step \(stepIndex)] (\(modeStr)) [\(kernelLabel)] hidden=\(hs) hNaN=\(hasNaN) scratch=\(ss) sNaN=\(scratchNaN)")
+                var extra = ""
+                if stepIndex >= 10 && stepIndex <= 13 {
+                    // Scan each scratch slot separately
+                    let f32Size = MemoryLayout<Float>.size
+                    let slotBytes = prefill.buffers.scratch.length / 4  // 4 slots
+                    let slotElements = slotBytes / f32Size
+                    for slot in 0..<3 {
+                        let base = slot * slotElements
+                        let checkCount = min(slotElements, 12288 * seqLen)
+                        var nanC = 0; var infC = 0; var maxA: Float = 0; var firstBad = -1
+                        for j in 0..<checkCount {
+                            let v = sp[base + j]
+                            if v.isNaN { nanC += 1; if firstBad < 0 { firstBad = j } }
+                            if v.isInfinite { infC += 1; if firstBad < 0 { firstBad = j } }
+                            let a = abs(v); if a.isFinite && a > maxA { maxA = a }
+                        }
+                        if nanC > 0 || infC > 0 || maxA > 100 {
+                            extra += " slot\(slot)(NaN=\(nanC) inf=\(infC) maxAbs=\(maxA) first=\(firstBad))"
+                        }
+                    }
+                    if extra.isEmpty { extra = " allSlots(clean)" }
+                }
+                print("[Prefill step \(stepIndex)] (\(modeStr)) [\(kernelLabel)] hidden=\(hs) hNaN=\(hasNaN) scratch=\(ss) sNaN=\(scratchNaN)\(extra)")
             }
 
             if (hasNaN || scratchNaN) && nanStep < 0 {

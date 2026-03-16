@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import SwiftLM
+@testable import LMArchitecture
 
 // MARK: - Helpers
 
@@ -236,7 +236,7 @@ struct IRInvariantTests {
             Group {
                 RMSNorm(dimension: 64)
                 Residual {
-                    SwiftLM.Linear(inputSize: 64, outputSize: 64)
+                    LMArchitecture.Linear(inputSize: 64, outputSize: 64)
                 }
             },
 
@@ -244,8 +244,8 @@ struct IRInvariantTests {
             Group {
                 RMSNorm(dimension: 64)
                 Parallel(merge: .add) {
-                    SwiftLM.Linear(inputSize: 64, outputSize: 64)
-                    SwiftLM.Linear(inputSize: 64, outputSize: 64)
+                    LMArchitecture.Linear(inputSize: 64, outputSize: 64)
+                    LMArchitecture.Linear(inputSize: 64, outputSize: 64)
                 }
             },
 
@@ -253,7 +253,7 @@ struct IRInvariantTests {
             Group {
                 RMSNorm(dimension: 64)
                 Repeat(count: 3) {
-                    SwiftLM.Linear(inputSize: 64, outputSize: 64)
+                    LMArchitecture.Linear(inputSize: 64, outputSize: 64)
                 }
             },
 
@@ -276,14 +276,14 @@ struct IRInvariantTests {
             Group {
                 RMSNorm(dimension: 64)
                 Group { }
-                SwiftLM.Linear(inputSize: 64, outputSize: 64)
+                LMArchitecture.Linear(inputSize: 64, outputSize: 64)
             },
 
             // Single-branch parallel
             Group {
                 RMSNorm(dimension: 64)
                 Parallel(merge: .concat) {
-                    SwiftLM.Linear(inputSize: 64, outputSize: 64)
+                    LMArchitecture.Linear(inputSize: 64, outputSize: 64)
                 }
             },
 
@@ -375,7 +375,7 @@ struct IRInvariantTests {
         let component = Group {
             TokenEmbedding(vocabSize: 100, embeddingSize: 64)
             RMSNorm(dimension: 64)
-            SwiftLM.Linear(inputSize: 64, outputSize: 64)
+            LMArchitecture.Linear(inputSize: 64, outputSize: 64)
             OutputHead(inputSize: 64, vocabSize: 100)
         }
 
@@ -400,8 +400,8 @@ struct IRInvariantTests {
         let component = Group {
             RMSNorm(dimension: 64)
             Residual {
-                SwiftLM.Linear(inputSize: 64, outputSize: 64)
-                SwiftLM.Linear(inputSize: 64, outputSize: 64)
+                LMArchitecture.Linear(inputSize: 64, outputSize: 64)
+                LMArchitecture.Linear(inputSize: 64, outputSize: 64)
             }
         }
 
@@ -484,8 +484,8 @@ struct IRInvariantTests {
         let component = Group {
             RMSNorm(dimension: 64)
             Repeat(count: 4) {
-                SwiftLM.Linear(inputSize: 64, outputSize: 64)
-                SwiftLM.Linear(inputSize: 64, outputSize: 64)
+                LMArchitecture.Linear(inputSize: 64, outputSize: 64)
+                LMArchitecture.Linear(inputSize: 64, outputSize: 64)
             }
         }
 
@@ -606,7 +606,7 @@ struct IRInvariantTests {
             TokenEmbedding(vocabSize: 100, embeddingSize: 64)
             RMSNorm(dimension: 64)
             Residual {
-                SwiftLM.Linear(inputSize: 64, outputSize: 64)
+                LMArchitecture.Linear(inputSize: 64, outputSize: 64)
             }
             OutputHead(inputSize: 64, vocabSize: 100)
         }

@@ -325,18 +325,22 @@ struct LiveModelDiagnosticTests {
         var model = try MetalInferenceModel(plan: decodePlan, device: device)
         model.prefillPlan = prefillPlan
 
-        // Run prefill with exact same tokens, but also test with padded sequence to match app's 986
-        // The app has 986 tokens from a longer prompt. Pad with repeat of the 11 tokens to simulate length.
-        var paddedTokens = tokens
-        while paddedTokens.count < 986 {
-            paddedTokens.append(contentsOf: tokens)
+        // Use exact app tokens from file (986 tokens from chat template)
+        let tokenFileURL = URL(fileURLWithPath: "/tmp/lfm2_test_tokens.txt")
+        let realTokens: [Int32]
+        if FileManager.default.fileExists(atPath: tokenFileURL.path) {
+            let tokenString = try String(contentsOf: tokenFileURL, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)
+            realTokens = tokenString.split(separator: ",").compactMap { Int32($0) }
+            print("[InfModel] loaded \(realTokens.count) real tokens from file")
+        } else {
+            realTokens = tokens
+            print("[InfModel] token file not found, using tokenizer tokens (\(tokens.count))")
         }
-        paddedTokens = Array(paddedTokens.prefix(986))
-        print("[InfModel] padded to \(paddedTokens.count) tokens")
-        model.prefill(tokens: paddedTokens)
+        model.prefill(tokens: realTokens)
 
         print("[InfModel] position=\(model.position)")
-        #expect(model.position == 986, "Prefill should advance position to 986")
+        print("[InfModel] position=\(model.position)")
+        #expect(model.position == realTokens.count, "Prefill should advance position to \(realTokens.count)")
     }
 
     @Test("Step-by-step prefill with real STAF finds NaN source")

@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import SwiftLM
+@testable import LMArchitecture
 
 // MARK: - Helpers
 

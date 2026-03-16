@@ -117,10 +117,9 @@ public final class ModelContainer: @unchecked Sendable {
 
                 print("[ModelContainer] generate: \(input.text.tokens.count) prompt tokens, maxTokens=\(maxTokens)")
                 print("[ModelContainer] dispatch plan: \(self.inferenceModel.plan.steps.count) steps")
-                // Dump first 20 and last 5 tokens for diagnostic reproduction
-                let tokenDump = input.text.tokens.prefix(20).map(String.init).joined(separator: ",")
-                let tokenTailDump = input.text.tokens.suffix(5).map(String.init).joined(separator: ",")
-                print("[ModelContainer] tokens[0..<20]=[\(tokenDump)] ... tokens[\(input.text.tokens.count-5)..<\(input.text.tokens.count)]=[\(tokenTailDump)]")
+                // Dump ALL tokens for diagnostic reproduction
+                let allTokens = input.text.tokens.map(String.init).joined(separator: ",")
+                print("[ModelContainer] ALL_TOKENS=[\(allTokens)]")
 
                 // Prefill: batch all prompt tokens with minimal GPU sync
                 let prefillStart = CFAbsoluteTimeGetCurrent()

@@ -1,5 +1,5 @@
 import Testing
-@testable import SwiftLM
+@testable import LMArchitecture
 @testable import ModelDeclarations
 
 @Suite("Model Declaration Tests", .tags(.unit))

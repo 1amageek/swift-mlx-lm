@@ -1,545 +1,296 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
-
 ## Project Goal
 
-swift-lm は Apple Silicon 上での高速 LLM 推論パッケージ。[AnyFoundationModels](https://github.com/1amageek) の `MLXFoundationModels` バックエンドとして消費される。3つの層で構成される:
+swift-lm は Apple Silicon 上での最速 LLM 推論パッケージ。[AnyFoundationModels](https://github.com/1amageek) の `MLXFoundationModels` バックエンドとして消費される。
 
-1. **SwiftLM** — モデルアーキテクチャを宣言的に記述する DSL と IR。フォーマットにもランタイムにも依存しない
-2. **LMCompiler** — SwiftLM IR を MLX/MPSGraph 上で最適化された推論エンジンにコンパイルする
-3. **LMInference** — HF ディレクトリからの重み読み込み、トークナイザ、生成パイプライン、MPSGraph / MLX バックエンド選択を提供する
+入力は **config.json + safetensors + tokenizer.json** のみ。モデル固有の Swift 型は不要。消費者が指定するのは **HuggingFace repo ID だけ**。
 
-### 推論バックエンド
-
-MPSGraph と MLX は**独立したバックエンド**。それぞれ個別に選択可能。
+## Architecture
 
 ```
-ModelBundleLoader(backend:)
-  ├── .mpsgraph: MPSGraphInferenceCompiler → MPSGraphInferenceModel
-  │   → MPSGraph グラフコンパイラ。全層を fused 実行計画に
-  └── .mlx: MLXInferenceCompiler → MLXInferenceModel
-      → fused RMSNorm, fused SDPA, QKV packing, flat decode plan。全最適化済み
+LMIR (IR モジュール — backend 非依存)
+    │  ModelGraph, OperationKind, ParameterBinding, OperationAttributes
+    │  純粋なデータ型。Metal を知らない。TPU を知らない。
+    │
+    ├── LMArchitecture (DSL + Validation — LMIR を re-export)
+    │   ├── ModelComponent, @ModelComponentBuilder
+    │   ├── SemanticNormalizer, GraphValidator, DimensionValidator
+    │   └── @_exported import LMIR
+    │
+    ├── ModelDeclarations (depends: LMArchitecture)
+    │   └── Transformer, Qwen35, LFM2, Cohere
+    │
+    ├── MetalCompiler (depends: LMIR only — no MLX)
+    │   ├── MetalComponent protocol (dispatchDeclarations)
+    │   ├── MetalComputeOperation protocol (kernelName, isFusable, dispatchDimension)
+    │   ├── MetalKernelSource (compiler 所有の全 kernel MSL source)
+    │   ├── MetalInferenceCompiler (IR walk → fusion → dispatch plan)
+    │   ├── MetalInferenceModel (dispatch plan 実行)
+    │   ├── STAF (STAFConverter, STAFLoader, QuantizationFormat, ParameterResolver)
+    │   └── KVCacheSpecification (K/V 独立量子化, layout mode)
+    │
+    └── SwiftLM (consumer API — depends: LMArchitecture, MetalCompiler, ModelDeclarations)
+        ├── ModelBundleLoader (HF download → STAF → compile → ModelContainer)
+        ├── ModelContainer (generate, encode, decode)
+        ├── LMInput, Generation, GenerateParameters
+        └── UserInput, ChatMessage, ModelConfiguration
+```
+
+## Metal Backend 設計原則
+
+### IR と Backend の分離
+
+**LMIR は接続だけを記述する。計算の中身は opaque。**
+
+```swift
+// LMIR — 接続のみ
+struct Operation {
+    let operands: [Operand]
+    let results: [OperationResult]
+    let attributes: any OperationAttributes   // opaque — IR は中身を知らない
+}
+
+// 構造操作 — IR が知る唯一のもの
+enum StructuralKind {
+    case residual(strategy, body: Region)
+    case parallel(merge, branches: [Region])
+    case repeating(count, body: Region)
+    case conditional(condition, then: Region, else: Region)
+}
+```
+
+Backend (MetalCompiler, 将来の TPUCompiler) が attributes の型を判定して実行方法を決める:
+
+```
+LMIR (接続)           MetalCompiler              TPUCompiler
+Operation             MetalComponent protocol    TPUComponent protocol
+  .attrs (opaque) ──▶  attrs as? AttentionAttrs   attrs as? AttentionAttrs
+                       → flash_attn kernel         → tpu_attn_op
+                       attrs as? MLPAttrs          attrs as? MLPAttrs
+                       → gemv + swiglu              → tpu_mlp_op
+
+StructuralKind        compiler が walk
+  .residual   ───────▶  copy → body → add
+  .parallel   ───────▶  barrier なし (concurrent)
+  .repeating  ───────▶  unroll
+  .conditional ──────▶  compile-time 分岐
+```
+
+IR は OperationKind enum を持たない。`any OperationAttributes` として opaque に保持する。新しい計算を追加しても IR の変更は不要。
+
+### MetalComponent Protocol — 責務の分離
+
+MetalComponent は **Metal backend 側のプロトコル** (MetalCompiler モジュール内)。IR (LMIR) には属さない。LMIR の Attributes 型を MetalCompiler 内で extension して準拠させる。
+
+**核心原則: MetalComponent は「何の計算が必要か」を宣言する。Compiler は「どう実行するか」を決定する。**
+
+この2つを混同しない:
+- **計算の宣言** (MetalComponent の責務): 「GEMV が必要」「reduction(dim: D) が必要」「flashAttention(heads: H) が必要」
+- **実行の決定** (Compiler の責務): kernel source、dispatch config、fusion、buffer routing
+
+```swift
+// MetalCompiler モジュール内
+protocol MetalComponent {
+    var projections: [MetalProjection] { get }       // "GEMV が必要" の宣言
+    var computeOps: [MetalComputeOp] { get }         // "この非 GEMV 計算が必要" の宣言
+    var weightSlots: [MetalWeightSlot] { get }       // weight 名 (variant)
+    var cacheSlots: [MetalCacheSlot] { get }         // cache 宣言
+}
+
+// 計算種別の宣言 — MetalComponent が返す
+// compiler はこれを読んで kernel 選択・dispatch config 計算を行う
+enum MetalComputeOp {
+    case reduction(dim: Int)                          // norm, argmax
+    case elementwise(count: Int)                      // activation, add, copy
+    case flashAttention(numHeads: Int, headDim: Int)  // SDPA + KV cache
+    case gather(count: Int)                           // embedding lookup
+    case conv1d(dim: Int, kernelSize: Int)            // depthwise conv
+    case recurrence(numHeads: Int, dk: Int, dv: Int)  // SSM state update
+}
+
+// Attributes 型への準拠は MetalCompiler 内の extension で行う
+extension AttentionAttributes: MetalComponent { ... }
+extension MLPAttributes: MetalComponent { ... }
+```
+
+#### 禁止: Compiler 内部に計算種別を持つ
+
+```swift
+// ✗ WRONG — compiler が計算種別を決め打ちしている
+// 新しい MetalComponent を追加するたびに compiler の enum も変更が必要
+enum KernelKind {  // compiler 内部
+    case reduction(dim: Int)
+    case gemv(...)
+}
+func primitiveKernelKind(for entry: KernelEntry) -> KernelKind { ... }
+
+// ✓ CORRECT — compiler は MetalComponent から計算種別を読み取る
+// 新しい MetalComponent を追加しても compiler の変更は不要
+let ops = metalComponent.computeOps
+for op in ops {
+    let config = computeDispatchConfig(op: op, pipeline: pipeline)
+    ...
+}
+```
+
+### Compiler の役割
+
+Compiler は MetalComponent の宣言を読んで実行方法を決定する:
+
+```
+IR Graph walk:
+
+  operation を見る → metalComponent を取得
+    → projections から GEMV dispatch を生成
+    → computeOps から非 GEMV dispatch を生成
+    → graph の接続 (sequential/parallel/residual) に従って繋ぐ
+
+  graph 構造だけで dispatch 列が決まる:
+
+    residual {                      → copy(hidden → residual_buf)
+      rmsNorm                       → norm(hidden → scratch)
+      parallel {                    → barrier なし (独立)
+        linear(q_proj)              → gemv(scratch → scratch_q)
+        linear(k_proj)              → gemv(scratch → scratch_k)
+        linear(v_proj)              → gemv(scratch → scratch_v)
+      }
+      flash_attn                    → flash_attn(Q,K,V,cache → scratch)
+      linear(o_proj)                → gemv(scratch → hidden)
+    }                               → add(hidden, residual_buf → hidden)
+
+  新しい計算を追加しても compiler は変更不要。
+  MetalComponent 準拠を追加するだけ。
+```
+
+### Kernel Source — Compiler が所有
+
+**kernel source (.metal / MSL) は compiler が 1 箇所に集約して持つ。** MetalComponent には kernel source を持たせない。llama.cpp の ggml-metal.metal と同じ配置方針。
+
+理由:
+- GEMV は全 operation で共有 — Attention も MLP も Linear も同じ kernel
+- Fusion で kernel が変わる — compiler が fused variant を生成する
+- MetalComponent に持たせると fusion 時に 2 つの MetalComponent の source を統合する必要がある
+
+Grid/threadgroup は compiler が `pipeline.maxTotalThreadsPerThreadgroup` と `threadExecutionWidth` から計算。固定値を焼き込まない。
+
+### Op Fusion — llama.cpp パターンマッチ方式
+
+**fusion の本質は dispatch 数削減ではなく、中間バッファの device memory read/write を消すこと。**
+
+llama.cpp と同じパターンマッチ方式で fusion を検出する:
+
+#### Fusion 判定条件 (llama.cpp `ggml_can_fuse_ext` 準拠)
+
+```
+1. 中間ノードの use count == 1 (他の consumer がいない)
+2. 次ノードの入力が前ノードの出力
+3. 前後ノードの shape が同一
+4. 型が contiguous
+```
+
+**use count == 1 が fusion の本質的条件。** 出力が 1 箇所にしか消費されないなら、中間 buffer への書き出しを省略して register に保持できる。
+
+#### Fusion 対象パターン
+
+```
+1. rmsNorm + mul (weight)           → kernel_rms_norm_mul
+2. rmsNorm + mul + add (residual)   → kernel_rms_norm_mul_add
+3. silu(gate) * up                  → kernel_swiglu (既に 1 kernel)
+4. residualAdd + rmsNorm            → kernel_residual_norm
+```
+
+GEMV / SDPA / conv1d / recurrence は fuse しない (最適化済み dedicated kernel)。
+
+#### Compiler の fusion pass
+
+```
+Phase 1: IR walk → MetalComponent.computeOps を読んで dispatch 列を生成
+Phase 2: Fusion pass — 隣接する dispatch を pattern match で fuse
+Phase 3: Fused dispatch の kernel source を選択 (compiler が持つ fused variant)
+Phase 4: Pipeline 生成 + dispatch config 計算
+```
+
+### STAF (SafeTensor Accelerated Format)
+
+Weight は safetensors からの直接ロードではなく、STAF 実行キャッシュ経由で GPU にロードする。
+
+```
+*.safetensors (source of truth)
+    ↓ STAFConverter (1回だけ、オフライン)
+*.staf (GPU-ready executable cache)
+    ↓ mmap → bytesNoCopy → MTLBuffer (ゼロコピー)
+STAFWeightStore
+    ↓ quant_scheme_id → QuantizationFormat → kernel 選択
+GEMV kernel がブロックを直接読んで計算
+```
+
+**量子化ブロック**: weight + scale + zero を interleave して 1 block に。cache line 内で全情報が取れる。
+
+```
+┌──────────┬──────────┬──────────────────────────┐
+│scale (2B)│ zero (2B)│ packed quants (32-64B)    │
+└──────────┴──────────┴──────────────────────────┘
+```
+
+**QuantizationFormat protocol**: 量子化形式ごとに struct を追加。kernel は format.gemvKernelName で選択。
+
+### Buffer 管理
+
+用途別に分離。storage mode を最適化:
+
+| Buffer | Mode | 理由 |
+|---|---|---|
+| Weight (STAF) | `shared` + `bytesNoCopy` | mmap ゼロコピー。memcpy なし |
+| KV cache | `shared` | GPU write + read。unified memory で overhead なし |
+| hidden / scratch / residual / logits | `private` + `hazardTrackingModeUntracked` | GPU のみ |
+| tokenIn / tokenOut / position | `shared` | CPU read/write 必要 |
+
+### 新しい計算の追加手順
+
+1. LMIR に新 Attributes 型を追加 (`OperationAttributes` 準拠、backend 非依存)
+2. IR の変更は不要 — `any OperationAttributes` として opaque に格納される
+3. MetalCompiler で extension: `NewAttributes: MetalComponent` — `computeOps` で計算種別を宣言
+4. もし新しい kernel が必要なら compiler の kernel source に追加
+5. compiler 本体の変更は不要 (graph walk + `as? MetalComponent` で自動検出)
+
+## Module Dependencies
+
+```
+LMIR (IR — 依存なし)
+    │
+    ├── LMArchitecture (DSL + Validation — depends: LMIR)
+    │
+    ├── ModelDeclarations (depends: LMArchitecture)
+    │
+    ├── MetalCompiler (depends: LMIR only)
+    │
+    └── SwiftLM (consumer API — depends: LMArchitecture, MetalCompiler, ModelDeclarations)
 ```
 
 ## Build & Test
 
 ```bash
-# Build
 swift build
 ```
 
-**Important**: `swift test` は使わない — Metal metallib が見つからずクラッシュするため。テスト実行は常に `xcodebuild test` を使用すること。
+`swift test` は使わない（Metal metallib が見つからずクラッシュ）。`xcodebuild test` を使用。複数モジュールの同時実行はハングする（Metal/GPU リソース競合）。モジュール単位で分割実行。
 
-Swift tools version: 6.2. Platforms: macOS 15, iOS 18, visionOS 2.
+## Design Rules
 
-### テスト実行の原則
-
-**複数モジュールの同時実行はハングする** — Metal/GPU リソースの競合が原因。テストは必ずモジュール単位またはスイート単位で分割して実行すること。
-
-### 実行手順
-
-1. **GPU を使わないモジュールから先に実行する**（高速、ハングリスクなし）
-2. **GPU 依存テストはスイート単位で小分けに実行する**
-3. **各バッチの完了を確認してから次に進む** — 並列起動しない
-4. **必ず `-maximum-test-execution-time-allowance 60` を付ける** — ハング時の無限待ちを防止
-
-### モジュール別実行順序
-
-```bash
-# Step 1: GPU 非依存モジュール（高速）
-xcodebuild test -scheme swift-lm-Package -destination 'platform=macOS' \
-  -only-testing:SwiftLMTests -maximum-test-execution-time-allowance 60
-
-xcodebuild test -scheme swift-lm-Package -destination 'platform=macOS' \
-  -only-testing:ModelsTests -maximum-test-execution-time-allowance 60
-
-# Step 2: GPU 依存モジュール（スイート単位で分割）
-xcodebuild test -scheme swift-lm-Package -destination 'platform=macOS' \
-  -only-testing:LMCompilerTests -maximum-test-execution-time-allowance 60
-
-# Step 3: LMInferenceTests — スイート群ごとに分割実行
-# 3a: Core（GPU 不要）
-xcodebuild test -scheme swift-lm-Package -destination 'platform=macOS' \
-  -only-testing:LMInferenceTests/LMInputTests \
-  -only-testing:LMInferenceTests/ChatMessageTests \
-  -only-testing:LMInferenceTests/UserInputTests \
-  -only-testing:LMInferenceTests/GenerateParametersTests \
-  -only-testing:LMInferenceTests/ModelConfigurationTests \
-  -only-testing:LMInferenceTests/GenerationTests \
-  -only-testing:LMInferenceTests/StringOrNumberTests \
-  -only-testing:LMInferenceTests/ChatTemplateRendererTests \
-  -maximum-test-execution-time-allowance 60
-
-# 3b: ModelBundleLoader + IR Assembly
-xcodebuild test -scheme swift-lm-Package -destination 'platform=macOS' \
-  -only-testing:LMInferenceTests/ModelBundleLoaderTests \
-  -maximum-test-execution-time-allowance 60
-
-# 3c: Compiled path
-xcodebuild test -scheme swift-lm-Package -destination 'platform=macOS' \
-  -only-testing:LMInferenceTests/CompiledKVCacheTests \
-  -only-testing:LMInferenceTests/CompiledLanguageModelTests \
-  -only-testing:LMInferenceTests/CompiledPathSanitizeTests \
-  -only-testing:LMInferenceTests/CompiledKVCacheSnapshotTests \
-  -only-testing:LMInferenceTests/CompiledPathBinderTests \
-  -only-testing:LMInferenceTests/CompiledPipelineIntegrationTests \
-  -maximum-test-execution-time-allowance 60
-
-# 3d: KVCache + PrefixReuse
-xcodebuild test -scheme swift-lm-Package -destination 'platform=macOS' \
-  -only-testing:LMInferenceTests/KVCacheTests \
-  -only-testing:LMInferenceTests/PrefixReuseTests \
-  -maximum-test-execution-time-allowance 60
-
-# Step 4: Diagnostic（実モデル使用、最も重い）
-xcodebuild test -scheme swift-lm-Package -destination 'platform=macOS' \
-  -only-testing:LMInferenceDiagnosticTests -maximum-test-execution-time-allowance 60
-```
-
-### ハング検知
-
-- 全テストスイート（`.tags(.unit)` 以外）に `swift-testing-heartbeat` の `.heartbeat` trait を付与済み
-- ハング判定は `/tmp/test-heartbeat/` ディレクトリの JSON ファイルで監視可能
-- ハングの典型原因: AsyncStream の `continuation.finish()` 漏れ、Metal GPU デッドロック、複数テストの GPU リソース競合
-
-## Goal: HF-First Inference
-
-### ゴール
-
-**HF ディレクトリ（config.json + safetensors + tokenizer.json）だけで推論が完結する**こと。モデル固有の Swift 型は不要。消費者（AnyFoundationModels）が指定するのは**モデル名（HuggingFace repo ID）だけ**。
-
-```
-HF ディレクトリ (config.json + *.safetensors + tokenizer.json)
-     │
-     ├── model_type 抽出
-     │
-     ▼
-ModelRegistry.resolve(modelType, config)
-     │
-     ├── Known ("qwen3_5") → Qwen35(config).makeModelGraph()    ← 検証済み
-     ├── Known ("lfm2")    → LFM2(config).makeModelGraph()      ← 検証済み
-     ├── Known ("llama")   → Transformer(config).makeModelGraph()
-     │
-     └── Unknown           → AnyModel(config).makeModelGraph()   ← ベストエフォート
-     │
-     ▼
-ModelGraph (IR) + WeightNameMapper
-     │
-     ├── [MPSGraph path]
-     │   └── MPSGraphInferenceCompiler → MPSGraphInferenceModel → MPSGraphLanguageModel
-     │
-     └── [MLX path]
-         ├── WeightNameMapper.manifest(graph) → [SlotManifestEntry]
-         ├── MLXWeightPathBinder(manifest).bind(rawWeights) → BoundWeights
-         └── MLXInferenceCompiler → MLXInferenceModel → MLXLanguageModel
-              │
-              ▼
-        ModelContainer → TokenIterator → generate()
-```
-
-### config.json と safetensors の役割
-
-config.json と safetensors はそれぞれ異なる役割を持ち、両方からモデルを構築する:
-
-- **config.json → モデルの構造** — hidden_size、layer_types、num_attention_heads 等の構造パラメータ。IR（ModelGraph）を構築するために必須
-- **safetensors → weight の実体** — どのテンソルが存在するかの正規ソース。weight binding に使う
-
-config.json だけではモデルの完全な記述にならない。例: LFM2 の config.json に `use_qk_norm` フラグがないが、safetensors には `q_layernorm.weight` が存在する。**safetensors のテンソルキーが weight 構造の正規ソース。**
-
-設計ルール:
-- IR の weight slot はオプショナルに宣言する（QK norm 等）
-- safetensors にテンソルがあればバインド、なければスキップ
-- 必須 weight が safetensors に無い場合はエラー
-- config.json のフラグで weight slot の有無を決めない — safetensors が正規ソース
-
-### なぜ HF ディレクトリ駆動か
-
-- **消費者は何も知らなくてよい** — HuggingFace repo ID を渡すだけ
-- **mlx-community の事前量子化モデル** — safetensors に MLX ネイティブ形式で格納済み。`quantizedMatmul` が直接使用可能
-- **コンパイル時カーネル選択** — 重みのストレージ型を見て `quantizedMatmul` or `matmul` を静的に確定。実行時の型判定が不要
-- **IR と実行の分離** — モデル構造（ModelGraph IR）とランタイム（LMCompiler）が独立。バックエンド追加がモデル定義に影響しない
-
-### SwiftLM の役割
-
-SwiftLM は3つの目的を持つ:
-
-1. **IR スキーマ** — `ModelGraph`, `OperationKind`, `Attributes` 等の型定義。ModelComponent と LMCompiler の両方が依存する共通語彙
-2. **DSL（ModelComponent）** — モデルアーキテクチャの宣言的記述。推論パスで `makeModelGraph()` により IR を構築する
-3. **ModelConfig** — config.json の構造パラメータを保持する汎用型。全モジュールが共有
-
-```
-SwiftLM
-├── IR スキーマ (ModelGraph, OperationKind, Attributes)
-│   └── ← LMCompiler が IR を消費
-├── DSL (ModelComponent, @ModelComponentBuilder)
-│   └── ← Models/ の宣言 + AnyModel で使用。推論パスで IR を構築
-└── ModelConfig
-    ├── ← HFConfigDecoder が config.json から構築
-    └── ← Models/ が直接受け取り ModelComponent を構成
-```
-
-### Family と Model の境界
-
-新しいモデルが論文とともに導入する新規性は、まず **paper-level architecture family** として捉えること。`Qwen35` や `Cohere` のような商品名・モデル名を DSL や bridge の抽象名に使ってはいけない。
-
-- **Family**: 今後他モデルでも再利用されうる計算グラフ上の単位
-  - 例: `DeltaNet`, `parallel attention + MLP`, `MoE`, `windowed vision transformer`, `full-attention vision transformer`
-- **Model**: 具体的な family の組み合わせ・層配置・設定を持つ製品/論文単位
-  - 例: `Qwen35`, `Cohere`
-
-ルール:
-
-- `SwiftLM/Declaration` と `LMInference/Bridge`, `LMInference/IR` には **family-level の名前だけ** を置く
-- 固有名 (`Qwen*`, `Cohere`, `Llama`, `Gemma`, `Mixtral` 等) を持ってよいのは `Sources/Models/` のみ
-- 新しいモデル対応で追加するのは、まず **新しい family component / mapper / lowering rule** であり、商品名ではない
-- `DeltaNet` のような family は `ModelComponent` として明示し、raw string の variant 判定や固有モデル名で隠蔽しない
-
-これは「未知のモデル」ではなく「未知の計算グラフ family」が将来も出る、という前提に基づく設計ルールである。
-
-### 新しいアーキテクチャが出たときにやること
-
-新しい論文・モデルが出た場合は、まず商品名ではなく **論文が導入した計算グラフ上の新規性** を抽出すること。
-
-手順:
-
-1. **論文・公式実装を読む**
-   - 新しい層の種類、ブロック構成、キャッシュ形状、位置埋め込み、ルーティング、merge 規則を確認する
-2. **既存 family で表現できるか判定する**
-   - 既存 `ModelComponent` の組み合わせで表せるなら、新しい product-specific component は作らない
-3. **新しい family が必要なら family 単位で追加する**
-   - `ModelComponent`
-   - HF config decoder support
-   - IR lowering / compiler support
-   - 必要なら specialized kernel
-4. **config.json の必須項目を列挙する**
-   - 欠けている値をコードで補完しない
-   - HF config の必須キーを明確化する
-5. **bridge は family 名で検出・構築する**
-   - `IRGraphAssembler` に商品名を持ち込まない
-6. **最後に model 宣言へ落とす**
-   - `Qwen35` のような固有モデルは family の組み合わせと layer schedule を与えるだけにする
-
-禁止事項:
-
-- 論文にない product-specific wrapper を bridge 層に増やす
-- metadata 欠落を convenience default で埋める
-- 新しい family を既存モデル名で代表させる
-
-### Component を作るときのフロー
-
-新しい family は、最初に動いた 1 モデルをそのまま一般化して作ってはいけない。`ModelComponent` を書く前に **family spec** を完成させること。
-
-必須フロー:
-
-1. component を書く前に family spec を書く
-2. family の可変軸を全部列挙する
-3. required metadata と derived value を分離する
-4. cache / recurrent state / routing state の shape を先に確定する
-5. 可能なら 2 variant 以上で spec を照合する
-6. その後に `ModelComponent` / mapper / lowering / kernel を実装する
-
-family spec に必ず含めるもの:
-
-- 必須 metadata key 一覧
-- 導出式と invariant
-- tensor packing の前提
-- head / group / expert / window / state の関係
-- cache/state tensor shape
-- layer schedule 規則
-- gate / norm / positional encoding の意味論
-
-ルール:
-
-- 論文や公式実装に自由度があるなら、最初のモデルでその値が固定に見えても型に載せる
-- あるモデルでたまたま一致している 2 つの概念を、family レベルで 1 つに潰さない
-- runtime-critical な値を runtime path で推定しない。推定は tooling に閉じ込める
-- 「ロードできる」「少し生成できる」を完成条件にしない
-
-新しい family の最低検証項目:
-
-- metadata extraction test
-- tensor shape / mapper test
-- missing metadata failure test
-- variant 間 differential test
-- layer-wise activation / logit trace
-- compiled path と standard path の parity check（両方ある場合）
-
-避けるべき失敗パターン:
-
-- 小さい variant を family spec の代わりにしてしまう
-- product-specific な偶然を family abstraction に埋め込む
-- 大きい variant で初めて必要軸が露呈する
-
-variant 間で解釈差が出たら、「どちらかを例外扱いする」のではなく「family spec が未完成」と見なして、足りない軸を type / IR / configuration に追加すること。
-
-### モジュール依存関係
-
-```
-SwiftLM (IR + DSL) ────────────────┐
-                                   │
-ModelDeclarations (depends: SwiftLM)│
-  └── DSL モデル宣言               │
-      (Qwen35, LFM2, etc.)        │
-      ※ トレーニング・設計用途     │
-                                   │
-LMCompiler (depends: SwiftLM) ─────┤
-  ├── MLXInferenceCompiler         │
-  └── MPSGraphInferenceCompiler    │
-                                   │
-LMInference (depends: SwiftLM, LMCompiler)
-  ├── ModelBundleLoader: HF config → IR → backend
-  │     ├── .mpsgraph: MPSGraphInferenceCompiler → MPSGraphLanguageModel
-  │     └── .mlx: MLXInferenceCompiler → MLXLanguageModel
-  └── ※ ModelDeclarations には依存しない
-```
-
-### 下流パイプライン互換性
-
-`ModelBundleLoader` が生成する `ModelContext` は全下流パイプラインで動作すること:
-
-1. **`ModelContainer` 互換** — `generate()` / `prepare()` / `perform()` が正常動作
-2. **`TokenIterator` 互換** — `LanguageModel` / `KVCache` プロトコル経由で正常動作
-3. **`PrefixCachePool` 互換** — `KVCache.isTrimmable` / `trim()` によるキャッシュ再利用が機能
-4. **`PromptCacheSnapshot` 互換** — `capturePromptCache()` / `materializePromptCache()` が機能
-5. **Weight sanitize** — `rotary_emb.inv_freq` 除去（`WeightSanitizer.filterRotaryEmbeddings`）
-
-## Architecture
-
-コアは3モジュール（SwiftLM + LMCompiler + LMInference）。外部依存は `mlx-swift` と `swift-jinja` のみ。詳細は `/skeleton` で確認すること。
-
-| モジュール | 役割 | 依存先 |
-|---|---|---|
-| SwiftLM | IR スキーマ + DSL | なし |
-| ModelDeclarations | DSL モデル宣言（設計・トレーニング用） | SwiftLM |
-| LMCompiler | IR → 推論エンジン（MLX + MPSGraph） | SwiftLM |
-| LMInference | HF ローダー・生成パイプライン・バックエンド選択 | SwiftLM, LMCompiler |
-
-**重要**: LMInference は ModelDeclarations に依存する。config.json → ModelConfig → ModelComponent.makeModelGraph() で IR を構築する。
-
-### 新しい Model を追加するとき
-
-**必ず `OperationKind` を確認してから実装する。** DSL コンポーネント（`Sources/SwiftLM/Declaration/Components/`）と IR の `OperationKind`（`Sources/SwiftLM/IR/ModelGraph.swift`）は 1:1 で対応する。対応するコンポーネントが無い `OperationKind` を使う場合はコンパイラが未対応でエラーになる。
-
-手順:
-
-1. **`OperationKind` を確認** — 使いたい計算ノードに対応する case があるか確認する（`attention`, `mlp`, `moe`, `stateSpace`, `shortConv` 等）
-2. **DSL コンポーネントを確認** — 対応する `ModelComponent`（`Attention`, `MLP`, `MoE`, `StateSpace`, `ShortConv` 等）が `Sources/SwiftLM/Declaration/Components/` に存在するか確認する
-3. **無ければ作る** — `PrimitiveComponent` に準拠した新コンポーネントを作成し、`operationKind` で正しい `OperationKind` case を返す
-4. **`StateSpace` の variant に新しい文字列を入れて別の operation を代用しない** — `stateSpace(variant: "short_conv")` のように別の operation kind を誤用すると、コンパイラが未知の variant としてエラーを出す
-
-### 推論バックエンドの使い分け
-
-MPSGraph と MLX は独立したバックエンド。消費者が明示的に選択する。
-
-| バックエンド | 利点 | 制約 |
-|---|---|---|
-| **MPSGraph** | MPSGraph fused execution, compiled graph plan | Pure Swift、Python 不要 |
-| **MLX** | 動的 shape、LoRA、量子化、custom kernels | op-at-a-time dispatch |
-
-```swift
-// 使い方
-let container = try await ModelBundleLoader().load(repo: "...", backend: .mpsgraph)
-let container = try await ModelBundleLoader().load(repo: "...", backend: .mlx)
-```
-
-AnyFoundationModels が `MLXFoundationModels` 経由で消費する。公開インターフェースは `ModelContainer`。消費者が指定するのは HuggingFace repo ID のみ。
-
-### 設計ルール
-
-- HF ディレクトリ（config.json + safetensors + tokenizer.json）が正規ソース — config.json が完全なメタデータを提供する
-- `chat_template` 評価が正規のプロンプトフォーマッタ（`ChatTemplateInputProcessor`）— 手書きのモデル別フォーマッタは作らない
-- 設定値は config.json から `HFConfigDecoder` 経由で取得する — トークン ID、次元数、正規化パラメータ等をハードコードしない
-- **必須項目が config.json に欠けている場合は補完せずエラーにする** — `0.25` のような既定値をコードで埋めてはならない
-- 計算グラフが異なる場合のみモデル固有実装を許可（VLM vision encoder 等）。設定値の違いは汎用型でフラグ駆動する
-- family-level に抽象化できるものは model-specific 型にしない。新規実装はまず `Family → IR → lowering/kernel` の単位で設計する
-- 新アーキテクチャ対応では、論文から `Family → required config keys → IR assembler → lowering/kernel → model declaration` の順で設計する
+- HF ディレクトリ (config.json + safetensors + tokenizer.json) が正規ソース
+- config.json に必須項目が欠けていたら補完せずエラー
+- IR はランタイム非依存。Metal/MLX/TPU 固有の型を IR に持ち込まない
+- MetalComponent は MetalCompiler モジュール内。SwiftLM/LMIR に属さない
 - 全 public 型は `Sendable`
-- mlx-community の事前量子化モデルを使用する — safetensors に MLX ネイティブ量子化形式で格納済み。`quantizedMatmul` が直接使用可能
 
-### 禁止: Vision Encoder を IR に含める
+## Vision Encoder
 
-**現状の問題:**
+Vision encoder と text decoder は独立したモデル。IR に vision encoder を含めない。
 
-現在の VLM 実装は vision encoder を text decoder と同一の `ModelGraph` に含めている:
+## Family と Model の境界
 
-```
-parallel(merge: .visionMerge) {
-    branch 0: tokenEmbedding → textEmbeddings
-    branch 1: visionEncoder → visionFeatures
-}
-→ decoder blocks → outputHead
-```
-
-これにより以下の問題が発生している:
-
-1. **VLM がコンパイルパスを使えない** — `MLXInferenceCompiler` は `visionEncoder` ノードを lowered step に変換できず、VLM は `MLXExecutor`（インタプリタ）に強制される。text-only モデルが得ている最適化（packed QKV projection、fused sub-layer 等）が VLM では全て無効
-2. **IR にランタイム概念が混入** — `visionEncoder` はゼロオペランドのソースノードで、実行時にピクセルデータを外部から読む。これは IR の宣言的性質に反する
-3. **不要な並列分岐** — `parallel(merge: .visionMerge)` は text embedding と vision encoding を並列実行するが、実際にはシーケンシャルに処理すれば十分
-
-**正しいアプローチ（llama.cpp / Ollama 方式）:**
-
-Vision encoder と text decoder は**独立したモデル**として扱う:
-
-```
-[Vision Encoder]          [Text Decoder IR]
-vision weights            text config.json + safetensors
-     │                         │
-     ▼                         ▼
-MLXNN Module              ModelGraph (text-only と同一)
-(別モデル)                tokenEmbedding → decoder → outputHead
-     │                         │
-     ▼                         ▼
-vision embeddings         MLXInferenceModel
-     │                    (コンパイルパス使用)
-     └──────┐                  │
-            ▼                  ▼
-      MLXLanguageModel.prepare()
-      → sequential chunk processing
-```
-
-**Sequential chunk processing:**
-
-llama.cpp の `llama_batch` と同じ方式。text decoder に対して token IDs または pre-computed embeddings をチャンク単位で渡す:
-
-1. テキストチャンク → `prefill(tokenIDs:)` → embedding lookup + decode
-2. ビジョンチャンク → `prefill(embeddings:)` → skip embedding lookup, decode directly
-3. テキストチャンク → `prefill(tokenIDs:)` → embedding lookup + decode
-
-各チャンクで KV cache が更新される。text decoder は vision の存在を知らない。
-
-**IR への影響:**
-
-- `OperationKind.visionEncoder` を削除 — IR に属さない
-- `ParallelMergeStrategy.visionMerge` を削除 — テキストデコーダに vision 分岐は不要
-- `VisionEncoderAttributes`, `VisionMergeConfig` を削除
-- VLM の text decoder IR は text-only と完全に同一になる
-
-**実行エンジンへの影響:**
-
-- `MLXInferenceModel` に `embeddings` 入力を追加（token embedding skip）
-- `MLXInferenceModel` に `positionIds` 入力を追加（M-RoPE 対応）
-- `CompiledVisionLanguageModel` + `MLXExecutor` による VLM パスを削除
-- `MLXLanguageModel` が text-only と VLM の両方を処理
-
-## Weight Loading Flow
-
-### MPSGraph パス
-
-```
-HF ディレクトリ (config.json + *.safetensors)
-     │
-     ▼
-ModelBundleLoader → IR assembly → MPSGraphInferenceCompiler
-     │
-     ▼
-MPSGraphInferenceModel → MPSGraphLanguageModel
-```
-
-### MLX パス
-
-```
-HF ディレクトリ (*.safetensors)
-     │
-     ▼
-HFDirectoryBundle.loadWeights() → WeightManifest
-     │
-     ▼
-ModelBundleLoader.convertToRawWeights()
-     │
-     ├── weight + scales + biases → AffineQuantizedTensor → quantizedMatmul
-     └── それ以外 → dense → matmul
-     │
-     ▼
-WeightSanitizer.filterRotaryEmbeddings → MLXWeightPathBinder.bind()
-     │
-     ▼
-MLXInferenceCompiler.compile() → MLXInferenceModel
-```
-
-MLX パスは全最適化済み: fused RMSNorm (`MLXFast.rmsNorm`), fused SDPA (`MLXFast.scaledDotProductAttention`), QKV packing, Gate+Up packing, flat decode plan, 全層 lazy eval (1 eval)。
-
-## LMCompiler 実装規則
-
-### 禁止: `MLXFast.rmsNorm` に `1 + weight` を渡す
-
-mlx-swift の `MLXFast.rmsNorm(x, weight: w, eps:)` は `x_normalized * w` を計算する（weight を直接乗算）。Python MLX の `(1 + weight)` 慣例とは異なる。
-
-- **mlx-swift**: `RMSNorm` は weight を **ones** で初期化。`rmsNorm` は weight を**そのまま乗算** → `x_norm * 1.0 = x_norm` (identity)
-- **mlx Python**: `RMSNorm` は weight を **zeros** で初期化。`rms_norm` は **`(1 + weight)` を乗算** → `x_norm * (1 + 0) = x_norm` (identity)
-
-GGUF の norm weight は HuggingFace/PyTorch 由来で 1.0 付近の値。`1 + weight` とすると scale が約2倍になり、全層の出力が破壊される。
-
-```swift
-// ✗ WRONG — doubles the scale
-MLXFast.rmsNorm(x, weight: 1 + weight, eps: eps)
-
-// ✓ CORRECT — mlx-swift uses weight directly
-MLXFast.rmsNorm(x, weight: weight, eps: eps)
-```
-
-### 禁止: per-head interleaved テンソルの flat split
-
-Q projection が gate を含む場合（`sigmoidPackedInQProj`）、出力 `[B, L, H * 2D]` は per-head interleaved: `[q0, g0, q1, g1, ...]`。flat tensor を半分で分割すると head 境界を跨いで q と gate が混在する。
-
-```swift
-// ✗ WRONG — flat split crosses head boundaries
-let qDim = queries.dim(-1) / 2
-gateValues = queries[0..., 0..., qDim...]
-
-// ✓ CORRECT — reshape per-head then split within each head
-let perHead = queries.reshaped(B, L, headCount, 2 * headDim)
-gateValues = perHead[0..., 0..., 0..., headDim...].reshaped(B, L, -1)
-queries = perHead[0..., 0..., 0..., 0..<headDim].reshaped(B, L, -1)
-```
-
-### 参照実装との一致検証
-
-コンパイルパス（`LoweredAttention`, `LoweredDeltaNet` 等）は HuggingFace の参照実装（Python）と**数値的に一致**しなければならない。新しい lowered op を実装する際は:
-
-1. 参照実装の forward pass を読み、各操作の入出力テンソル形状・dtype を確認する
-2. テンソルの次元レイアウト（per-head interleaved vs contiguous）を特定する
-3. API の慣例（`MLXFast.rmsNorm` の weight 処理等）をソースレベルで検証する — ドキュメントやコメントではなく C++ 実装を確認する
-
-### Kernel Fusion の原則: 全 element-wise 操作は 1 kernel
-
-**matmul 境界間の全ての element-wise 操作を `MetalCodeGenerator` で 1 つの Metal kernel に fuse する。** 個別の MLX API 呼び出し（`split`, `*`, `+`, `silu`, `rmsNorm`, residual add 等）を並べるのは禁止。
-
-llama.cpp は `rms_norm + mul + add` を 1 kernel に fuse している。swift-lm も同等以上の fusion を行う。
-
-#### 禁止パターン
-
-```swift
-// ✗ WRONG — element-wise 操作を個別に dispatch
-let normed = MLXFast.rmsNorm(x, weight: w, eps: eps)
-let result = normed + residual  // ← 別の dispatch
-```
-
-#### 正しいパターン
-
-```swift
-// ✓ CORRECT — MetalCodeGenerator で 1 kernel に fuse
-let fusedOps: [MetalCodeGenerator.FusableOp] = [
-    .rmsNorm(dst: "normed", src: "x", weight: "w"),
-    .add(dst: "out", lhs: "normed", rhs: "residual"),
-    .store(variable: "out", output: 0),
-]
-// コンパイル時に 1 つの Metal kernel を生成
-```
-
-#### 設計ルール
-
-1. **matmul / SDPA / RoPE は fuse しない** — MLX/MLXFast の最適化済みカーネルを使う
-2. **matmul 間の全 element-wise 操作は 1 kernel に fuse する** — `MetalCodeGenerator` で Metal source を生成
-3. **`FusedSubLayer` は Metal kernel レベルの fusion** — Swift レベルの関数統合ではなく、Metal kernel を 1 つ生成して dispatch する
-4. **コンパイル時に kernel を生成** — `LoweredOp.init()` で `MetalCodeGenerator` → `FusedKernel` を構築。実行時のオーバーヘッドゼロ
-5. **新しい fusable op を追加するには** `MetalCodeGenerator.FusableOp` に case を追加し、`generate()` に Metal code 変換ルールを追加する
-
-#### 各層の目標 dispatch 数
-
-| 層タイプ | matmul | fused kernel | 合計 |
-|---|---|---|---|
-| Conv (ShortConv + MLP) | inProj + outProj + gate/up + down = 4 | [norm+gate+conv+gate+cache+residual] + [norm+silu*up+residual] = 2 | **6** |
-| Attention + MLP | QKV + oProj + gate/up + down = 4 | [norm+head reshape] + RoPE + SDPA + [gate+residual] + [norm+silu*up+residual] = 5 | **9** |
-
-**目標: 全モデルで dispatch 数を最小化する。matmul 以外は全て fused kernel。**
+- Family: 計算グラフ上の再利用可能な単位 (DeltaNet, MoE, parallel attention+MLP)
+- Model: family の組み合わせ + 設定 (Qwen35, LFM2, Cohere)
+- `SwiftLM/Declaration` と `LMInference/Bridge` には family 名のみ
+- 固有名は `Sources/Models/` のみ

@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import SwiftLM
+@testable import LMArchitecture
 
 @Suite("ModelGraph", .tags(.unit))
 struct ModelGraphTests {
@@ -302,12 +302,12 @@ struct ModelGraphTests {
     func canonicalizationIDs() throws {
         let compA = Group {
             RMSNorm(dimension: 64)
-            SwiftLM.Linear(inputSize: 64, outputSize: 32)
+            LMArchitecture.Linear(inputSize: 64, outputSize: 32)
         }
 
         let compB = Group {
             RMSNorm(dimension: 64)
-            SwiftLM.Linear(inputSize: 64, outputSize: 32)
+            LMArchitecture.Linear(inputSize: 64, outputSize: 32)
         }
 
         let graphA = try normalize(compA).graph
@@ -1153,10 +1153,10 @@ struct ModelGraphTests {
             RMSNorm(dimension: 64)
             Parallel(merge: .add) {
                 Parallel(merge: .add) {
-                    SwiftLM.Linear(inputSize: 64, outputSize: 64)
-                    SwiftLM.Linear(inputSize: 64, outputSize: 64)
+                    LMArchitecture.Linear(inputSize: 64, outputSize: 64)
+                    LMArchitecture.Linear(inputSize: 64, outputSize: 64)
                 }
-                SwiftLM.Linear(inputSize: 64, outputSize: 64)
+                LMArchitecture.Linear(inputSize: 64, outputSize: 64)
             }
         }
 
@@ -1170,7 +1170,7 @@ struct ModelGraphTests {
             RMSNorm(dimension: 64)
             Residual {
                 Residual {
-                    SwiftLM.Linear(inputSize: 64, outputSize: 64)
+                    LMArchitecture.Linear(inputSize: 64, outputSize: 64)
                 }
             }
         }
@@ -1185,7 +1185,7 @@ struct ModelGraphTests {
             RMSNorm(dimension: 64)
             Repeat(count: 2) {
                 Repeat(count: 3) {
-                    SwiftLM.Linear(inputSize: 64, outputSize: 64)
+                    LMArchitecture.Linear(inputSize: 64, outputSize: 64)
                 }
             }
         }

@@ -1,7 +1,7 @@
 import Testing
 import TestHeartbeat
 import Foundation
-@testable import SwiftLM
+@testable import LMArchitecture
 
 // MARK: - Measurement Helpers
 
@@ -143,7 +143,7 @@ struct PrimitiveNormalizationPerformanceTests {
 
     @Test("Linear normalization")
     func linear() throws {
-        let comp = SwiftLM.Linear(inputSize: 4096, outputSize: 32000)
+        let comp = LMArchitecture.Linear(inputSize: 4096, outputSize: 32000)
         let d = try measure { _ = try normalize(comp) }
         print("[perf] Linear normalize: \(d)")
         #expect(d < .milliseconds(10))
@@ -229,7 +229,7 @@ struct StructuralNormalizationPerformanceTests {
         let comp = Group {
             RMSNorm(dimension: 4096)
             Repeat(count: 32) {
-                SwiftLM.Linear(inputSize: 4096, outputSize: 4096)
+                LMArchitecture.Linear(inputSize: 4096, outputSize: 4096)
             }
         }
         let d = try measure { _ = try normalize(comp) }
@@ -245,15 +245,15 @@ struct StructuralNormalizationPerformanceTests {
                     Group {
                         Group {
                             RMSNorm(dimension: 4096)
-                            SwiftLM.Linear(inputSize: 4096, outputSize: 4096)
+                            LMArchitecture.Linear(inputSize: 4096, outputSize: 4096)
                         }
-                        SwiftLM.Linear(inputSize: 4096, outputSize: 4096)
+                        LMArchitecture.Linear(inputSize: 4096, outputSize: 4096)
                     }
-                    SwiftLM.Linear(inputSize: 4096, outputSize: 4096)
+                    LMArchitecture.Linear(inputSize: 4096, outputSize: 4096)
                 }
-                SwiftLM.Linear(inputSize: 4096, outputSize: 4096)
+                LMArchitecture.Linear(inputSize: 4096, outputSize: 4096)
             }
-            SwiftLM.Linear(inputSize: 4096, outputSize: 4096)
+            LMArchitecture.Linear(inputSize: 4096, outputSize: 4096)
         }
         let d = try measure { _ = try normalize(comp) }
         print("[perf] Group(deep nesting) normalize: \(d)")
@@ -524,7 +524,7 @@ struct ScalingPerformanceTests {
             let comp = Group {
                 TokenEmbedding(vocabSize: 100, embeddingSize: 64)
                 ForEach(Array(0..<count)) { _ in
-                    SwiftLM.Linear(inputSize: 64, outputSize: 64)
+                    LMArchitecture.Linear(inputSize: 64, outputSize: 64)
                 }
                 OutputHead(inputSize: 64, vocabSize: 100)
             }
@@ -547,7 +547,7 @@ struct ScalingPerformanceTests {
             let comp = Group {
                 RMSNorm(dimension: 64)
                 Repeat(count: 1) {
-                    SwiftLM.Linear(inputSize: 64, outputSize: 64)
+                    LMArchitecture.Linear(inputSize: 64, outputSize: 64)
                 }
             }
             _ = try normalize(comp)
@@ -557,7 +557,7 @@ struct ScalingPerformanceTests {
             let comp = Group {
                 RMSNorm(dimension: 64)
                 Repeat(count: 1000) {
-                    SwiftLM.Linear(inputSize: 64, outputSize: 64)
+                    LMArchitecture.Linear(inputSize: 64, outputSize: 64)
                 }
             }
             _ = try normalize(comp)

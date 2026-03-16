@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import SwiftLM
+@testable import LMArchitecture
 
 // MARK: - Example Model Declarations
 
@@ -213,7 +213,7 @@ struct DSLLoweringTests {
                 RMSNorm(dimension: 64)
                 RMSNorm(dimension: 64)
             }
-            SwiftLM.Linear(inputSize: 64, outputSize: 32)
+            LMArchitecture.Linear(inputSize: 64, outputSize: 32)
         }
 
         let graph = try normalize(comp).graph
@@ -225,7 +225,7 @@ struct DSLLoweringTests {
         let comp = Group {
             Group(label: "debug") {
                 RMSNorm(dimension: 64)
-                SwiftLM.Linear(inputSize: 64, outputSize: 32)
+                LMArchitecture.Linear(inputSize: 64, outputSize: 32)
             }
         }
 
@@ -554,7 +554,7 @@ struct DSLLoweringTests {
             MoE(expertCount: 4, expertsPerToken: 2, expertInputSize: 64, expertIntermediateSize: 256)
             RMSNorm(dimension: 64)
             LayerNorm(dimension: 64)
-            SwiftLM.Linear(inputSize: 64, outputSize: 32)
+            LMArchitecture.Linear(inputSize: 64, outputSize: 32)
             OutputHead(inputSize: 32, vocabSize: 100)
             StateSpace(hiddenSize: 64, numHeads: 1, keyHeadDim: 16, valueHeadDim: 16, variant: "mamba")
             Custom(domain: "test", name: "noop")
@@ -598,7 +598,7 @@ struct DSLLoweringTests {
         // An empty Group contributes no operations.
         let comp = Group {
             RMSNorm(dimension: 64)
-            SwiftLM.Linear(inputSize: 64, outputSize: 32)
+            LMArchitecture.Linear(inputSize: 64, outputSize: 32)
         }
 
         let graph = try normalize(comp).graph
@@ -616,7 +616,7 @@ struct DSLLoweringTests {
         var body: some ModelComponent {
             RMSNorm(dimension: 64)
             Parallel(merge: .add) {
-                SwiftLM.Linear(inputSize: 64, outputSize: 64)
+                LMArchitecture.Linear(inputSize: 64, outputSize: 64)
             }
         }
 
@@ -641,7 +641,7 @@ struct DSLLoweringTests {
         var body: some ModelComponent {
             RMSNorm(dimension: 64)
             Repeat(count: 1) {
-                SwiftLM.Linear(inputSize: 64, outputSize: 64)
+                LMArchitecture.Linear(inputSize: 64, outputSize: 64)
             }
         }
 
@@ -702,10 +702,10 @@ struct DSLLoweringTests {
                 Group {
                     RMSNorm(dimension: 64)
                 }
-                SwiftLM.Linear(inputSize: 64, outputSize: 64)
+                LMArchitecture.Linear(inputSize: 64, outputSize: 64)
             }
             Group {
-                SwiftLM.Linear(inputSize: 64, outputSize: 32)
+                LMArchitecture.Linear(inputSize: 64, outputSize: 32)
             }
         }
 
@@ -729,8 +729,8 @@ struct DSLLoweringTests {
             RMSNorm(dimension: 64)
             Residual {
                 RMSNorm(dimension: 64)
-                SwiftLM.Linear(inputSize: 64, outputSize: 64)
-                SwiftLM.Linear(inputSize: 64, outputSize: 64)
+                LMArchitecture.Linear(inputSize: 64, outputSize: 64)
+                LMArchitecture.Linear(inputSize: 64, outputSize: 64)
             }
         }
 
@@ -795,8 +795,8 @@ struct DSLLoweringTests {
         struct ThreeOps: ModelComponent {
             var body: some ModelComponent {
                 RMSNorm(dimension: 64)
-                SwiftLM.Linear(inputSize: 64, outputSize: 64)
-                SwiftLM.Linear(inputSize: 64, outputSize: 32)
+                LMArchitecture.Linear(inputSize: 64, outputSize: 64)
+                LMArchitecture.Linear(inputSize: 64, outputSize: 32)
             }
         }
 
@@ -886,7 +886,7 @@ struct DSLLoweringTests {
                 TokenEmbedding(vocabSize: 100, embeddingSize: 64)
                 if addBlock {
                     RMSNorm(dimension: 64)
-                    SwiftLM.Linear(inputSize: 64, outputSize: 64)
+                    LMArchitecture.Linear(inputSize: 64, outputSize: 64)
                 }
                 OutputHead(inputSize: 64, vocabSize: 100)
             }
@@ -1029,11 +1029,11 @@ struct DSLLoweringTests {
             var body: some ModelComponent {
                 RMSNorm(dimension: 64)
                 if branch {
-                    SwiftLM.Linear(inputSize: 64, outputSize: 64)
+                    LMArchitecture.Linear(inputSize: 64, outputSize: 64)
                 } else {
-                    SwiftLM.Linear(inputSize: 64, outputSize: 64)
+                    LMArchitecture.Linear(inputSize: 64, outputSize: 64)
                 }
-                SwiftLM.Linear(inputSize: 64, outputSize: 32)
+                LMArchitecture.Linear(inputSize: 64, outputSize: 32)
             }
         }
 
