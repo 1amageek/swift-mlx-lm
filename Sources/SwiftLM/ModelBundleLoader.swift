@@ -175,10 +175,13 @@ public struct ModelBundleLoader: Sendable {
             return try Transformer(config: config).makeModelGraph()
         case "qwen3_5":
             return try Qwen35(config: config).makeModelGraph()
-        case "lfm2":
+        case "lfm2", "lfm2_moe":
             return try LFM2(config: config).makeModelGraph()
         case "cohere", "command-r":
             return try Cohere(config: config).makeModelGraph()
+        case "nemotron_h":
+            throw ModelBundleLoaderError.invalidConfig(
+                "nemotron_h (Mamba-2 hybrid) is not yet supported")
         default:
             return try Transformer(config: config).makeModelGraph()
         }
@@ -186,7 +189,7 @@ public struct ModelBundleLoader: Sendable {
 
     private func namingConvention(for modelType: String) -> ParameterResolver.WeightNamingConvention {
         switch modelType.lowercased() {
-        case "lfm2": return .lfm2Family
+        case "lfm2", "lfm2_moe": return .lfm2Family
         default: return .llamaFamily
         }
     }
@@ -239,12 +242,29 @@ struct HFConfigDecoder {
         guard let layerCount = json["num_hidden_layers"] as? Int else {
             throw ModelBundleLoaderError.invalidConfig("Missing num_hidden_layers")
         }
-        // SwiGLU models: config intermediate_size is the "theoretical" size.
-        // Actual gate_proj/up_proj weight shape is [intermediate_size * 2/3, hidden_size].
-        // We need the ACTUAL weight dimension, not the config value.
-        let rawIntermediateSize = json["intermediate_size"] as? Int ?? hiddenSize * 4
-        let useSwiGLU = json["block_use_swiglu"] as? Bool ?? true
-        let intermediateSize = useSwiGLU ? (rawIntermediateSize * 2 / 3) : rawIntermediateSize
+        // Intermediate size: prefer "intermediate_size", fall back to "block_ff_dim", then hiddenSize*4.
+        // LFM2.5 has "intermediate_size"; LFM2 only has "block_ff_dim".
+        // SwiGLU models store the raw dimension; actual weight dim = raw * 2/3 (with rounding).
+        let rawIntermediateSize = json["intermediate_size"] as? Int
+            ?? json["block_ff_dim"] as? Int
+            ?? hiddenSize * 4
+        // Only LFM2 configs set block_auto_adjust_ff_dim or block_use_swiglu.
+        // Standard models (Llama, Qwen, etc.) store the final dimension in intermediate_size.
+        let autoAdjust = json["block_auto_adjust_ff_dim"] as? Bool
+            ?? json["block_use_swiglu"] as? Bool
+            ?? false
+        let intermediateSize: Int
+        if autoAdjust {
+            var adjusted = rawIntermediateSize * 2 / 3
+            if let multiplier = json["block_ffn_dim_multiplier"] as? Double {
+                adjusted = Int(multiplier * Double(adjusted))
+            }
+            let multipleOf = json["block_multiple_of"] as? Int ?? 256
+            adjusted = multipleOf * ((adjusted + multipleOf - 1) / multipleOf)
+            intermediateSize = adjusted
+        } else {
+            intermediateSize = rawIntermediateSize
+        }
         guard let vocabSize = json["vocab_size"] as? Int else {
             throw ModelBundleLoaderError.invalidConfig("Missing vocab_size")
         }
@@ -256,10 +276,23 @@ struct HFConfigDecoder {
             ?? json["norm_eps"] as? Double
             ?? json["block_norm_eps"] as? Double
             ?? 1e-6)
-        let ropeTheta = (json["rope_theta"] as? Double ?? 500000.0)
+        // RoPE parameters (Qwen3.5 nests rope_theta, partial_rotary_factor, mrope inside rope_parameters)
+        let ropeParams = json["rope_parameters"] as? [String: Any]
+        let ropeTheta = json["rope_theta"] as? Double
+            ?? (ropeParams?["rope_theta"] as? Double)
+            ?? 500000.0
         let tiedEmbeddings = json["tie_word_embeddings"] as? Bool
             ?? json["tie_embedding"] as? Bool
             ?? false
+
+        // M-RoPE axes (Qwen3.5 VLM spatial/temporal rotation)
+        let mropeAxes: MRoPEAxes?
+        if let sections = ropeParams?["mrope_section"] as? [Int], !sections.isEmpty {
+            let interleaved = ropeParams?["mrope_interleaved"] as? Bool ?? false
+            mropeAxes = MRoPEAxes(sections: sections, interleaved: interleaved)
+        } else {
+            mropeAxes = nil
+        }
 
         return ModelConfig(
             hiddenSize: hiddenSize,
@@ -277,18 +310,39 @@ struct HFConfigDecoder {
             ropeDimension: json["rope_dim"] as? Int ?? headDim,
             ropeScaling: nil,
             tiedEmbeddings: tiedEmbeddings,
-            expertCount: json["num_local_experts"] as? Int,
+            // LFM2 MoE uses "num_experts"; Mixtral/DeepSeek use "num_local_experts"
+            expertCount: json["num_local_experts"] as? Int ?? json["num_experts"] as? Int,
             expertsPerToken: json["num_experts_per_tok"] as? Int,
-            qkNorm: json["qk_norm"] as? Bool ?? false,
+            moeIntermediateSize: json["moe_intermediate_size"] as? Int,
+            // LFM2 always uses QK norm (q_layernorm + k_layernorm in every attention layer)
+            qkNorm: json["qk_norm"] as? Bool
+                ?? (["lfm2", "lfm2_moe"].contains(json["model_type"] as? String ?? "")),
             fullAttentionInterval: json["full_attention_interval"] as? Int,
-            ssmNumHeads: json["ssm_num_heads"] as? Int,
-            ssmKeyHeadDim: json["ssm_state_size"] as? Int,
-            ssmValueHeadDim: json["ssm_state_size"] as? Int,
-            convKernelSize: json["conv_kernel_size"] as? Int,
+            // Qwen3.5 uses linear_num_value_heads / linear_key_head_dim / linear_value_head_dim
+            ssmNumHeads: json["ssm_num_heads"] as? Int
+                ?? json["linear_num_value_heads"] as? Int,
+            ssmGroupCount: json["linear_num_key_heads"] as? Int,
+            ssmKeyHeadDim: json["ssm_state_size"] as? Int
+                ?? json["linear_key_head_dim"] as? Int,
+            ssmValueHeadDim: json["ssm_state_size"] as? Int
+                ?? json["linear_value_head_dim"] as? Int,
+            convKernelSize: json["conv_kernel_size"] as? Int
+                ?? json["linear_conv_kernel_dim"] as? Int,
             convLCache: json["conv_L_cache"] as? Int,
-            partialRotaryFactor: (json["partial_rotary_factor"] as? Double).map { Float($0) },
+            partialRotaryFactor: (json["partial_rotary_factor"] as? Double
+                ?? ropeParams?["partial_rotary_factor"] as? Double).map { Float($0) },
             slidingWindow: json["sliding_window"] as? Int,
-            layerTypes: json["layer_types"] as? [String]
+            // LFM2.5 has "layer_types"; LFM2 has "full_attn_idxs" instead
+            layerTypes: {
+                if let types = json["layer_types"] as? [String] { return types }
+                if let attnIdxs = json["full_attn_idxs"] as? [Int] {
+                    let attnSet = Set(attnIdxs)
+                    return (0..<layerCount).map { attnSet.contains($0) ? "full_attention" : "conv" }
+                }
+                return nil
+            }(),
+            numDenseLayers: json["num_dense_layers"] as? Int ?? 0,
+            mropeAxes: mropeAxes
         )
     }
 }
