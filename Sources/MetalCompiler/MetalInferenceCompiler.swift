@@ -867,7 +867,7 @@ public struct MetalInferenceCompiler: Sendable {
             let vHeadSlotBytes = cache.specification.bytesPerHeadSlot(
                 scheme: cache.specification.valueQuantizationScheme)
 
-            let pipeline = try getPipeline("flash_attn_decode")
+            let pipeline = try getPipeline("flash_attn_decode_f32")
             let threads = min(256, pipeline.maxTotalThreadsPerThreadgroup)
             let scratchSlotSize = slotDimension * scratchElementSize * maximumSequenceLength
 

@@ -114,6 +114,7 @@ public enum MetalKernelSource {
         KernelRegistryEntry(functionName: "rope_seq_f32", source: ropeSeqF32Source),
         KernelRegistryEntry(functionName: "qk_rms_norm_seq_f32", source: qkRMSNormSeqF32Source),
         KernelRegistryEntry(functionName: "conv1d_f32", source: conv1dF32Source),
+        KernelRegistryEntry(functionName: "flash_attn_decode_f32", source: flashAttentionDecodeF32Source),
         KernelRegistryEntry(functionName: "gemm_bf16_f32_to_half", source: gemmBF16F32ToHalfSource),
     ]
 
@@ -2673,4 +2674,26 @@ public enum MetalKernelSource {
         output[gid] = sum;
     }
     """
+
+    /// Flash attention decode with float32 Q/K/V/output (for prefill with float32 scratch).
+    /// KV cache stays in its native format (FP16 or Q8).
+    /// Only the kernel function is redefined — helper functions (read_kv_element, etc.) are shared.
+    private static let flashAttentionDecodeF32Source: String = {
+        // Extract only the kernel function (not the helper functions that precede it)
+        var src = flashAttentionDecodeSource
+        // Remove helper function definitions that would cause redefinition errors
+        if let kernelRange = src.range(of: "kernel void flash_attn_decode(") {
+            src = String(src[kernelRange.lowerBound...])
+        }
+        src = src.replacingOccurrences(of: "kernel void flash_attn_decode(", with: "kernel void flash_attn_decode_f32(")
+        src = src.replacingOccurrences(of: "device const half* query", with: "device const float* query")
+        src = src.replacingOccurrences(of: "device const half* newKey", with: "device const float* newKey")
+        src = src.replacingOccurrences(of: "device const half* newValue", with: "device const float* newValue")
+        src = src.replacingOccurrences(of: "device half* output", with: "device float* output")
+        src = src.replacingOccurrences(of: "float(query[", with: "(query[")
+        src = src.replacingOccurrences(of: "float(newKey[", with: "(newKey[")
+        src = src.replacingOccurrences(of: "float(newValue[", with: "(newValue[")
+        src = src.replacingOccurrences(of: "output[queryOffset + d] = half(", with: "output[queryOffset + d] = (")
+        return src
+    }()
 }
