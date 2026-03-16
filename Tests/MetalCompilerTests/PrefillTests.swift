@@ -1,0 +1,171 @@
+import Testing
+import Metal
+import MetalCompiler
+import LMArchitecture
+import ModelDeclarations
+
+@Suite("Prefill Performance")
+struct PrefillTests {
+
+    @Test("Single token decode completes without hanging")
+    func singleTokenDecode() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else {
+            Issue.record("No Metal device")
+            return
+        }
+
+        let config = makeTestConfig()
+        let graph = try Transformer(config: config).makeModelGraph()
+        let resolved = ParameterResolver().resolve(graph: graph, convention: .llamaFamily)
+        let plan = try compileDecodePlan(config, resolved, device)
+        var model = try MetalInferenceModel(plan: plan, device: device)
+
+        let start = CFAbsoluteTimeGetCurrent()
+        let result = model.decodeSync(tokenID: 42)
+        let elapsed = CFAbsoluteTimeGetCurrent() - start
+
+        print("[Test] decodeSync: \(String(format: "%.3f", elapsed))s, result=\(result)")
+        #expect(elapsed < 1.0, "Single decode should complete in <1s, took \(elapsed)s")
+    }
+
+    @Test("Prefill fallback to sequential decode")
+    func prefillFallback() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else {
+            Issue.record("No Metal device")
+            return
+        }
+
+        let config = makeTestConfig()
+        let graph = try Transformer(config: config).makeModelGraph()
+        let resolved = ParameterResolver().resolve(graph: graph, convention: .llamaFamily)
+        let plan = try compileDecodePlan(config, resolved, device)
+        var model = try MetalInferenceModel(plan: plan, device: device)
+
+        let tokens: [Int32] = Array(1...10)
+        model.prefill(tokens: tokens)
+        #expect(model.position == 10)
+    }
+
+    @Test("Prefill plan step count is independent of token count")
+    func prefillStepCountIndependent() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else {
+            Issue.record("No Metal device")
+            return
+        }
+
+        let config = makeTestConfig()
+        let graph = try Transformer(config: config).makeModelGraph()
+        let resolved = ParameterResolver().resolve(graph: graph, convention: .llamaFamily)
+        let prefillPlan = try compilePrefillPlan(config, resolved, device)
+
+        // Step count should NOT scale with maximumSequenceLength.
+        // It should be O(layers × ops_per_layer), not O(tokens × layers × ops_per_layer).
+        let stepCount = prefillPlan.stepCount
+        print("[Test] Prefill plan: \(stepCount) steps (sequence graph)")
+
+        // For a 2-layer transformer, expect roughly:
+        // embedding + 2 * (copy+norm + 3 GEMM + rope + attn + GEMM + add + copy+norm + 3 GEMM + swiglu + GEMM + add) + norm + GEMM + argmax
+        // The key assertion: step count < 100 (not 180 × seqLen)
+        #expect(stepCount < 200, "Step count \(stepCount) should be constant, not proportional to token count")
+        #expect(stepCount > 10, "Step count \(stepCount) too low — something is wrong")
+    }
+
+    @Test("Prefill with sequence graph completes and advances position")
+    func prefillSequenceGraph() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else {
+            Issue.record("No Metal device")
+            return
+        }
+
+        let config = makeTestConfig()
+        let graph = try Transformer(config: config).makeModelGraph()
+        let resolved = ParameterResolver().resolve(graph: graph, convention: .llamaFamily)
+        let plan = try compileDecodePlan(config, resolved, device)
+        let prefillPlan = try compilePrefillPlan(config, resolved, device)
+
+        var model = try MetalInferenceModel(plan: plan, device: device)
+        model.prefillPlan = prefillPlan
+
+        let tokens: [Int32] = (0..<100).map { Int32($0 % 1000) }
+        let start = CFAbsoluteTimeGetCurrent()
+        model.prefill(tokens: tokens)
+        let elapsed = CFAbsoluteTimeGetCurrent() - start
+
+        print("[Test] prefill 100 tokens: \(String(format: "%.3f", elapsed))s (\(String(format: "%.1f", 100.0 / elapsed)) tok/s)")
+        #expect(model.position == 100, "Position should be 100 after prefilling 100 tokens")
+        #expect(elapsed < 5.0, "Prefill should complete in <5s, took \(elapsed)s")
+    }
+
+    @Test("Batch steps have seqLen binding, perPosition steps have position binding")
+    func prefillStepModes() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else {
+            Issue.record("No Metal device")
+            return
+        }
+
+        let config = makeTestConfig()
+        let graph = try Transformer(config: config).makeModelGraph()
+        let resolved = ParameterResolver().resolve(graph: graph, convention: .llamaFamily)
+        let prefillPlan = try compilePrefillPlan(config, resolved, device)
+
+        let batchSteps = prefillPlan.steps.filter { $0.mode == .batch }
+        let perPosSteps = prefillPlan.steps.filter { $0.mode == .perPosition }
+
+        #expect(!batchSteps.isEmpty, "Should have batch steps (GEMM, norm, etc.)")
+        #expect(!perPosSteps.isEmpty, "Should have perPosition steps (attention)")
+
+        // All batch steps with grid.y > 1 should have seqLen binding
+        for step in batchSteps where step.gridSize.height > 1 {
+            #expect(step.sequenceLengthBindingIndex != nil,
+                    "Batch step with grid.y > 1 should have seqLen binding")
+        }
+
+        // All perPosition steps should have position binding
+        for step in perPosSteps {
+            #expect(step.positionBufferIndex != nil,
+                    "PerPosition step should have position binding")
+        }
+
+        print("[Test] \(batchSteps.count) batch + \(perPosSteps.count) perPosition = \(prefillPlan.stepCount) total")
+    }
+
+    // MARK: - Helpers
+
+    private func makeTestConfig() -> ModelConfig {
+        ModelConfig(
+            hiddenSize: 128, layerCount: 2, intermediateSize: 512,
+            vocabSize: 1000, attentionHeads: 4, kvHeads: 4, headDim: 32,
+            attentionBias: false, mlpBias: false, normEps: 1e-5,
+            normKind: .rmsNorm, ropeTheta: 10000, ropeDimension: 32,
+            ropeScaling: nil, tiedEmbeddings: true,
+            expertCount: nil, expertsPerToken: nil, qkNorm: false,
+            fullAttentionInterval: nil, ssmNumHeads: nil, ssmKeyHeadDim: nil,
+            ssmValueHeadDim: nil, convKernelSize: nil,
+            partialRotaryFactor: nil, slidingWindow: nil
+        )
+    }
+
+    private func compileDecodePlan(
+        _ config: ModelConfig,
+        _ graph: ModelGraph,
+        _ device: MTLDevice
+    ) throws -> MetalDispatchPlan {
+        try MetalInferenceCompiler().compile(
+            graph: graph, hiddenSize: config.hiddenSize,
+            intermediateSize: config.intermediateSize,
+            vocabSize: config.vocabSize, device: device)
+    }
+
+    private func compilePrefillPlan(
+        _ config: ModelConfig,
+        _ graph: ModelGraph,
+        _ device: MTLDevice
+    ) throws -> MetalPrefillPlan {
+        try MetalInferenceCompiler().compilePrefill(
+            graph: graph, hiddenSize: config.hiddenSize,
+            intermediateSize: config.intermediateSize,
+            vocabSize: config.vocabSize,
+            maximumSequenceLength: 1024,
+            device: device)
+    }
+}

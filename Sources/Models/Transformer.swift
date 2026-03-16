@@ -1,4 +1,4 @@
-import SwiftLM
+import LMArchitecture
 
 /// Standard pre-norm decoder-only transformer.
 ///

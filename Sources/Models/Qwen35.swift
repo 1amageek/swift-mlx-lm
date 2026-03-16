@@ -1,4 +1,4 @@
-import SwiftLM
+import LMArchitecture
 
 /// Qwen 3.5 hybrid DeltaNet + Full Attention model.
 ///

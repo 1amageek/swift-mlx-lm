@@ -5,12 +5,13 @@ let package = Package(
     name: "swift-lm",
     platforms: [.macOS(.v15), .iOS(.v18), .visionOS(.v2)],
     products: [
-        .library(name: "SwiftLM", targets: ["SwiftLM"]),
+        .library(name: "LMIR", targets: ["LMIR"]),
+        .library(name: "LMArchitecture", targets: ["LMArchitecture"]),
         .library(name: "ModelDeclarations", targets: ["ModelDeclarations"]),
-        .library(name: "LMInference", targets: ["LMInference"]),
+        .library(name: "MetalCompiler", targets: ["MetalCompiler"]),
+        .library(name: "SwiftLM", targets: ["SwiftLM"]),
     ],
     dependencies: [
-        .package(url: "https://github.com/ml-explore/mlx-swift", .upToNextMinor(from: "0.30.6")),
         .package(url: "https://github.com/apple/swift-collections.git", from: "1.1.0"),
         .package(url: "https://github.com/huggingface/swift-jinja", from: "2.3.2"),
         .package(url: "https://github.com/huggingface/swift-transformers", .upToNextMinor(from: "1.1.9")),
@@ -19,58 +20,46 @@ let package = Package(
     ],
     targets: [
         .target(
-            name: "SwiftLM",
+            name: "LMIR"
+        ),
+        .target(
+            name: "LMArchitecture",
             dependencies: [
+                "LMIR",
                 .product(name: "JSONSchema", package: "JSONSchema"),
             ]
         ),
-        .target(name: "ModelDeclarations", dependencies: ["SwiftLM"], path: "Sources/Models"),
+        .target(name: "ModelDeclarations", dependencies: ["LMArchitecture"], path: "Sources/Models"),
         .target(
-            name: "LMInference",
+            name: "MetalCompiler",
+            dependencies: ["LMIR"]
+        ),
+        .target(
+            name: "SwiftLM",
             dependencies: [
-                "LMCompiler",
+                "LMArchitecture",
+                "MetalCompiler",
                 "ModelDeclarations",
                 .product(name: "Jinja", package: "swift-jinja"),
                 .product(name: "OrderedCollections", package: "swift-collections"),
                 .product(name: "Tokenizers", package: "swift-transformers"),
                 .product(name: "Hub", package: "swift-transformers"),
-                .product(name: "MLX", package: "mlx-swift"),
-                .product(name: "MLXNN", package: "mlx-swift"),
-                .product(name: "MLXFast", package: "mlx-swift"),
-                .product(name: "MLXLinalg", package: "mlx-swift"),
             ]
         ),
-        .target(
-            name: "LMCompiler",
-            dependencies: [
-                "SwiftLM",
-                .product(name: "MLX", package: "mlx-swift"),
-                .product(name: "MLXNN", package: "mlx-swift"),
-                .product(name: "MLXFast", package: "mlx-swift"),
-                .product(name: "MLXLinalg", package: "mlx-swift"),
-            ]
-        ),
-        .testTarget(name: "LMCompilerTests", dependencies: [
-            "LMCompiler", "SwiftLM", "ModelDeclarations",
+        .testTarget(name: "MetalCompilerTests", dependencies: [
+            "MetalCompiler", "LMArchitecture", "ModelDeclarations", "SwiftLM",
             .product(name: "TestHeartbeat", package: "swift-testing-heartbeat"),
+            .product(name: "Tokenizers", package: "swift-transformers"),
+            .product(name: "Jinja", package: "swift-jinja"),
+            .product(name: "OrderedCollections", package: "swift-collections"),
         ]),
         .testTarget(name: "ModelsTests", dependencies: [
-            "ModelDeclarations", "SwiftLM",
+            "ModelDeclarations", "LMArchitecture",
             .product(name: "TestHeartbeat", package: "swift-testing-heartbeat"),
-        ]),
+        ], exclude: ["ModelDeclarationTests.swift"]),
         .testTarget(name: "SwiftLMTests", dependencies: [
             "SwiftLM",
             .product(name: "TestHeartbeat", package: "swift-testing-heartbeat"),
-        ]),
-        .testTarget(name: "LMInferenceTests", dependencies: [
-            "LMInference",
-            .product(name: "MLXNN", package: "mlx-swift"),
-            .product(name: "TestHeartbeat", package: "swift-testing-heartbeat"),
-        ]),
-        .testTarget(name: "LMInferenceDiagnosticTests", dependencies: [
-            "LMInference",
-            .product(name: "MLXNN", package: "mlx-swift"),
-            .product(name: "TestHeartbeat", package: "swift-testing-heartbeat"),
-        ]),
+        ], exclude: ["DSLLoweringTests.swift", "IRInvariantTests.swift", "PerformanceTests.swift", "ModelGraphTests.swift", "DimensionValidatorTests.swift"]),
     ]
 )

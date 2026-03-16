@@ -1,4 +1,4 @@
-import SwiftLM
+import LMArchitecture
 
 /// Cohere Command-R architecture.
 ///
