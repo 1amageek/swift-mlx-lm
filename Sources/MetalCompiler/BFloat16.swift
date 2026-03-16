@@ -112,8 +112,15 @@ extension BFloat16: CustomStringConvertible {
 // MARK: - Float Interop
 
 extension Float {
-    /// Create a Float32 from a BFloat16 value.
+    /// Create a Float32 from a BFloat16 value (exact).
     public init(_ value: BFloat16) {
         self = Float(bitPattern: UInt32(value.bitPattern) << 16)
+    }
+}
+
+extension Float16 {
+    /// Create a Float16 from a BFloat16 value (may lose precision).
+    public init(_ value: BFloat16) {
+        self = Float16(Float(value))
     }
 }
