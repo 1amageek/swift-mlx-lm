@@ -408,7 +408,16 @@ public struct STAFConverter: Sendable {
         switch entry.schemeIdentifier {
         case .fp16RowMajor, .passthrough:
             if entry.info.dtype == .float32 {
-                return convertFloat32ToFloat16(tensorData)
+                let count = tensorData.count / MemoryLayout<Float>.size
+                var output = Data(count: count * MemoryLayout<Float16>.size)
+                tensorData.withUnsafeBytes { source in
+                    output.withUnsafeMutableBytes { destination in
+                        let floats = source.bindMemory(to: Float.self)
+                        let halfs = destination.bindMemory(to: Float16.self)
+                        for i in 0..<count { halfs[i] = Float16(floats[i]) }
+                    }
+                }
+                return output
             }
             return tensorData
 
@@ -534,39 +543,6 @@ public struct STAFConverter: Sendable {
         return data
     }
 
-    private func convertFloat32ToFloat16(_ data: Data) -> Data {
-        let count = data.count / 4
-        var output = Data(count: count * 2)
-
-        data.withUnsafeBytes { source in
-            output.withUnsafeMutableBytes { destination in
-                let floats = source.bindMemory(to: Float.self)
-                let halfs = destination.bindMemory(to: Float16.self)
-                for i in 0..<count {
-                    halfs[i] = Float16(floats[i])
-                }
-            }
-        }
-
-        return output
-    }
-
-    private func convertBFloat16ToFloat16(_ data: Data) -> Data {
-        let count = data.count / MemoryLayout<BFloat16>.size
-        var output = Data(count: count * MemoryLayout<Float16>.size)
-
-        data.withUnsafeBytes { source in
-            output.withUnsafeMutableBytes { destination in
-                let bf16 = source.bindMemory(to: BFloat16.self)
-                let fp16 = destination.bindMemory(to: Float16.self)
-                for i in 0..<count {
-                    fp16[i] = bf16[i].float16Value
-                }
-            }
-        }
-
-        return output
-    }
 
     // MARK: - Helpers
 
