@@ -105,7 +105,11 @@ public struct Reduction: PrimitiveMetalKernelFragment {
     public var isFusable: Bool { true }
     public var normEpsilon: Float? { epsilon }
     public func kernelName(context: KernelContext) -> String {
-        context.weightFormat == .bfloat16 ? "rms_norm_bf16" : "rms_norm"
+        let bf16 = context.weightFormat == .bfloat16
+        if context.bufferPrecision == .float32 {
+            return bf16 ? "rms_norm_seq_bf16_f32_inplace" : "rms_norm_seq_f32_inplace"
+        }
+        return bf16 ? "rms_norm_bf16" : "rms_norm"
     }
     public var dispatchDimension: MetalDispatchDimension { .reduction(dimension: dimension) }
     public var weightSlots: [MetalWeightSlot] { [MetalWeightSlot(field: nil, role: .weight)] }
@@ -132,8 +136,10 @@ public struct ElementwiseFragment: PrimitiveMetalKernelFragment {
     public var isFusable: Bool { true }
     public func kernelName(context: KernelContext) -> String {
         switch kind {
-        case .swiglu: return "swiglu"
-        case .sigmoidGate: return "sigmoid_gate"
+        case .swiglu:
+            return context.bufferPrecision == .float32 ? "swiglu_seq_f32" : "swiglu"
+        case .sigmoidGate:
+            return "sigmoid_gate"
         }
     }
     public var dispatchDimension: MetalDispatchDimension { .elementwise(count: count) }
@@ -175,7 +181,11 @@ public struct GatherFragment: PrimitiveMetalKernelFragment {
 
     public var isFusable: Bool { false }
     public func kernelName(context: KernelContext) -> String {
-        context.weightFormat == .bfloat16 ? "embedding_lookup_bf16" : "embedding_lookup"
+        let bf16 = context.weightFormat == .bfloat16
+        if context.bufferPrecision == .float32 {
+            return bf16 ? "embedding_lookup_seq_bf16_f32" : "embedding_lookup_seq_f32"
+        }
+        return bf16 ? "embedding_lookup_bf16" : "embedding_lookup"
     }
     public var dispatchDimension: MetalDispatchDimension { .gather(count: embeddingDimension) }
     public var weightSlots: [MetalWeightSlot] { [MetalWeightSlot(field: nil, role: .weight)] }
@@ -192,7 +202,9 @@ public struct ArgmaxFragment: PrimitiveMetalKernelFragment {
     }
 
     public var isFusable: Bool { false }
-    public func kernelName(context: KernelContext) -> String { "argmax" }
+    public func kernelName(context: KernelContext) -> String {
+        context.bufferPrecision == .float32 ? "argmax_f32" : "argmax"
+    }
     public var dispatchDimension: MetalDispatchDimension { .reduction(dimension: vocabularySize) }
 }
 
@@ -216,7 +228,9 @@ public struct FlashAttentionFragment: PrimitiveMetalKernelFragment {
     }
 
     public var isFusable: Bool { false }
-    public func kernelName(context: KernelContext) -> String { "flash_attn_decode" }
+    public func kernelName(context: KernelContext) -> String {
+        context.bufferPrecision == .float32 ? "flash_attn_decode_f32" : "flash_attn_decode"
+    }
     public var dispatchDimension: MetalDispatchDimension {
         .perHead(headCount: headCount)
     }
@@ -244,7 +258,9 @@ public struct RoPEFragment: PrimitiveMetalKernelFragment {
 
     public var isFusable: Bool { false }
     public var isInPlace: Bool { true }
-    public func kernelName(context: KernelContext) -> String { "rope" }
+    public func kernelName(context: KernelContext) -> String {
+        context.bufferPrecision == .float32 ? "rope_seq_f32" : "rope"
+    }
     public var dispatchDimension: MetalDispatchDimension {
         .perHead(headCount: max(headCount, kvHeadCount))
     }
@@ -290,7 +306,8 @@ public struct Conv1dFragment: PrimitiveMetalKernelFragment {
 
     public var isFusable: Bool { false }
     public func kernelName(context: KernelContext) -> String {
-        context.weightFormat == .bfloat16 ? "conv_state_update_bf16" : "conv_state_update"
+        if context.bufferPrecision == .float32 { return "conv1d_causal_seq_f32" }
+        return context.weightFormat == .bfloat16 ? "conv_state_update_bf16" : "conv_state_update"
     }
     public var dispatchDimension: MetalDispatchDimension { .elementwise(count: dimension) }
     public var weightSlots: [MetalWeightSlot] { [MetalWeightSlot(field: "conv_weight", role: .weight)] }

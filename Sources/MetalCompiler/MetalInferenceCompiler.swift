@@ -2173,8 +2173,7 @@ public struct MetalInferenceCompiler: Sendable {
             case .fragment(let frag):
                 let weightFormat = resolveWeightFormat(forFragment: frag, entry: entry, stafWeightStore: stafWeightStore)
                 let fragCtx = KernelContext(bufferPrecision: bufferPrecision, weightFormat: weightFormat)
-                name = frag.kernelName(context: fragCtx)
-                let kernelName = resolveKernelNameForPrecision(baseName: name, bufferPrecision: bufferPrecision)
+                let kernelName = frag.kernelName(context: fragCtx)
                 if generatedNames.insert(kernelName).inserted {
                     if let src = MetalSourceGenerator.generateForFragment(frag, name: kernelName, bufferPrecision: bufferPrecision, weightFormat: weightFormat) {
                         if frag is FlashAttentionFragment { needsFlashAttnHelper = true }
@@ -2332,22 +2331,6 @@ public struct MetalInferenceCompiler: Sendable {
         return .float16
     }
 
-    /// Derive prefill/decode kernel name from base name + precision.
-    private func resolveKernelNameForPrecision(baseName: String, bufferPrecision: MetalSourceGenerator.BufferPrecision) -> String {
-        guard bufferPrecision == .float32 else { return baseName }
-        // Prefill F32 kernel naming convention
-        switch baseName {
-        case "rms_norm", "rms_norm_bf16": return baseName.replacingOccurrences(of: "rms_norm", with: "rms_norm_seq") + "_f32_inplace"
-        case "swiglu": return "swiglu_seq_f32"
-        case "embedding_lookup", "embedding_lookup_bf16": return baseName.replacingOccurrences(of: "embedding_lookup", with: "embedding_lookup_seq") + "_f32"
-        case "argmax": return "argmax_f32"
-        case "rope": return "rope_seq_f32"
-        case "qk_rms_norm", "qk_rms_norm_bf16": return "qk_rms_norm_seq_f32"
-        case "conv_state_update", "conv_state_update_bf16": return "conv1d_causal_seq_f32"
-        case "flash_attn_decode": return "flash_attn_decode_f32"
-        default: return baseName
-        }
-    }
 
     // MARK: - Helpers
 
