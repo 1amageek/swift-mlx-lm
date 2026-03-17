@@ -172,10 +172,12 @@ public struct MetalInferenceCompiler: Sendable {
         var convDimension = 0
         var convKernelSize = 0
         for entry in fusedEntries {
-            if case .fragment(let frag) = entry.kind, let convOp = frag as? Conv1dFragment {
+            if case .fragment(let frag) = entry.kind,
+               let convSlot = frag.cacheSlots.first(where: { $0.kind == .conv }),
+               case .elementwise(let dim) = frag.dispatchDimension {
                 convLayerCount += 1
-                convDimension = max(convDimension, convOp.dimension)
-                convKernelSize = max(convKernelSize, convOp.kernelSize)
+                convDimension = max(convDimension, dim)
+                convKernelSize = max(convKernelSize, convSlot.temporalSize)
             }
         }
         let convStateBuffer: MTLBuffer?
@@ -2002,12 +2004,12 @@ public struct MetalInferenceCompiler: Sendable {
                 let kernelName = frag.kernelName(context: fragCtx)
                 if generatedNames.insert(kernelName).inserted {
                     if let src = MetalSourceGenerator.generateForFragment(frag, name: kernelName, bufferPrecision: bufferPrecision, weightFormat: weightFormat) {
-                        if frag is FlashAttentionFragment { needsFlashAttnHelper = true }
+                        if !frag.cacheSlots.filter({ $0.kind == .kv }).isEmpty { needsFlashAttnHelper = true }
                         sources.append(src)
                     }
                 }
-                // Conv1d in prefill also needs extract_conv_state kernel
-                if frag is Conv1dFragment && bufferPrecision == .float32 {
+                // Conv cache fragments in prefill also need extract_conv_state kernel
+                if frag.cacheSlots.contains(where: { $0.kind == .conv }) && bufferPrecision == .float32 {
                     let extractName = "extract_conv_state_f32"
                     if generatedNames.insert(extractName).inserted {
                         sources.append(MetalSourceGenerator.generateExtractConvState(name: extractName, bufferPrecision: bufferPrecision))

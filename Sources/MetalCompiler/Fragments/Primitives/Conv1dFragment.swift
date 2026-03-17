@@ -17,7 +17,7 @@ public struct Conv1dFragment: PrimitiveMetalKernelFragment {
     }
     public var dispatchDimension: MetalDispatchDimension { .elementwise(count: dimension) }
     public var weightSlots: [MetalWeightSlot] { [MetalWeightSlot(field: "conv_weight", role: .weight)] }
-    public var cacheSlots: [MetalCacheSlot] { [MetalCacheSlot(name: "conv_cache", kind: .conv)] }
+    public var cacheSlots: [MetalCacheSlot] { [MetalCacheSlot(name: "conv_cache", kind: .conv, temporalSize: kernelSize)] }
 
     public func decodeBindings(context: BufferBindingContext) -> FragmentBindings {
         let (weightBuffer, weightOffset) = context.resolveWeight("conv_weight")

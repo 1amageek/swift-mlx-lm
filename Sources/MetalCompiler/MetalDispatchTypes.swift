@@ -265,10 +265,13 @@ public struct MetalWeightSlot: Sendable {
 public struct MetalCacheSlot: Sendable {
     public let name: String
     public let kind: MetalCacheKind
+    /// Temporal window size for conv cache (kernelSize), or 0 for non-conv caches.
+    public let temporalSize: Int
 
-    public init(name: String, kind: MetalCacheKind = .kv) {
+    public init(name: String, kind: MetalCacheKind = .kv, temporalSize: Int = 0) {
         self.name = name
         self.kind = kind
+        self.temporalSize = temporalSize
     }
 }
 

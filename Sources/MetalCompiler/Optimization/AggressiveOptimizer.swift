@@ -22,21 +22,25 @@ public struct AggressiveOptimizer: DispatchOptimizer {
         var i = 0
 
         while i < primitives.count {
-            // Rule 1: Batch consecutive projections (LinearFragment → .projection)
-            // Only batch non-output projections. The last LinearFragment in the
+            // Rule 1: Batch consecutive projections (.gemv dispatch dimension)
+            // Only batch non-output projections. The last projection in the
             // composite is likely the output projection (o_proj, down_proj) and
             // must remain as .projection for markLastProjectionAsOutput().
-            if primitives[i].fragment is LinearFragment {
-                let linear = primitives[i].fragment as! LinearFragment
+            if case .gemv(_, let inputDim) = primitives[i].fragment.dispatchDimension,
+               let linear = primitives[i].fragment as? LinearFragment {
                 var batch: [CollectedPrimitive] = [primitives[i]]
                 var j = i + 1
                 while j < primitives.count,
-                      let nextLinear = primitives[j].fragment as? LinearFragment,
-                      nextLinear.inputDimension == linear.inputDimension {
-                    // Stop before the last LinearFragment in the composite —
+                      case .gemv(_, let nextInputDim) = primitives[j].fragment.dispatchDimension,
+                      nextInputDim == inputDim,
+                      primitives[j].fragment is LinearFragment {
+                    // Stop before the last projection in the composite —
                     // it might be the output projection.
-                    let isLastLinear = !primitives[(j+1)...].contains { $0.fragment is LinearFragment }
-                    if isLastLinear { break }
+                    let isLastProjection = !primitives[(j+1)...].contains {
+                        if case .gemv = $0.fragment.dispatchDimension { return true }
+                        return false
+                    }
+                    if isLastProjection { break }
                     batch.append(primitives[j])
                     j += 1
                 }
