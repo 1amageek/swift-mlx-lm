@@ -267,11 +267,18 @@ public struct MetalCacheSlot: Sendable {
     public let kind: MetalCacheKind
     /// Temporal window size for conv cache (kernelSize), or 0 for non-conv caches.
     public let temporalSize: Int
+    /// KV head count (for .kv caches).
+    public let kvHeadCount: Int
+    /// Head dimension (for .kv caches).
+    public let headDimension: Int
 
-    public init(name: String, kind: MetalCacheKind = .kv, temporalSize: Int = 0) {
+    public init(name: String, kind: MetalCacheKind = .kv, temporalSize: Int = 0,
+                kvHeadCount: Int = 0, headDimension: Int = 0) {
         self.name = name
         self.kind = kind
         self.temporalSize = temporalSize
+        self.kvHeadCount = kvHeadCount
+        self.headDimension = headDimension
     }
 }
 

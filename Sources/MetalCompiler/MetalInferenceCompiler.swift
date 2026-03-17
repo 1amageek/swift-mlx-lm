@@ -333,10 +333,12 @@ public struct MetalInferenceCompiler: Sendable {
         var prefillConvDimension = 0
         var prefillConvKernelSize = 0
         for entry in fusedEntries {
-            if case .fragment(let frag) = entry.kind, let convOp = frag as? Conv1dFragment {
+            if case .fragment(let frag) = entry.kind,
+               let convSlot = frag.cacheSlots.first(where: { $0.kind == .conv }),
+               case .elementwise(let dim) = frag.dispatchDimension {
                 prefillConvLayerCount += 1
-                prefillConvDimension = max(prefillConvDimension, convOp.dimension)
-                prefillConvKernelSize = max(prefillConvKernelSize, convOp.kernelSize)
+                prefillConvDimension = max(prefillConvDimension, dim)
+                prefillConvKernelSize = max(prefillConvKernelSize, convSlot.temporalSize)
             }
         }
         // Use shared conv_state buffer if provided, otherwise allocate a new one
@@ -1414,12 +1416,11 @@ public struct MetalInferenceCompiler: Sendable {
         kernelContext: KernelContext
     ) {
         if let primitive = fragment as? any PrimitiveMetalKernelFragment {
-            // Register KV cache slot for fragments that declare cache slots
-            if !primitive.cacheSlots.isEmpty,
-               let flash = primitive as? FlashAttentionFragment {
+            // Register KV cache slot from fragment's cache slot metadata
+            for slot in primitive.cacheSlots where slot.kind == .kv {
                 context.cacheSlots.append(CacheSlotInfo(
-                    kvHeadCount: flash.kvHeadCount,
-                    headDimension: flash.headDimension))
+                    kvHeadCount: slot.kvHeadCount,
+                    headDimension: slot.headDimension))
             }
             primitives.append(CollectedPrimitive(
                 fragment: primitive,

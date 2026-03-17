@@ -24,27 +24,16 @@ public struct StandardOptimizer: DispatchOptimizer {
             var index = 0
 
             while index < result.count {
-                // Extract Reduction from .fragment
-                func extractReduction(at i: Int) -> Reduction? {
-                    if case .fragment(let frag) = result[i].kind {
-                        return frag as? Reduction
-                    }
-                    return nil
-                }
-
                 // Check if the fragment at index is a fusable reduction
-                // (generic: checks isFusable + .reduction dimension, not concrete type)
+                // Uses protocol properties only — no concrete type checks
                 func isFusableReduction(at i: Int) -> (dimension: Int, epsilon: Float)? {
                     guard case .fragment(let frag) = result[i].kind,
                           frag.isFusable,
-                          case .reduction(let dim) = frag.dispatchDimension else {
+                          case .reduction(let dim) = frag.dispatchDimension,
+                          let epsilon = frag.normEpsilon else {
                         return nil
                     }
-                    // Extract epsilon from Reduction fragment
-                    if let reduction = frag as? Reduction {
-                        return (dim, reduction.epsilon)
-                    }
-                    return nil
+                    return (dim, epsilon)
                 }
 
                 // Pattern 1: structuralAdd + structuralCopy + fusable reduction → 3→1

@@ -114,13 +114,11 @@ public struct AggressiveOptimizer: DispatchOptimizer {
                 func isFusableReduction(at i: Int) -> (dimension: Int, epsilon: Float)? {
                     guard case .fragment(let frag) = result[i].kind,
                           frag.isFusable,
-                          case .reduction(let dim) = frag.dispatchDimension else {
+                          case .reduction(let dim) = frag.dispatchDimension,
+                          let epsilon = frag.normEpsilon else {
                         return nil
                     }
-                    if let reduction = frag as? Reduction {
-                        return (dim, reduction.epsilon)
-                    }
-                    return nil
+                    return (dim, epsilon)
                 }
 
                 // Pattern 1: structuralAdd + structuralCopy + fusable reduction → 3→1

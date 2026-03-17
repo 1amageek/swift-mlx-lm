@@ -24,7 +24,9 @@ public struct FlashAttentionFragment: PrimitiveMetalKernelFragment {
     public var dispatchDimension: MetalDispatchDimension {
         .perHead(headCount: headCount)
     }
-    public var cacheSlots: [MetalCacheSlot] { [MetalCacheSlot(name: "kv_cache", kind: .kv)] }
+    public var cacheSlots: [MetalCacheSlot] {
+        [MetalCacheSlot(name: "kv_cache", kind: .kv, kvHeadCount: kvHeadCount, headDimension: headDimension)]
+    }
 
     public func decodeBindings(context: BufferBindingContext) -> FragmentBindings {
         let scale: Float = 1.0 / Float(headDimension).squareRoot()
