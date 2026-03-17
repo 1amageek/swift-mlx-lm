@@ -60,13 +60,10 @@ public final class ModelContainer: @unchecked Sendable {
         switch input.prompt {
         case .text(let prompt):
             text = prompt
-            print("[ModelContainer] prepare: text prompt, \(prompt.count) chars")
         case .chat(let messages):
             text = try applyChatTemplate(messages: messages)
-            print("[ModelContainer] prepare: chat template applied, \(messages.count) messages → \(text.count) chars")
         }
         let tokens = modelTokenizer.encode(text: text)
-        print("[ModelContainer] prepare: \(tokens.count) tokens, first=\(tokens.first ?? -1) last=\(tokens.last ?? -1)")
         return LMInput(tokens: tokens)
     }
 
@@ -115,62 +112,36 @@ public final class ModelContainer: @unchecked Sendable {
                 var tokenCount = 0
                 let maxTokens = parameters.maxTokens ?? 1024
 
-                print("[ModelContainer] generate: \(input.text.tokens.count) prompt tokens, maxTokens=\(maxTokens)")
-                print("[ModelContainer] dispatch plan: \(self.inferenceModel.plan.steps.count) steps")
-                // Dump ALL tokens for diagnostic reproduction
-                let allTokens = input.text.tokens.map(String.init).joined(separator: ",")
-                print("[ModelContainer] ALL_TOKENS=[\(allTokens)]")
-
                 // Prefill: batch all prompt tokens with minimal GPU sync
                 let prefillStart = CFAbsoluteTimeGetCurrent()
                 let promptTokens = input.text.tokens.map { Int32($0) }
                 let firstToken = self.inferenceModel.prefill(tokens: promptTokens)
                 let prefillTime = CFAbsoluteTimeGetCurrent() - prefillStart
-                print("[ModelContainer] prefill done: \(input.text.tokens.count) tokens [\(String(format: "%.3f", prefillTime))s] \(String(format: "%.0f", Double(input.text.tokens.count) / prefillTime)) tok/s")
-                print("[ModelContainer] first predicted token: \(firstToken)")
 
                 // First generated token comes from prefill argmax
                 guard firstToken >= 0 else {
-                    print("[ModelContainer] prefill returned negative token, aborting")
                     continuation.finish()
                     return
                 }
                 if self.modelConfiguration.eosTokenIds.contains(Int(firstToken)) {
-                    print("[ModelContainer] prefill predicted EOS token \(firstToken)")
                     continuation.finish()
                     return
                 }
 
                 // Yield the first token (from prefill)
                 let firstText = self.modelTokenizer.decode(tokens: [Int(firstToken)])
-                print("[ModelContainer] token 0: id=\(firstToken) text='\(firstText)'")
                 continuation.yield(.chunk(firstText))
                 tokenCount += 1
 
                 // Decode subsequent tokens
                 var previousToken = firstToken
                 while tokenCount < maxTokens {
-                    let decodeStart = CFAbsoluteTimeGetCurrent()
                     let outputToken = self.inferenceModel.decodeSync(tokenID: previousToken)
-                    let decodeTime = CFAbsoluteTimeGetCurrent() - decodeStart
 
-                    if tokenCount < 10 || tokenCount % 50 == 0 {
-                        print("[ModelContainer] decode step \(tokenCount): input=\(previousToken) → output=\(outputToken) [\(String(format: "%.3f", decodeTime))s]")
-                    }
-
-                    if outputToken < 0 {
-                        print("[ModelContainer] decode returned negative token, stopping")
-                        break
-                    }
-                    if self.modelConfiguration.eosTokenIds.contains(Int(outputToken)) {
-                        print("[ModelContainer] EOS token \(outputToken), stopping after \(tokenCount) tokens")
-                        break
-                    }
+                    if outputToken < 0 { break }
+                    if self.modelConfiguration.eosTokenIds.contains(Int(outputToken)) { break }
 
                     let text = self.modelTokenizer.decode(tokens: [Int(outputToken)])
-                    if tokenCount < 10 {
-                        print("[ModelContainer] token \(tokenCount): id=\(outputToken) text='\(text)'")
-                    }
                     continuation.yield(.chunk(text))
 
                     previousToken = outputToken
@@ -179,7 +150,8 @@ public final class ModelContainer: @unchecked Sendable {
 
                 let totalTime = CFAbsoluteTimeGetCurrent() - startTime
                 let tokensPerSecond = totalTime > 0 ? Double(tokenCount) / totalTime : 0
-                print("[ModelContainer] generation complete: \(tokenCount) tokens, \(String(format: "%.1f", tokensPerSecond)) tok/s, \(String(format: "%.3f", totalTime))s")
+                let prefillTokPerSec = prefillTime > 0 ? Double(input.text.tokens.count) / prefillTime : 0
+                print("[ModelContainer] \(tokenCount) tokens (\(String(format: "%.0f", prefillTokPerSec)) prefill, \(String(format: "%.1f", tokensPerSecond)) decode tok/s) [\(String(format: "%.1f", totalTime))s]")
                 continuation.yield(.info(CompletionInfo(
                     tokenCount: tokenCount,
                     tokensPerSecond: tokensPerSecond,

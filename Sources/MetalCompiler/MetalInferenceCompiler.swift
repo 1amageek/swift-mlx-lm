@@ -190,22 +190,7 @@ public struct MetalInferenceCompiler: Sendable {
             tokenIn: tokenInputBuffer, tokenOut: tokenOutputBuffer
         )
 
-        // Log STAF weight store contents
-        if let staf = stafWeightStore {
-            print("[Compiler] STAF has \(staf.entries.count) tensors")
-            for (name, _) in staf.entries.prefix(5) {
-                print("[Compiler]   tensor: \(name)")
-            }
-        } else {
-            print("[Compiler] WARNING: no STAF weight store")
-        }
-
-        // Log parameterBindings from IR
-        var totalBindings = 0
-        for entry in fusedEntries {
-            totalBindings += entry.parameterBindings.count
-        }
-        print("[Compiler] \(fusedEntries.count) dispatch entries, \(totalBindings) total parameterBindings")
+        print("[Compiler] \(fusedEntries.count) dispatch entries (\(optimizer.name) optimizer)")
 
         // Phase 5: Build dispatch steps with buffer routing
         var steps: [MetalDispatchStep] = []
@@ -418,7 +403,7 @@ public struct MetalInferenceCompiler: Sendable {
             steps.append(contentsOf: prefillSteps)
         }
 
-        print("[Compiler] prefill plan: \(steps.count) steps (sequence graph, token-independent)")
+        // Prefill plan compiled silently — step count reported by ModelBundleLoader
 
         return MetalPrefillPlan(
             steps: steps,

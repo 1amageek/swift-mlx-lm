@@ -154,47 +154,6 @@ public struct MetalInferenceModel: @unchecked Sendable {
             return -1
         }
 
-        // Diagnostic: check prefill output before transfer
-        do {
-            let hiddenDim = self.plan.buffers.hidden.length / MemoryLayout<Float32>.size
-            let prefillHiddenStride = hiddenDim * MemoryLayout<Float32>.size
-            let lastOff = (seqLen - 1) * prefillHiddenStride
-            let pHidden = (prefill.buffers.hidden.contents() + lastOff).bindMemory(to: Float32.self, capacity: hiddenDim)
-            var pNorm: Float = 0; var pNan = 0; var pZero = 0
-            for i in 0..<hiddenDim {
-                let v = Float(pHidden[i])
-                if v.isNaN { pNan += 1 }
-                if v == 0 { pZero += 1 }
-                pNorm += v * v
-            }
-            pNorm = sqrtf(pNorm)
-            print("[Prefill→Decode] prefill hidden (last token): [\(Float(pHidden[0])), \(Float(pHidden[1])), \(Float(pHidden[2])), \(Float(pHidden[3]))] norm=\(pNorm) nan=\(pNan) zero=\(pZero)/\(hiddenDim)")
-
-            // Check prefill logits
-            let logitsDim = prefill.buffers.logits.length / MemoryLayout<Float32>.size
-            let pLogits = prefill.buffers.logits.contents().bindMemory(to: Float32.self, capacity: logitsDim)
-            var maxVal: Float = -.infinity; var maxIdx = 0; var lNan = 0
-            for i in 0..<logitsDim {
-                let v = Float(pLogits[i])
-                if v.isNaN { lNan += 1 }
-                if v > maxVal { maxVal = v; maxIdx = i }
-            }
-            print("[Prefill→Decode] prefill logits[\(logitsDim)]: max=\(maxVal)@\(maxIdx) nan=\(lNan)")
-
-            // Check conv_state
-            if let cs = prefill.buffers.convState {
-                let csDim = cs.length / MemoryLayout<Float32>.size
-                let csPtr = cs.contents().bindMemory(to: Float32.self, capacity: csDim)
-                var csNan = 0; var csZero = 0
-                for i in 0..<csDim {
-                    let v = Float(csPtr[i])
-                    if v.isNaN { csNan += 1 }
-                    if v == 0 { csZero += 1 }
-                }
-                print("[Prefill→Decode] conv_state[\(csDim)]: nan=\(csNan) zero=\(csZero) first=[\(Float(csPtr[0])), \(Float(csPtr[1]))]")
-            }
-        }
-
         // Transfer hidden: convert last token from prefill F32 to decode F16
         let decodeHiddenSize = self.plan.buffers.hidden.length / MemoryLayout<Float16>.size
         let prefillHiddenStride = decodeHiddenSize * MemoryLayout<Float32>.size
@@ -228,7 +187,7 @@ public struct MetalInferenceModel: @unchecked Sendable {
         }
 
         let totalTime = CFAbsoluteTimeGetCurrent() - prefillStart
-        print("[MetalInference] prefill: \(seqLen) tokens, \(dispatchCount) dispatches [\(String(format: "%.3f", totalTime))s] \(String(format: "%.0f", Double(seqLen) / totalTime)) tok/s")
+        _ = dispatchCount
         position += seqLen
 
         // Return the first predicted token (argmax of prefill logits)

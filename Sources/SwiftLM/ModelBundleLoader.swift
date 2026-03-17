@@ -79,7 +79,6 @@ public struct ModelBundleLoader: Sendable {
         )
 
         // 4b. Compile prefill plan (sequence graph — step count independent of token count)
-        print("[ModelBundleLoader] compilePrefill params: hidden=\(config.hiddenSize) intermediate=\(config.intermediateSize) vocab=\(config.vocabSize)")
         let prefillPlan = try MetalInferenceCompiler().compilePrefill(
             graph: resolvedGraph,
             hiddenSize: config.hiddenSize,
@@ -95,8 +94,7 @@ public struct ModelBundleLoader: Sendable {
         )
 
         let compileTime = CFAbsoluteTimeGetCurrent() - compileStart
-        print("[ModelBundleLoader] compiled: \(plan.unfusedEntryCount) → \(plan.fusedEntryCount) dispatches [\(String(format: "%.3f", compileTime))s]")
-        print("[ModelBundleLoader] prefill plan: \(prefillPlan.stepCount) steps (sequence graph)")
+        print("[ModelBundleLoader] compiled: \(plan.fusedEntryCount) dispatches, prefill \(prefillPlan.stepCount) steps [\(String(format: "%.3f", compileTime))s]")
 
         // 5. Assemble ModelContainer
         var inferenceModel = try MetalInferenceModel(plan: plan, device: device)
@@ -137,16 +135,8 @@ public struct ModelBundleLoader: Sendable {
         }
 
         if needsConversion {
-            let convertStart = CFAbsoluteTimeGetCurrent()
-            print("[ModelBundleLoader] STAF converting from \(safetensorsURLs.count) files → \(stafURL.path)")
             try converter.convert(safetensorsURLs: safetensorsURLs, outputURL: stafURL)
-            let stafSize = (try? FileManager.default.attributesOfItem(atPath: stafURL.path)[.size] as? Int) ?? 0
-            print("[ModelBundleLoader] STAF converted: \(stafSize) bytes [\(String(format: "%.3f", CFAbsoluteTimeGetCurrent() - convertStart))s]")
-        } else {
-            print("[ModelBundleLoader] STAF cache valid: \(stafURL.path)")
         }
-
-        print("[ModelBundleLoader] Loading STAF: \(stafURL.path)")
         return try STAFLoader().load(at: stafURL, device: device)
     }
 
