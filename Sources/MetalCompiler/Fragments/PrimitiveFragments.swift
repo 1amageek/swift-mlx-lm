@@ -10,6 +10,16 @@
 // MARK: - Primitive Protocol
 
 /// Leaf fragment that the compiler translates into a single Metal dispatch.
+///
+/// The compiler uses these properties for generic graph optimization:
+/// - `dispatchDimension`: kernel scaffold and batching strategy
+/// - `isFusable`: whether this fragment participates in compiler optimizations
+/// - `isInPlace`: whether this fragment modifies its primary buffer in-place
+/// - `kernelBody()`: composable MSL computation body for kernel composition
+///
+/// The optimizer batches fragments based on properties alone — no type checks.
+/// Within a composite fragment, consecutive in-place fragments with the same
+/// dispatchDimension type are independent and batchable.
 public protocol PrimitiveMetalKernelFragment: MetalKernelFragment where Fragment == Never {
     /// GPU dispatch pattern (determines grid/threadgroup sizing).
     var dispatchDimension: MetalDispatchDimension { get }
@@ -17,12 +27,54 @@ public protocol PrimitiveMetalKernelFragment: MetalKernelFragment where Fragment
     var weightSlots: [MetalWeightSlot] { get }
     /// Persistent cache slots (KV cache, conv state).
     var cacheSlots: [MetalCacheSlot] { get }
+
+    /// Whether this fragment modifies its primary data buffer in-place.
+    ///
+    /// In-place fragments within the same composite fragment that have different
+    /// data sources (different preceding projection outputs) are independent.
+    /// The optimizer uses this to determine batchability.
+    var isInPlace: Bool { get }
+
+    /// Generate the composable MSL computation body for this fragment.
+    ///
+    /// Fusable fragments return a body using standardized variable names
+    /// based on `dispatchDimension`. The compiler wraps the body in a kernel
+    /// scaffold (dispatch routing, batching, structural prefix).
+    ///
+    /// Standard variables by dispatch dimension:
+    /// - `.reduction`: data (R), weight (R), output (W), dimension, epsilon,
+    ///                 tid, threadgroupSize, shared (threadgroup float[32])
+    /// - `.perHead`:   data (R/W), weight (R), headDimension, epsilon,
+    ///                 offset (= headIndex * headDimension), tid, threadgroupSize, shared
+    /// - `.elementwise`: input0, input1, output, count, gid
+    ///
+    /// Returns nil for non-fusable (opaque) fragments.
+    /// The compiler calls `kernelSource()` instead.
+    func kernelBody(
+        bufferPrecision: BufferPrecision,
+        weightFormat: WeightFormat
+    ) -> String?
+
+    /// Generate the complete MSL kernel for non-fusable (opaque) fragments.
+    ///
+    /// Called only when `kernelBody()` returns nil. The compiler uses the
+    /// returned source as-is, without composition or wrapping.
+    func kernelSource(
+        name: String,
+        bufferPrecision: BufferPrecision,
+        weightFormat: WeightFormat
+    ) -> String
 }
 
 extension PrimitiveMetalKernelFragment {
     public var fragment: Never { fatalError() }
     public var weightSlots: [MetalWeightSlot] { [] }
     public var cacheSlots: [MetalCacheSlot] { [] }
+    public var isInPlace: Bool { false }
+    public func kernelBody(bufferPrecision: BufferPrecision, weightFormat: WeightFormat) -> String? { nil }
+    public func kernelSource(name: String, bufferPrecision: BufferPrecision, weightFormat: WeightFormat) -> String {
+        fatalError("Fragment \(type(of: self)) must implement either kernelBody() or kernelSource()")
+    }
 }
 
 // MARK: - Reduction
@@ -162,7 +214,8 @@ public struct RoPEFragment: PrimitiveMetalKernelFragment {
         self.base = base
     }
 
-    public var isFusable: Bool { true }
+    public var isFusable: Bool { false }
+    public var isInPlace: Bool { true }
     public var dispatchDimension: MetalDispatchDimension {
         .perHead(headCount: max(headCount, kvHeadCount))
     }
@@ -184,7 +237,8 @@ public struct QKNormFragment: PrimitiveMetalKernelFragment {
         self.weightRole = weightRole
     }
 
-    public var isFusable: Bool { false }
+    public var isFusable: Bool { true }
+    public var isInPlace: Bool { true }
     public var dispatchDimension: MetalDispatchDimension { .perHead(headCount: headCount) }
     public var weightSlots: [MetalWeightSlot] { [MetalWeightSlot(field: weightRole, role: .weight)] }
 }

@@ -1,7 +1,65 @@
 /// Metal dispatch types used by the compiler.
 ///
 /// Shared types: MetalDispatchDimension, MetalProjection, MetalWeightSlot,
-/// MetalCacheSlot, fused operation structs, SynchronizationKind.
+/// MetalCacheSlot, fused operation structs, SynchronizationKind,
+/// BufferPrecision, WeightFormat.
+
+// MARK: - Buffer Precision
+
+/// Buffer precision for intermediate values (hidden, scratch, residual).
+public enum BufferPrecision: Sendable {
+    /// Float16 — used in decode (single token, no accumulation).
+    case float16
+    /// Float32 — used in prefill (multi-token, prevents accumulation error).
+    case float32
+
+    public var metalType: String {
+        switch self {
+        case .float16: return "half"
+        case .float32: return "float"
+        }
+    }
+
+    public var byteSize: Int {
+        switch self {
+        case .float16: return 2
+        case .float32: return 4
+        }
+    }
+}
+
+// MARK: - Weight Format
+
+/// Weight data format determines how weight bytes are read and converted to float.
+public enum WeightFormat: Sendable, Equatable {
+    /// Float16 — direct read as half, convert to float.
+    case float16
+    /// BFloat16 — read as uint16_t, shift left 16 to get float32.
+    case bfloat16
+    /// Quantized 4-bit with group size.
+    case quantized4Bit(groupSize: Int)
+    /// Quantized 8-bit with group size.
+    case quantized8Bit(groupSize: Int)
+
+    /// MSL type for the weight buffer parameter.
+    public var bufferType: String {
+        switch self {
+        case .float16: return "half"
+        case .bfloat16: return "uint16_t"
+        case .quantized4Bit, .quantized8Bit: return "uchar"
+        }
+    }
+
+    /// MSL expression to convert a weight value to float.
+    public func readExpression(_ expr: String) -> String {
+        switch self {
+        case .float16: return "float(\(expr))"
+        case .bfloat16: return "bf16_to_float(\(expr))"
+        case .quantized4Bit, .quantized8Bit:
+            return "dequantize(\(expr))"
+        }
+    }
+}
 
 // MARK: - Dispatch Dimension
 
@@ -38,6 +96,72 @@ public struct FusedCopyNorm: Sendable {
     public init(dimension: Int, epsilon: Float) {
         self.dimension = dimension
         self.epsilon = epsilon
+    }
+}
+
+/// Fused operation: residualAdd + RMSNorm → single dispatch (no copy).
+/// Used at model end where no next residual is needed.
+public struct FusedResidualAddNorm: Sendable {
+    public let dimension: Int
+    public let epsilon: Float
+    public init(dimension: Int, epsilon: Float) {
+        self.dimension = dimension
+        self.epsilon = epsilon
+    }
+}
+
+/// Fused QK normalization: Q heads and K heads in a single dispatch.
+public struct FusedQKNorm: Sendable {
+    public let qHeadCount: Int
+    public let kHeadCount: Int
+    public let headDimension: Int
+    public let epsilon: Float
+    public init(qHeadCount: Int, kHeadCount: Int, headDimension: Int, epsilon: Float) {
+        self.qHeadCount = qHeadCount
+        self.kHeadCount = kHeadCount
+        self.headDimension = headDimension
+        self.epsilon = epsilon
+    }
+}
+
+/// Batched projection: multiple GEMV projections in a single dispatch.
+/// All projections share the same input but have different weights and outputs.
+public struct BatchedProjection: Sendable {
+    public struct Entry: Sendable {
+        public let field: String
+        public let inputDimension: Int
+        public let outputDimension: Int
+        public init(field: String, inputDimension: Int, outputDimension: Int) {
+            self.field = field
+            self.inputDimension = inputDimension
+            self.outputDimension = outputDimension
+        }
+    }
+    public let projections: [Entry]
+
+    public var totalOutputDimension: Int {
+        projections.reduce(0) { $0 + $1.outputDimension }
+    }
+
+    public var inputDimension: Int {
+        projections[0].inputDimension
+    }
+
+    public init(projections: [Entry]) {
+        self.projections = projections
+    }
+}
+
+/// Batched in-place fragments with the same dispatch dimension.
+/// The compiler dispatches all instances in a single kernel, routing
+/// threadgroups to the correct data/weight buffers.
+public struct BatchedFragment: @unchecked Sendable {
+    public let fragments: [any PrimitiveMetalKernelFragment]
+    public let dispatchDimension: MetalDispatchDimension
+
+    public init(fragments: [any PrimitiveMetalKernelFragment], dispatchDimension: MetalDispatchDimension) {
+        self.fragments = fragments
+        self.dispatchDimension = dispatchDimension
     }
 }
 

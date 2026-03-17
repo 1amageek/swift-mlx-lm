@@ -9,60 +9,10 @@
 /// from these three independent inputs.
 public struct MetalSourceGenerator: Sendable {
 
-    /// Buffer precision for intermediate values (hidden, scratch, residual).
-    public enum BufferPrecision: Sendable {
-        /// Float16 — used in decode (single token, no accumulation)
-        case float16
-        /// Float32 — used in prefill (multi-token, prevents accumulation error)
-        case float32
-
-        public var metalType: String {
-            switch self {
-            case .float16: return "half"
-            case .float32: return "float"
-            }
-        }
-
-        public var byteSize: Int {
-            switch self {
-            case .float16: return 2
-            case .float32: return 4
-            }
-        }
-    }
-
-    /// Weight data format determines how weight bytes are read and converted to float.
-    public enum WeightFormat: Sendable, Equatable {
-        /// Float16 — direct read as half, convert to float
-        case float16
-        /// BFloat16 — read as uint16_t, shift left 16 to get float32
-        case bfloat16
-        /// Quantized 4-bit with group size
-        case quantized4Bit(groupSize: Int)
-        /// Quantized 8-bit with group size
-        case quantized8Bit(groupSize: Int)
-
-        /// MSL type for the weight buffer parameter
-        public var bufferType: String {
-            switch self {
-            case .float16: return "half"
-            case .bfloat16: return "uint16_t"
-            case .quantized4Bit, .quantized8Bit: return "uchar"
-            }
-        }
-
-        /// MSL expression to convert a weight value to float
-        /// - Parameter expr: The MSL expression accessing the raw weight value
-        public func readExpression(_ expr: String) -> String {
-            switch self {
-            case .float16: return "float(\(expr))"
-            case .bfloat16: return "bf16_to_float(\(expr))"
-            case .quantized4Bit, .quantized8Bit:
-                // Quantized reading is more complex — handled by block dequantization
-                return "dequantize(\(expr))"
-            }
-        }
-    }
+    // BufferPrecision and WeightFormat are top-level types in MetalDispatchTypes.swift.
+    // These typealiases preserve source compatibility within MetalSourceGenerator.
+    public typealias BufferPrecision = MetalCompiler.BufferPrecision
+    public typealias WeightFormat = MetalCompiler.WeightFormat
 
     // MARK: - Complete Library Generation
 

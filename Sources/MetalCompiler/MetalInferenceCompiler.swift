@@ -14,7 +14,12 @@ import LMIR
 /// 5. **Dispatch plan**: compute grid/threadgroup, build MetalDispatchStep array
 public struct MetalInferenceCompiler: Sendable {
 
-    public init() {}
+    /// The optimization strategy used for dispatch entry generation.
+    public let optimizer: any DispatchOptimizer
+
+    public init(optimizer: (any DispatchOptimizer)? = nil) {
+        self.optimizer = optimizer ?? StandardOptimizer()
+    }
 
     public func compile(
         graph: ModelGraph,
@@ -36,8 +41,8 @@ public struct MetalInferenceCompiler: Sendable {
         )
         let unfusedCount = walkContext.entries.count
 
-        // Phase 2: Fusion pass
-        let fusedEntries = fusionPass(entries: walkContext.entries)
+        // Phase 2: Graph optimization (structural fusion)
+        let fusedEntries = optimizer.optimizeGraph(walkContext.entries)
 
         // Phase 3: Compile only the kernels needed by this model's dispatch entries
         // Decode uses F16 buffers (single token, no accumulation)
@@ -242,8 +247,8 @@ public struct MetalInferenceCompiler: Sendable {
             context: &walkContext
         )
 
-        // Fusion pass (same as decode — fuses norm + structural)
-        let fusedEntries = fusionPass(entries: walkContext.entries)
+        // Graph optimization (same as decode — structural fusion)
+        let fusedEntries = optimizer.optimizeGraph(walkContext.entries)
 
         // Compile only the kernels needed by this model's prefill dispatch entries
         let library = try compileLibrary(
@@ -1406,6 +1411,27 @@ public struct MetalInferenceCompiler: Sendable {
             // Fragment-driven: kernel name derived from fragment type + weight format
             // TODO: implement dynamic name resolution from fragment parameters
             return resolveFragmentKernelName(frag, entry: entry, stafWeightStore: stafWeightStore)
+        case .fusedResidualAddNorm:
+            let isBF16 = entry.parameterBindings.contains { binding in
+                guard let staf = stafWeightStore,
+                      let info = staf.tensor(for: binding.tensorName) else { return false }
+                return info.format.schemeIdentifier == .bf16RowMajor
+            }
+            return isBF16 ? "fused_residual_add_rms_norm_bf16" : "fused_residual_add_rms_norm"
+        case .batchedProjection(let batched):
+            if let binding = entry.parameterBindings.first(where: { $0.role == batched.projections[0].field }),
+               let staf = stafWeightStore,
+               let info = staf.tensor(for: binding.tensorName) {
+                let base = info.format.gemvKernelName
+                let suffix = base.hasSuffix("_bf16") ? "_bf16" : ""
+                return "batched_gemv\(batched.projections.count)\(suffix)"
+            }
+            return "batched_gemv\(batched.projections.count)"
+        case .batchedFragment(let batch):
+            // Kernel name from first fragment + batch count
+            let firstFrag = batch.fragments[0]
+            let baseName = resolveFragmentKernelName(firstFrag, entry: entry, stafWeightStore: stafWeightStore)
+            return "batched_\(baseName)_\(batch.fragments.count)"
         case .structuralCopy:
             return "copy_buffer"
         case .structuralAdd:
@@ -1457,6 +1483,12 @@ public struct MetalInferenceCompiler: Sendable {
             return .elementwise(count: dimension)
         case .structuralAdd(let dimension):
             return .elementwise(count: dimension)
+        case .fusedResidualAddNorm(let fused):
+            return .reduction(dimension: fused.dimension)
+        case .batchedProjection(let batched):
+            return .gemv(outputDimension: batched.totalOutputDimension, inputDimension: batched.inputDimension)
+        case .batchedFragment(let batch):
+            return batch.dispatchDimension
         }
     }
 
@@ -1989,6 +2021,18 @@ public struct MetalInferenceCompiler: Sendable {
                 if generatedNames.insert(kernelName).inserted {
                     sources.append(MetalSourceGenerator.generateResidualAdd(name: kernelName, bufferPrecision: bufferPrecision, isSequence: bufferPrecision == .float32))
                 }
+
+            case .fusedResidualAddNorm(_):
+                // TODO: generate fused residual add + rms norm kernel
+                break
+
+            case .batchedProjection(_):
+                // TODO: generate batched GEMV kernel
+                break
+
+            case .batchedFragment(_):
+                // TODO: generate batched fragment kernel from kernelBody()
+                break
             }
         }
 

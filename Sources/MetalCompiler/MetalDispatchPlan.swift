@@ -103,12 +103,15 @@ public struct DispatchEntry: Sendable {
     }
 }
 
-/// Kind of dispatch: projection, fragment, fused, or structural.
+/// Kind of dispatch: projection, fragment, fused, batched, or structural.
 public enum DispatchKind: Sendable {
     case projection(MetalProjection, isOutput: Bool = false)
     case fragment(any PrimitiveMetalKernelFragment)
     case fusedCopyNorm(FusedCopyNorm)
     case fusedResidualAddCopyNorm(FusedResidualAddCopyNorm)
+    case fusedResidualAddNorm(FusedResidualAddNorm)
+    case batchedProjection(BatchedProjection)
+    case batchedFragment(BatchedFragment)
     case structuralCopy(dimension: Int)
     case structuralAdd(dimension: Int)
 }
