@@ -1,9 +1,9 @@
 import LMIR
 
 extension LinearAttributes: MetalKernelFragment, _FragmentBodyAccessor {
-    public var fragment: LinearFragment {
+    public func fragment(context: KernelContext) -> LinearFragment {
         LinearFragment(field: "weight", inputDimension: inputSize, outputDimension: outputSize)
     }
     public var isFusable: Bool { false }
-    public func _visitBody(_ visitor: (any MetalKernelFragment) -> Void) { visitor(fragment) }
+    public func _visitBody(context: KernelContext, _ visitor: (any MetalKernelFragment) -> Void) { visitor(fragment(context: context)) }
 }

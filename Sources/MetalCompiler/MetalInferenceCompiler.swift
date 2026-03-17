@@ -25,7 +25,8 @@ public struct MetalInferenceCompiler: Sendable {
     /// Returns a report comparing unfused vs optimized dispatch counts.
     public func analyzeOptimization(
         graph: ModelGraph,
-        hiddenSize: Int
+        hiddenSize: Int,
+        stafWeightStore: STAFWeightStore? = nil
     ) -> OptimizationReport {
         var walkContext = WalkContext()
         walkRegion(
@@ -33,7 +34,10 @@ public struct MetalInferenceCompiler: Sendable {
             pathComponents: [],
             layerIndex: nil,
             hiddenSize: hiddenSize,
-            context: &walkContext
+            context: &walkContext,
+            kernelContext: KernelContext(
+                bufferPrecision: .float16,
+                weightFormat: resolveModelWeightFormat(stafWeightStore))
         )
         let unfusedCount = walkContext.entries.count
         let optimized = optimizer.optimizeGraph(walkContext.entries)
@@ -72,12 +76,16 @@ public struct MetalInferenceCompiler: Sendable {
 
         // Phase 1: Walk IR → flat dispatch entry list
         var walkContext = WalkContext()
+        let kernelContext = KernelContext(
+            bufferPrecision: .float16,
+            weightFormat: resolveModelWeightFormat(stafWeightStore))
         walkRegion(
             graph.rootRegion,
             pathComponents: [],
             layerIndex: nil,
             hiddenSize: hiddenSize,
-            context: &walkContext
+            context: &walkContext,
+            kernelContext: kernelContext
         )
         let unfusedCount = walkContext.entries.count
 
@@ -269,7 +277,10 @@ public struct MetalInferenceCompiler: Sendable {
             pathComponents: [],
             layerIndex: nil,
             hiddenSize: hiddenSize,
-            context: &walkContext
+            context: &walkContext,
+            kernelContext: KernelContext(
+                bufferPrecision: .float32,
+                weightFormat: resolveModelWeightFormat(stafWeightStore))
         )
 
         // Graph optimization (same as decode — structural fusion)
@@ -1296,12 +1307,24 @@ public struct MetalInferenceCompiler: Sendable {
         let headDimension: Int
     }
 
+    /// Resolve the primary weight format from the STAF weight store.
+    private func resolveModelWeightFormat(_ stafWeightStore: STAFWeightStore?) -> WeightFormat {
+        guard let staf = stafWeightStore else { return .float16 }
+        for name in staf.entries.keys {
+            if let info = staf.tensor(for: name) {
+                return info.format.schemeIdentifier == .bf16RowMajor ? .bfloat16 : .float16
+            }
+        }
+        return .float16
+    }
+
     private func walkRegion(
         _ region: Region,
         pathComponents: [StructuralPathComponent],
         layerIndex: Int?,
         hiddenSize: Int,
-        context: inout WalkContext
+        context: inout WalkContext,
+        kernelContext: KernelContext
     ) {
         for (operationIndex, operation) in region.operations.enumerated() {
             let operationPath = pathComponents + [.operation(operationIndex)]
@@ -1311,31 +1334,36 @@ public struct MetalInferenceCompiler: Sendable {
             case .residual(_, let body):
                 context.emit(.structuralCopy(dimension: hiddenSize), layerIndex: layerIndex)
                 walkRegion(body, pathComponents: operationPath + [.regionBody],
-                           layerIndex: layerIndex, hiddenSize: hiddenSize, context: &context)
+                           layerIndex: layerIndex, hiddenSize: hiddenSize, context: &context,
+                           kernelContext: kernelContext)
                 context.emit(.structuralAdd(dimension: hiddenSize), layerIndex: layerIndex)
 
             case .repeating(let count, let body):
                 for iteration in 0..<count {
                     walkRegion(body,
                                pathComponents: operationPath + [.regionBody, .index(iteration)],
-                               layerIndex: iteration, hiddenSize: hiddenSize, context: &context)
+                               layerIndex: iteration, hiddenSize: hiddenSize, context: &context,
+                               kernelContext: kernelContext)
                 }
 
             case .conditional(let condition, let thenBody, let elseBody):
                 if let currentLayer = layerIndex, case .layerIndices(let indices) = condition {
                     let selectedBody = indices.contains(currentLayer) ? thenBody : elseBody
                     walkRegion(selectedBody, pathComponents: operationPath + [.regionBody],
-                               layerIndex: currentLayer, hiddenSize: hiddenSize, context: &context)
+                               layerIndex: currentLayer, hiddenSize: hiddenSize, context: &context,
+                               kernelContext: kernelContext)
                 } else {
                     walkRegion(thenBody, pathComponents: operationPath + [.regionBody],
-                               layerIndex: layerIndex, hiddenSize: hiddenSize, context: &context)
+                               layerIndex: layerIndex, hiddenSize: hiddenSize, context: &context,
+                               kernelContext: kernelContext)
                 }
 
             case .parallel(_, let branches):
                 for (branchIndex, branch) in branches.enumerated() {
                     walkRegion(branch,
                                pathComponents: operationPath + [.regionBranch(branchIndex)],
-                               layerIndex: layerIndex, hiddenSize: hiddenSize, context: &context)
+                               layerIndex: layerIndex, hiddenSize: hiddenSize, context: &context,
+                               kernelContext: kernelContext)
                 }
 
             case .primitive(let attributes):
@@ -1355,7 +1383,8 @@ public struct MetalInferenceCompiler: Sendable {
                 guard let fragment = attributes as? (any MetalKernelFragment) else { continue }
                 var primitives: [CollectedPrimitive] = []
                 collectPrimitives(fragment, bindings: bindings, layerIndex: layerIndex,
-                                  primitives: &primitives, context: &context)
+                                  primitives: &primitives, context: &context,
+                                  kernelContext: kernelContext)
                 let optimized = optimizer.optimizeFragment(primitives)
                 let startIndex = context.entries.count
                 for entry in optimized {
@@ -1460,11 +1489,13 @@ public struct MetalInferenceCompiler: Sendable {
         bindings: [ParameterBinding],
         layerIndex: Int?,
         primitives: inout [CollectedPrimitive],
-        context: inout WalkContext
+        context: inout WalkContext,
+        kernelContext: KernelContext
     ) {
         if let primitive = fragment as? any PrimitiveMetalKernelFragment {
-            // Register KV cache slot for FlashAttention (side effect needed by compiler)
-            if let flash = primitive as? FlashAttentionFragment {
+            // Register KV cache slot for fragments that declare cache slots
+            if !primitive.cacheSlots.isEmpty,
+               let flash = primitive as? FlashAttentionFragment {
                 context.cacheSlots.append(CacheSlotInfo(
                     kvHeadCount: flash.kvHeadCount,
                     headDimension: flash.headDimension))
@@ -1480,28 +1511,32 @@ public struct MetalInferenceCompiler: Sendable {
         if let tuple = fragment as? any _TupleFragmentProtocol {
             tuple._visitChildren { child in
                 collectPrimitives(child, bindings: bindings, layerIndex: layerIndex,
-                                  primitives: &primitives, context: &context)
+                                  primitives: &primitives, context: &context,
+                                  kernelContext: kernelContext)
             }
             return
         }
         if let opt = fragment as? any _OptionalFragmentProtocol {
             opt._visitContent { child in
                 collectPrimitives(child, bindings: bindings, layerIndex: layerIndex,
-                                  primitives: &primitives, context: &context)
+                                  primitives: &primitives, context: &context,
+                                  kernelContext: kernelContext)
             }
             return
         }
         if let cond = fragment as? any _ConditionalFragmentProtocol {
             cond._visitActive { child in
                 collectPrimitives(child, bindings: bindings, layerIndex: layerIndex,
-                                  primitives: &primitives, context: &context)
+                                  primitives: &primitives, context: &context,
+                                  kernelContext: kernelContext)
             }
             return
         }
         if let bodyAccessor = fragment as? any _FragmentBodyAccessor {
-            bodyAccessor._visitBody { child in
+            bodyAccessor._visitBody(context: kernelContext) { child in
                 collectPrimitives(child, bindings: bindings, layerIndex: layerIndex,
-                                  primitives: &primitives, context: &context)
+                                  primitives: &primitives, context: &context,
+                                  kernelContext: kernelContext)
             }
         }
     }
@@ -1648,32 +1683,22 @@ public struct MetalInferenceCompiler: Sendable {
     }
 
     /// Derive kernel name from a primitive fragment and its context.
+    /// Derive kernel name from fragment protocol — no concrete type checks.
+    private func resolveFragmentKernelName(
+        _ fragment: any PrimitiveMetalKernelFragment,
+        kernelContext: KernelContext
+    ) -> String {
+        fragment.kernelName(context: kernelContext)
+    }
+
+    /// Legacy overload for call sites that still pass entry/stafWeightStore.
     private func resolveFragmentKernelName(
         _ fragment: any PrimitiveMetalKernelFragment,
         entry: DispatchEntry,
         stafWeightStore: STAFWeightStore?
     ) -> String {
-        // Determine weight format suffix from STAF
-        let isBF16 = entry.parameterBindings.contains { binding in
-            guard let staf = stafWeightStore,
-                  let info = staf.tensor(for: binding.tensorName) else { return false }
-            return info.format.schemeIdentifier == .bf16RowMajor
-        }
-        let suffix = isBF16 ? "_bf16" : ""
-
-        switch fragment {
-        case is Reduction: return "rms_norm" + suffix
-        case is ElementwiseFragment: return "swiglu"
-        case is GatherFragment: return "embedding_lookup" + suffix
-        case is ArgmaxFragment: return "argmax"
-        case is FlashAttentionFragment: return "flash_attn_decode"
-        case is RoPEFragment: return "rope"
-        case is QKNormFragment: return "qk_rms_norm" + suffix
-        case is Conv1dFragment: return "conv_state_update"
-        case is SSMRecurrenceFragment: return "ssm_recurrence"
-        case is SigmoidGateFragment: return "sigmoid_gate"
-        default: return "unknown_fragment"
-        }
+        let wf = resolveModelWeightFormat(stafWeightStore)
+        return fragment.kernelName(context: KernelContext(bufferPrecision: .float16, weightFormat: wf))
     }
 
     /// Get the dispatch dimension for grid/threadgroup calculation.

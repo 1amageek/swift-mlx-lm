@@ -61,6 +61,23 @@ public enum WeightFormat: Sendable, Equatable {
     }
 }
 
+// MARK: - Kernel Context
+
+/// Context passed to fragment tree traversal for kernel name resolution.
+///
+/// Carries the buffer precision (F16 decode / F32 prefill) and weight format
+/// (from STAF) so that fragments can resolve context-dependent kernel names
+/// without hardcoding variants.
+public struct KernelContext: Sendable {
+    public let bufferPrecision: BufferPrecision
+    public let weightFormat: WeightFormat
+
+    public init(bufferPrecision: BufferPrecision, weightFormat: WeightFormat) {
+        self.bufferPrecision = bufferPrecision
+        self.weightFormat = weightFormat
+    }
+}
+
 // MARK: - Dispatch Dimension
 
 /// GPU dispatch pattern for grid/threadgroup sizing.
@@ -106,20 +123,6 @@ public struct FusedResidualAddNorm: Sendable {
     public let epsilon: Float
     public init(dimension: Int, epsilon: Float) {
         self.dimension = dimension
-        self.epsilon = epsilon
-    }
-}
-
-/// Fused QK normalization: Q heads and K heads in a single dispatch.
-public struct FusedQKNorm: Sendable {
-    public let qHeadCount: Int
-    public let kHeadCount: Int
-    public let headDimension: Int
-    public let epsilon: Float
-    public init(qHeadCount: Int, kHeadCount: Int, headDimension: Int, epsilon: Float) {
-        self.qHeadCount = qHeadCount
-        self.kHeadCount = kHeadCount
-        self.headDimension = headDimension
         self.epsilon = epsilon
     }
 }

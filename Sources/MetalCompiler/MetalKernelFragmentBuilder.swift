@@ -2,7 +2,7 @@
 ///
 /// Mirrors `ModelComponentBuilder` — enables declarative fragment composition:
 /// ```swift
-/// var fragment: some MetalKernelFragment {
+/// func fragment(context: KernelContext) -> some MetalKernelFragment {
 ///     Linear(field: "gate_proj", input: 2048, output: 8192)
 ///     Linear(field: "up_proj", input: 2048, output: 8192)
 ///     SwiGLU(dimension: 8192)
@@ -47,7 +47,7 @@ public struct OptionalFragment<Content: MetalKernelFragment>: MetalKernelFragmen
         self.content = content
     }
 
-    public var fragment: Never { fatalError() }
+    public func fragment(context: KernelContext) -> Never { fatalError() }
     public var isFusable: Bool { content?.isFusable ?? false }
 
     public func _visitContent(_ visitor: (any MetalKernelFragment) -> Void) {
@@ -60,7 +60,7 @@ public enum ConditionalFragment<First: MetalKernelFragment, Second: MetalKernelF
     case first(First)
     case second(Second)
 
-    public var fragment: Never { fatalError() }
+    public func fragment(context: KernelContext) -> Never { fatalError() }
     public var isFusable: Bool {
         switch self {
         case .first(let f): return f.isFusable
@@ -80,7 +80,7 @@ public enum ConditionalFragment<First: MetalKernelFragment, Second: MetalKernelF
 
 /// Internal protocol for accessing a fragment's body (generic fragment → child).
 public protocol _FragmentBodyAccessor {
-    func _visitBody(_ visitor: (any MetalKernelFragment) -> Void)
+    func _visitBody(context: KernelContext, _ visitor: (any MetalKernelFragment) -> Void)
 }
 
 /// Internal protocol for visiting TupleFragment children.
@@ -107,7 +107,7 @@ public struct TupleFragment<each Child: MetalKernelFragment>: MetalKernelFragmen
         self.children = (repeat each children)
     }
 
-    public var fragment: Never { fatalError() }
+    public func fragment(context: KernelContext) -> Never { fatalError() }
     public var isFusable: Bool { false }
 
     public func _visitChildren(_ visitor: (any MetalKernelFragment) -> Void) {

@@ -8,7 +8,7 @@
 /// ```swift
 /// struct RMSNorm: ModelComponent, MetalKernelFragment {
 ///     var body: some ModelComponent { ... }      // IR structure
-///     var fragment: some MetalKernelFragment { ... } // Metal execution
+///     func fragment(context: KernelContext) -> some MetalKernelFragment { ... } // Metal execution
 /// }
 /// ```
 ///
@@ -23,7 +23,7 @@ public protocol MetalKernelFragment: Sendable {
 
     /// The fragment body describing how this operation executes on Metal.
     @MetalKernelFragmentBuilder
-    var fragment: Fragment { get }
+    func fragment(context: KernelContext) -> Fragment
 
     /// Whether this fragment can be fused with adjacent fragments.
     ///
@@ -40,6 +40,5 @@ extension MetalKernelFragment {
 }
 
 extension Never: MetalKernelFragment {
-    public var fragment: Never { fatalError() }
+    public func fragment(context: KernelContext) -> Never { fatalError() }
 }
-

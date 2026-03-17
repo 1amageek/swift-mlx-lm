@@ -2,7 +2,7 @@ import LMIR
 
 extension AttentionAttributes: MetalKernelFragment, _FragmentBodyAccessor {
     @MetalKernelFragmentBuilder
-    public var fragment: some MetalKernelFragment {
+    public func fragment(context: KernelContext) -> some MetalKernelFragment {
         LinearFragment(field: "q_proj", inputDimension: hiddenSize, outputDimension: headCount * headDimension)
         LinearFragment(field: "k_proj", inputDimension: hiddenSize, outputDimension: kvHeadCount * headDimension)
         LinearFragment(field: "v_proj", inputDimension: hiddenSize, outputDimension: kvHeadCount * headDimension)
@@ -19,5 +19,5 @@ extension AttentionAttributes: MetalKernelFragment, _FragmentBodyAccessor {
         LinearFragment(field: "o_proj", inputDimension: headCount * headDimension, outputDimension: hiddenSize)
     }
     public var isFusable: Bool { false }
-    public func _visitBody(_ visitor: (any MetalKernelFragment) -> Void) { visitor(fragment) }
+    public func _visitBody(context: KernelContext, _ visitor: (any MetalKernelFragment) -> Void) { visitor(fragment(context: context)) }
 }

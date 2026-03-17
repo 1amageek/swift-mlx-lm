@@ -39,6 +39,13 @@ public protocol PrimitiveMetalKernelFragment: MetalKernelFragment where Fragment
     /// nil for fragments that don't perform normalization.
     var normEpsilon: Float? { get }
 
+    /// Kernel name for this fragment, resolved using the kernel context.
+    ///
+    /// The compiler uses the context (weight format, buffer precision) to
+    /// determine the appropriate kernel variant.
+    /// Example: "rms_norm" vs "rms_norm_bf16", "embedding_lookup" vs "embedding_lookup_bf16"
+    func kernelName(context: KernelContext) -> String
+
     /// Generate the composable MSL computation body for this fragment.
     ///
     /// Fusable fragments return a body using standardized variable names
@@ -71,7 +78,7 @@ public protocol PrimitiveMetalKernelFragment: MetalKernelFragment where Fragment
 }
 
 extension PrimitiveMetalKernelFragment {
-    public var fragment: Never { fatalError() }
+    public func fragment(context: KernelContext) -> Never { fatalError() }
     public var weightSlots: [MetalWeightSlot] { [] }
     public var cacheSlots: [MetalCacheSlot] { [] }
     public var isInPlace: Bool { false }
@@ -97,6 +104,9 @@ public struct Reduction: PrimitiveMetalKernelFragment {
 
     public var isFusable: Bool { true }
     public var normEpsilon: Float? { epsilon }
+    public func kernelName(context: KernelContext) -> String {
+        context.weightFormat == .bfloat16 ? "rms_norm_bf16" : "rms_norm"
+    }
     public var dispatchDimension: MetalDispatchDimension { .reduction(dimension: dimension) }
     public var weightSlots: [MetalWeightSlot] { [MetalWeightSlot(field: nil, role: .weight)] }
 }
@@ -120,6 +130,12 @@ public struct ElementwiseFragment: PrimitiveMetalKernelFragment {
     }
 
     public var isFusable: Bool { true }
+    public func kernelName(context: KernelContext) -> String {
+        switch kind {
+        case .swiglu: return "swiglu"
+        case .sigmoidGate: return "sigmoid_gate"
+        }
+    }
     public var dispatchDimension: MetalDispatchDimension { .elementwise(count: count) }
 }
 
@@ -138,6 +154,7 @@ public struct LinearFragment: PrimitiveMetalKernelFragment {
     }
 
     public var isFusable: Bool { false }
+    public func kernelName(context: KernelContext) -> String { "gemv" }
     public var dispatchDimension: MetalDispatchDimension {
         .gemv(outputDimension: outputDimension, inputDimension: inputDimension)
     }
@@ -157,6 +174,9 @@ public struct GatherFragment: PrimitiveMetalKernelFragment {
     }
 
     public var isFusable: Bool { false }
+    public func kernelName(context: KernelContext) -> String {
+        context.weightFormat == .bfloat16 ? "embedding_lookup_bf16" : "embedding_lookup"
+    }
     public var dispatchDimension: MetalDispatchDimension { .gather(count: embeddingDimension) }
     public var weightSlots: [MetalWeightSlot] { [MetalWeightSlot(field: nil, role: .weight)] }
 }
@@ -172,6 +192,7 @@ public struct ArgmaxFragment: PrimitiveMetalKernelFragment {
     }
 
     public var isFusable: Bool { false }
+    public func kernelName(context: KernelContext) -> String { "argmax" }
     public var dispatchDimension: MetalDispatchDimension { .reduction(dimension: vocabularySize) }
 }
 
@@ -195,6 +216,7 @@ public struct FlashAttentionFragment: PrimitiveMetalKernelFragment {
     }
 
     public var isFusable: Bool { false }
+    public func kernelName(context: KernelContext) -> String { "flash_attn_decode" }
     public var dispatchDimension: MetalDispatchDimension {
         .perHead(headCount: headCount)
     }
@@ -222,6 +244,7 @@ public struct RoPEFragment: PrimitiveMetalKernelFragment {
 
     public var isFusable: Bool { false }
     public var isInPlace: Bool { true }
+    public func kernelName(context: KernelContext) -> String { "rope" }
     public var dispatchDimension: MetalDispatchDimension {
         .perHead(headCount: max(headCount, kvHeadCount))
     }
@@ -246,6 +269,9 @@ public struct QKNormFragment: PrimitiveMetalKernelFragment {
     public var isFusable: Bool { true }
     public var isInPlace: Bool { true }
     public var normEpsilon: Float? { epsilon }
+    public func kernelName(context: KernelContext) -> String {
+        context.weightFormat == .bfloat16 ? "qk_rms_norm_bf16" : "qk_rms_norm"
+    }
     public var dispatchDimension: MetalDispatchDimension { .perHead(headCount: headCount) }
     public var weightSlots: [MetalWeightSlot] { [MetalWeightSlot(field: weightRole, role: .weight)] }
 }
@@ -263,6 +289,9 @@ public struct Conv1dFragment: PrimitiveMetalKernelFragment {
     }
 
     public var isFusable: Bool { false }
+    public func kernelName(context: KernelContext) -> String {
+        context.weightFormat == .bfloat16 ? "conv_state_update_bf16" : "conv_state_update"
+    }
     public var dispatchDimension: MetalDispatchDimension { .elementwise(count: dimension) }
     public var weightSlots: [MetalWeightSlot] { [MetalWeightSlot(field: "conv_weight", role: .weight)] }
     public var cacheSlots: [MetalCacheSlot] { [MetalCacheSlot(name: "conv_cache", kind: .conv)] }
@@ -283,6 +312,7 @@ public struct SSMRecurrenceFragment: PrimitiveMetalKernelFragment {
     }
 
     public var isFusable: Bool { false }
+    public func kernelName(context: KernelContext) -> String { "ssm_recurrence" }
     public var dispatchDimension: MetalDispatchDimension { .perHead(headCount: headCount) }
 }
 
@@ -297,6 +327,7 @@ public struct SigmoidGateFragment: PrimitiveMetalKernelFragment {
     }
 
     public var isFusable: Bool { true }
+    public func kernelName(context: KernelContext) -> String { "sigmoid_gate" }
     public var dispatchDimension: MetalDispatchDimension { .elementwise(count: dimension) }
 }
 
@@ -315,5 +346,6 @@ public struct QuantizeKVFragment: PrimitiveMetalKernelFragment {
     }
 
     public var isFusable: Bool { false }
+    public func kernelName(context: KernelContext) -> String { "quantize_kv" }
     public var dispatchDimension: MetalDispatchDimension { .elementwise(count: totalElements / groupSize) }
 }
