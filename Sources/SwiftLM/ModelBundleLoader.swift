@@ -87,6 +87,10 @@ public struct ModelBundleLoader: Sendable {
             vocabSize: config.vocabSize,
             maximumSequenceLength: 4096,
             stafWeightStore: weightStore,
+            sharedKVCache: plan.buffers.kvCache,
+            sharedConvState: plan.buffers.convState,
+            sharedConvStateDimension: plan.buffers.convStateDimension,
+            sharedConvStateKernelSize: plan.buffers.convStateKernelSize,
             device: device
         )
 

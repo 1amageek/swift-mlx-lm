@@ -209,7 +209,7 @@ public struct MetalInferenceModel: @unchecked Sendable {
             }
         }
 
-        // Copy KV cache
+        // Copy KV cache (skip if shared — same buffer used by both prefill and decode)
         if let prefillKV = prefill.buffers.kvCache,
            let decodeKV = self.plan.buffers.kvCache,
            prefillKV.keys !== decodeKV.keys {
@@ -219,9 +219,10 @@ public struct MetalInferenceModel: @unchecked Sendable {
                    min(decodeKV.values.length, prefillKV.values.length))
         }
 
-        // Copy conv_state (already in Float16 from extract_conv_state kernel)
+        // Copy conv_state (skip if shared — same buffer used by both prefill and decode)
         if let prefillConvState = prefill.buffers.convState,
-           let decodeConvState = self.plan.buffers.convState {
+           let decodeConvState = self.plan.buffers.convState,
+           prefillConvState !== decodeConvState {
             memcpy(decodeConvState.contents(), prefillConvState.contents(),
                    min(decodeConvState.length, prefillConvState.length))
         }

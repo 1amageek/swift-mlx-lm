@@ -233,7 +233,12 @@ struct BenchmarkTests {
         let prefillPlan = try compiler.compilePrefill(
             graph: resolved, hiddenSize: 2048, intermediateSize: 8192,
             vocabSize: 65536, maximumSequenceLength: 64,
-            stafWeightStore: store, device: device)
+            stafWeightStore: store,
+            sharedKVCache: decodePlan.buffers.kvCache,
+            sharedConvState: decodePlan.buffers.convState,
+            sharedConvStateDimension: decodePlan.buffers.convStateDimension,
+            sharedConvStateKernelSize: decodePlan.buffers.convStateKernelSize,
+            device: device)
 
         var model = try MetalInferenceModel(plan: decodePlan, device: device)
         model.prefillPlan = prefillPlan

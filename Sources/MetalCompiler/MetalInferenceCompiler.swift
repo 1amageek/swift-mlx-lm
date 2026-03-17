@@ -225,6 +225,10 @@ public struct MetalInferenceCompiler: Sendable {
         vocabSize: Int = 0,
         maximumSequenceLength: Int = 4096,
         stafWeightStore: STAFWeightStore? = nil,
+        sharedKVCache: MetalKVCache? = nil,
+        sharedConvState: MTLBuffer? = nil,
+        sharedConvStateDimension: Int = 0,
+        sharedConvStateKernelSize: Int = 0,
         device: MTLDevice
     ) throws -> MetalPrefillPlan {
 
@@ -292,13 +296,42 @@ public struct MetalInferenceCompiler: Sendable {
                 prefillConvKernelSize = max(prefillConvKernelSize, convOp.kernelSize)
             }
         }
+        // Use shared conv_state buffer if provided, otherwise allocate a new one
         let prefillConvStateBuffer: MTLBuffer?
-        if prefillConvLayerCount > 0 {
+        let resolvedConvDimension: Int
+        let resolvedConvKernelSize: Int
+        if let shared = sharedConvState {
+            prefillConvStateBuffer = shared
+            resolvedConvDimension = sharedConvStateDimension
+            resolvedConvKernelSize = sharedConvStateKernelSize
+        } else if prefillConvLayerCount > 0 {
             let convStateBytes = prefillConvLayerCount * prefillConvKernelSize * prefillConvDimension * elementSize
             prefillConvStateBuffer = device.makeBuffer(length: convStateBytes, options: [.storageModeShared])
             if let buf = prefillConvStateBuffer { memset(buf.contents(), 0, buf.length) }
+            resolvedConvDimension = prefillConvDimension
+            resolvedConvKernelSize = prefillConvKernelSize
         } else {
             prefillConvStateBuffer = nil
+            resolvedConvDimension = 0
+            resolvedConvKernelSize = 0
+        }
+
+        // Use shared KV cache if provided, otherwise allocate a new one
+        let prefillKVCache: MetalKVCache?
+        if let shared = sharedKVCache {
+            prefillKVCache = shared
+        } else if !walkContext.cacheSlots.isEmpty {
+            guard let firstSlot = walkContext.cacheSlots.first else {
+                throw MetalCompilerError.deviceSetupFailed("No cache slots")
+            }
+            prefillKVCache = try MetalKVCache(
+                device: device,
+                specification: KVCacheSpecification(
+                    layerCount: walkContext.cacheSlots.count,
+                    kvHeadCount: firstSlot.kvHeadCount,
+                    headDimension: firstSlot.headDimension))
+        } else {
+            prefillKVCache = nil
         }
 
         let prefillBuffers = PrefillBufferSet(
@@ -306,18 +339,10 @@ public struct MetalInferenceCompiler: Sendable {
             residual: device.makeBuffer(length: maxSeq * hiddenSize * f32ElementSize, options: gpuOptions)!,
             scratch: device.makeBuffer(length: maxSeq * scratchElementCount * f32ElementSize, options: gpuOptions)!,
             weights: stafWeightStore.map { [$0.buffer] } ?? [],
-            kvCache: walkContext.cacheSlots.isEmpty ? nil : try {
-                guard let firstSlot = walkContext.cacheSlots.first else { throw MetalCompilerError.deviceSetupFailed("No cache slots") }
-                return try MetalKVCache(
-                    device: device,
-                    specification: KVCacheSpecification(
-                        layerCount: walkContext.cacheSlots.count,
-                        kvHeadCount: firstSlot.kvHeadCount,
-                        headDimension: firstSlot.headDimension))
-            }(),
+            kvCache: prefillKVCache,
             convState: prefillConvStateBuffer,
-            convStateDimension: prefillConvDimension,
-            convStateKernelSize: prefillConvKernelSize,
+            convStateDimension: resolvedConvDimension,
+            convStateKernelSize: resolvedConvKernelSize,
             logits: device.makeBuffer(length: resolvedVocabSize * f32ElementSize, options: gpuOptions)!,
             tokenIDs: device.makeBuffer(length: maxSeq * 4, options: [.storageModeShared])!,
             positions: device.makeBuffer(length: maxSeq * 4, options: [.storageModeShared])!,
