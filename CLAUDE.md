@@ -163,16 +163,58 @@ IR Graph walk:
   MetalComponent 準拠を追加するだけ。
 ```
 
-### Kernel Source — Compiler が所有
+### Kernel Source — MetalComponent が fragment を持ち、Compiler が合成する
 
-**kernel source (.metal / MSL) は compiler が 1 箇所に集約して持つ。** MetalComponent には kernel source を持たせない。llama.cpp の ggml-metal.metal と同じ配置方針。
+**MetalComponent は primitive な kernel fragment (計算の本体) を提供する。Compiler が dtype 変換・buffer routing・fusion を行い、最終的な kernel source を合成する。**
 
-理由:
-- GEMV は全 operation で共有 — Attention も MLP も Linear も同じ kernel
-- Fusion で kernel が変わる — compiler が fused variant を生成する
-- MetalComponent に持たせると fusion 時に 2 つの MetalComponent の source を統合する必要がある
+#### 禁止: kernel variant のハードコーディング
+
+```swift
+// ✗ WRONG — dtype × precision × operation の組み合わせを手書きする
+// 新しい dtype や operation を追加するたびに N×M×K の variant が必要
+static let gemvSource = "kernel void gemv(...half*...)"
+static let gemvBF16Source = "kernel void gemv_bf16(...uint16_t*...)"
+static let gemmBF16F32SSource = "kernel void gemm_bf16_f32s(...float*...uint16_t*...float*...)"
+// ... 同じ計算を何十回も書き直す
+
+// ✓ CORRECT — fragment は計算の本体のみ。dtype・precision は compiler が制御
+// MetalComponent が提供する fragment:
+//   float compute_rms_norm(float input, float weight, float rms) {
+//       return input * rms * weight;
+//   }
+// Compiler が以下を合成:
+//   1. buffer の型宣言 (half*, float*, uint16_t*)
+//   2. weight の読み取り変換 (bf16_to_float, そのまま, dequantize)
+//   3. output の書き込み変換 (half(), そのまま)
+//   4. fusion (隣接 fragment の結合)
+```
+
+#### なぜ fragment + 合成が必要か
+
+1. **dtype の組み合わせ爆発を防ぐ**: weight は BF16/FP16/Q4/Q8、buffer は F16/F32 — 手書きでは N×M variant が必要。Compiler が自動生成すれば fragment は 1 つ
+2. **fusion を自動化できる**: 隣接する fragment を結合して中間 buffer の read/write を消す。手書き fused kernel は不要
+3. **新しい operation の追加が容易**: fragment を 1 つ書けば、全 dtype・precision の組み合わせが自動的に使える
+4. **BF16 誤読のような不整合を構造的に防ぐ**: weight dtype の解釈は compiler が一元管理。個別 kernel で `half*` と `uint16_t*` を間違えることがない
+
+#### BFloat16 の特性と Compiler の責務
+
+BFloat16 は Float32 の上位 16 bit。`UInt32(bf16) << 16` で情報損失なく Float32 に戻る (exponent 8 bit が同一)。Float16 とは exponent 幅が違う (5 vs 8) ため、BF16 raw bits を Float16 として読むと値が完全に壊れる。
+
+- **Compiler の責務**: weight の QuantizationFormat を見て、読み取りコードを生成する
+  - BF16: `bf16_to_float(raw_uint16)` = `as_type<float>(uint32(raw) << 16)`
+  - FP16: `float(half_value)` — そのまま
+  - Q4/Q8: dequantize block → float
+- **MetalComponent の責務**: 計算の本体 (float in → float out) のみ。dtype を知らない
 
 Grid/threadgroup は compiler が `pipeline.maxTotalThreadsPerThreadgroup` と `threadExecutionWidth` から計算。固定値を焼き込まない。
+
+### Prefill と Decode の precision 分離
+
+- **Prefill**: hidden/residual/scratch 全て **Float32**。16+ layers の蓄積誤差を防ぐ
+- **Decode**: hidden/residual/scratch 全て **Float16**。1 token ずつの計算で蓄積なし
+- **F32↔F16 変換**: prefill→decode の転送時に **1 箇所で独立して** 行う。計算 kernel 内で混在させない
+- **KV cache**: F16 (prefill/decode 共通)。flash_attn kernel 内で F32→F16 変換して書き込む
+- **conv_state**: F16 (decode format)。extract kernel 内で F32→F16 変換して書き込む
 
 ### Op Fusion — llama.cpp パターンマッチ方式
 

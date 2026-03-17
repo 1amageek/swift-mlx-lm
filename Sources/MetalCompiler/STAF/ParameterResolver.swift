@@ -116,9 +116,11 @@ public struct ParameterResolver: Sendable {
 
         case .residual(let strategy, let body):
             let savedIndex = residualIndex
+            // Each layer has 2 residual blocks: index 0 = operator/attention norm,
+            // index 1 = ffn norm. Use modulo to get the intra-layer position.
             let resolvedBody = resolveRegion(
                 body, convention: convention,
-                scope: scope, residualIndex: 0)
+                scope: scope, residualIndex: savedIndex % 2)
             residualIndex = savedIndex + 1
             return Operation(
                 key: operation.key,
@@ -332,6 +334,22 @@ public struct ParameterResolver: Sendable {
                 ParameterBinding(role: "up_proj", tensorName: "\(ffPrefix).w3.weight"),
                 ParameterBinding(role: "down_proj", tensorName: "\(ffPrefix).w2.weight"),
             ]
+        }
+
+        if let attrs = attributes as? MoEAttributes {
+            let ffPrefix = "\(prefix).feed_forward"
+            var bindings = [
+                ParameterBinding(role: "router", tensorName: "\(ffPrefix).gate.weight"),
+                ParameterBinding(role: "expert_bias", tensorName: "\(ffPrefix).expert_bias"),
+            ]
+            for i in 0..<attrs.expertCount {
+                bindings.append(contentsOf: [
+                    ParameterBinding(role: "expert_\(i)_gate_proj", tensorName: "\(ffPrefix).experts.\(i).w1.weight"),
+                    ParameterBinding(role: "expert_\(i)_up_proj", tensorName: "\(ffPrefix).experts.\(i).w3.weight"),
+                    ParameterBinding(role: "expert_\(i)_down_proj", tensorName: "\(ffPrefix).experts.\(i).w2.weight"),
+                ])
+            }
+            return bindings
         }
 
         if let _ = attributes as? ShortConvAttributes {

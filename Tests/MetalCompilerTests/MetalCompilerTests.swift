@@ -1,130 +1,37 @@
 import Testing
 import Metal
-import MetalCompiler
+@testable import MetalCompiler
 import LMArchitecture
+import LMIR
 
-@Suite
-struct MetalComponentProtocolTests {
+@Suite("Fragment Protocol")
+struct FragmentProtocolTests {
 
     @Test
-    func embeddingDeclaresGatherDispatch() {
+    func embeddingFragmentIsGather() {
         let a = TokenEmbeddingAttributes(vocabSize: 32000, embeddingSize: 2048)
-        #expect(a.dispatchDeclarations.count == 1)
-        if case .compute(let op) = a.dispatchDeclarations[0] {
-            #expect(op.kernelName == "embedding_lookup")
-            if case .gather(let count) = op.dispatchDimension {
-                #expect(count == 2048)
-            } else {
-                Issue.record("Expected .gather dispatch dimension")
-            }
-        } else {
-            Issue.record("Expected .compute dispatch declaration")
+        let frag = a.fragment
+        #expect(frag is GatherFragment)
+        if case .gather(let count) = frag.dispatchDimension {
+            #expect(count == 2048)
         }
     }
 
     @Test
-    func rmsNormDeclaresReductionDispatch() {
+    func rmsNormFragmentIsReduction() {
         let a = RMSNormAttributes(dimension: 2048, epsilon: 1e-5)
-        #expect(a.dispatchDeclarations.count == 1)
-        if case .compute(let op) = a.dispatchDeclarations[0] {
-            #expect(op.kernelName == "rms_norm")
-            if case .reduction(let dimension) = op.dispatchDimension {
-                #expect(dimension == 2048)
-            } else {
-                Issue.record("Expected .reduction dispatch dimension")
-            }
-        } else {
-            Issue.record("Expected .compute dispatch declaration")
+        let frag = a.fragment
+        #expect(frag is Reduction)
+        if case .reduction(let dim) = frag.dispatchDimension {
+            #expect(dim == 2048)
         }
     }
 
     @Test
-    func attentionDeclaresProjectionsAndCompute() {
-        let a = AttentionAttributes(
-            hiddenSize: 2048, headCount: 32, kvHeadCount: 8,
-            headDimension: 64, bias: false, causal: true,
-            rope: RoPEAttributes(dimension: 64, base: 500000.0))
-        // Q, K, V projections + RoPE compute + flash_attn compute + O projection = 6
-        #expect(a.dispatchDeclarations.count == 6)
-        // First three are projections
-        if case .projection(let qProj) = a.dispatchDeclarations[0] {
-            #expect(qProj.field == "q_proj")
-            #expect(qProj.inputDimension == 2048)
-            #expect(qProj.outputDimension == 32 * 64)
-        } else {
-            Issue.record("Expected q_proj projection")
-        }
-        // RoPE compute
-        if case .compute(let ropeOp) = a.dispatchDeclarations[3] {
-            #expect(ropeOp.kernelName == "rope")
-        } else {
-            Issue.record("Expected RoPE compute")
-        }
-        // Flash attention compute
-        if case .compute(let flashOp) = a.dispatchDeclarations[4] {
-            #expect(flashOp.kernelName == "flash_attn_decode")
-        } else {
-            Issue.record("Expected flash_attn_decode compute")
-        }
-        // O projection
-        if case .projection(let oProj) = a.dispatchDeclarations[5] {
-            #expect(oProj.field == "o_proj")
-        } else {
-            Issue.record("Expected o_proj projection")
-        }
-    }
-
-    @Test
-    func mlpDeclaresProjectionsAndSwiGLU() {
-        let a = MLPAttributes(
-            inputSize: 2048, outputSize: 2048, intermediateSize: 8192,
-            activation: .silu, gating: .swiglu, bias: false)
-        // gate_proj + up_proj + swiglu compute + down_proj = 4
-        #expect(a.dispatchDeclarations.count == 4)
-        if case .compute(let swiOp) = a.dispatchDeclarations[2] {
-            #expect(swiOp.kernelName == "swiglu")
-        } else {
-            Issue.record("Expected swiglu compute")
-        }
-    }
-
-    @Test
-    func outputHeadDeclaresProjectionAndArgmax() {
-        let a = OutputHeadAttributes(inputSize: 2048, vocabSize: 32000, tiedToEmbedding: true, bias: false)
-        #expect(a.dispatchDeclarations.count == 2)
-        if case .projection(let proj) = a.dispatchDeclarations[0] {
-            #expect(proj.field == "weight")
-            #expect(proj.inputDimension == 2048)
-            #expect(proj.outputDimension == 32000)
-        } else {
-            Issue.record("Expected weight projection")
-        }
-        if case .compute(let argOp) = a.dispatchDeclarations[1] {
-            #expect(argOp.kernelName == "argmax")
-        } else {
-            Issue.record("Expected argmax compute")
-        }
-    }
-
-    @Test
-    func structuralOpsReturnNilMetalComponent() {
+    func structuralOpsReturnNilFragment() {
         let r = OperationKind.residual(strategy: .add, body: Region())
         let op = Operation(key: OperationKey(rawValue: 0), kind: r, operands: [], results: [])
-        #expect(op.metalComponent == nil)
-    }
-
-    @Test
-    func derivedProjectionsExtractsFromDeclarations() {
-        let a = AttentionAttributes(
-            hiddenSize: 2048, headCount: 32, kvHeadCount: 8,
-            headDimension: 64, bias: false, causal: true,
-            rope: RoPEAttributes(dimension: 64, base: 500000.0))
-        let projs = a.projections
-        #expect(projs.count == 4)
-        #expect(projs[0].field == "q_proj")
-        #expect(projs[1].field == "k_proj")
-        #expect(projs[2].field == "v_proj")
-        #expect(projs[3].field == "o_proj")
+        #expect(op.kernelFragment == nil)
     }
 }
 
@@ -234,7 +141,7 @@ struct KernelCompletenessTests {
         options.fastMathEnabled = true
         options.languageVersion = .version3_0
         let library = try device.makeLibrary(
-            source: MetalKernelSource.allKernelSource, options: options)
+            source: MetalSourceGenerator.generateCompleteLibrary(weightFormat: .bfloat16), options: options)
         let available = Set(library.functionNames)
 
         let formats: [any QuantizationFormat] = [
@@ -251,36 +158,24 @@ struct KernelCompletenessTests {
         }
     }
 
-    @Test("All MetalComputeOperation kernel names exist in MSL")
-    func computeOperationKernelsExist() throws {
-        guard let device = MTLCreateSystemDefaultDevice() else {
-            Issue.record("No Metal device")
-            return
-        }
-        let options = MTLCompileOptions()
-        options.fastMathEnabled = true
-        options.languageVersion = .version3_0
-        let library = try device.makeLibrary(
-            source: MetalKernelSource.allKernelSource, options: options)
-        let available = Set(library.functionNames)
-
-        let operations: [any MetalComputeOperation] = [
-            RMSNormOperation(dimension: 128, epsilon: 1e-6),
-            LayerNormOperation(dimension: 128, epsilon: 1e-6, affine: true),
-            SwiGLUOperation(dimension: 128),
-            FlashAttentionDecodeOperation(headCount: 4, kvHeadCount: 4, headDimension: 64),
-            RoPEOperation(headCount: 4, kvHeadCount: 4, headDimension: 64, ropeDimension: 64, base: 10000),
-            EmbeddingLookupOperation(vocabularySize: 1000, embeddingDimension: 128),
-            ArgmaxOperation(vocabularySize: 1000),
-            Conv1dOperation(dimension: 128, kernelSize: 3),
-            SSMRecurrenceOperation(headCount: 4, keyHeadDimension: 64, valueHeadDimension: 64),
-            SigmoidGateOperation(dimension: 128),
-            ResidualAddCopyRMSNormOperation(dimension: 128, epsilon: 1e-6),
-            CopyRMSNormOperation(dimension: 128, epsilon: 1e-6),
+    @Test("All primitive fragment kernels can be generated")
+    func primitiveFragmentKernelsGenerate() throws {
+        let fragments: [any PrimitiveMetalKernelFragment] = [
+            Reduction(dimension: 128, epsilon: 1e-6),
+            ElementwiseFragment(count: 128),
+            GatherFragment(vocabularySize: 1000, embeddingDimension: 128),
+            ArgmaxFragment(vocabularySize: 1000),
+            FlashAttentionFragment(headCount: 4, kvHeadCount: 4, headDimension: 64),
+            RoPEFragment(headCount: 4, kvHeadCount: 4, headDimension: 64, ropeDimension: 64, base: 10000),
+            QKNormFragment(headCount: 4, headDimension: 64, epsilon: 1e-6, weightRole: "q_layernorm"),
+            Conv1dFragment(dimension: 128, kernelSize: 3),
+            SigmoidGateFragment(dimension: 128),
         ]
-        for operation in operations {
-            #expect(available.contains(operation.kernelName),
-                "Missing kernel '\(operation.kernelName)' for \(type(of: operation))")
+        for frag in fragments {
+            let src = MetalSourceGenerator.generateForFragment(
+                frag, name: "test_\(type(of: frag))",
+                bufferPrecision: .float16, weightFormat: .bfloat16)
+            #expect(src != nil, "Failed to generate kernel for \(type(of: frag))")
         }
     }
 
@@ -294,7 +189,7 @@ struct KernelCompletenessTests {
         options.fastMathEnabled = true
         options.languageVersion = .version3_0
         let library = try device.makeLibrary(
-            source: MetalKernelSource.allKernelSource, options: options)
+            source: MetalSourceGenerator.generateCompleteLibrary(weightFormat: .bfloat16), options: options)
         let available = Set(library.functionNames)
 
         #expect(available.contains("copy_buffer"))

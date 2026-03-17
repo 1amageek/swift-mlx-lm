@@ -36,7 +36,7 @@ struct EmbeddingDiagnosticTests {
         let options = MTLCompileOptions()
         options.languageVersion = .version3_0
         let library = try device.makeLibrary(
-            source: MetalKernelSource.allKernelSource, options: options)
+            source: MetalSourceGenerator.generateCompleteLibrary(weightFormat: .bfloat16), options: options)
 
         // Test both single-token and seq BF16 kernels
         let kernelNames = ["embedding_lookup_bf16", "embedding_lookup_seq_bf16"]
@@ -151,7 +151,7 @@ struct EmbeddingDiagnosticTests {
         let options = MTLCompileOptions()
         options.languageVersion = .version3_0
         let library = try device.makeLibrary(
-            source: MetalKernelSource.allKernelSource, options: options)
+            source: MetalSourceGenerator.generateCompleteLibrary(weightFormat: .bfloat16), options: options)
         let pipeline = try device.makeComputePipelineState(
             function: library.makeFunction(name: "embedding_lookup_seq_bf16")!)
 
@@ -226,7 +226,7 @@ struct EmbeddingDiagnosticTests {
         let options = MTLCompileOptions()
         options.languageVersion = .version3_0
         let library = try device.makeLibrary(
-            source: MetalKernelSource.allKernelSource, options: options)
+            source: MetalSourceGenerator.generateCompleteLibrary(weightFormat: .bfloat16), options: options)
         let pipeline = try device.makeComputePipelineState(
             function: library.makeFunction(name: "rms_norm_seq_bf16")!)
 
@@ -316,7 +316,7 @@ struct EmbeddingDiagnosticTests {
         let options = MTLCompileOptions()
         options.languageVersion = .version3_0
         let library = try device.makeLibrary(
-            source: MetalKernelSource.allKernelSource, options: options)
+            source: MetalSourceGenerator.generateCompleteLibrary(weightFormat: .bfloat16), options: options)
         let pipeline = try device.makeComputePipelineState(
             function: library.makeFunction(name: "gemm_q4_g64")!)
 

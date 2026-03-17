@@ -330,7 +330,7 @@ struct STAFRoundtripTests {
         options.fastMathEnabled = true
         options.languageVersion = .version3_0
         let library = try device.makeLibrary(
-            source: MetalKernelSource.allKernelSource, options: options)
+            source: MetalSourceGenerator.generateCompleteLibrary(weightFormat: .bfloat16), options: options)
         guard let function = library.makeFunction(name: "embedding_lookup") else {
             Issue.record("embedding_lookup kernel not found")
             return

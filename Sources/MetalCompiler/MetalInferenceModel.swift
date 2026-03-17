@@ -70,19 +70,27 @@ public struct MetalInferenceModel: @unchecked Sendable {
         cb.commit()
         cb.waitUntilCompleted()
         if let error = cb.error { print("[MetalInference] GPU error: \(error)") }
+
+
         position += 1
         return b.tokenOut.contents().bindMemory(to: Int32.self, capacity: 1).pointee
     }
 
     // MARK: - Prefill
 
-    public mutating func prefill(tokens: [Int32]) {
+    /// Prefill the KV cache with prompt tokens and return the first predicted token.
+    ///
+    /// Returns the argmax of the prefill logits (the model's first generated token).
+    /// The caller should output this token and feed it to the first decode step.
+    @discardableResult
+    public mutating func prefill(tokens: [Int32]) -> Int32 {
         guard let prefill = prefillPlan else {
-            for token in tokens { let _ = decodeSync(tokenID: token) }
-            return
+            var lastOutput: Int32 = -1
+            for token in tokens { lastOutput = decodeSync(tokenID: token) }
+            return lastOutput
         }
-        guard !tokens.isEmpty else { return }
-        guard tokens.count <= prefill.maximumSequenceLength else { return }
+        guard !tokens.isEmpty else { return -1 }
+        guard tokens.count <= prefill.maximumSequenceLength else { return -1 }
 
         let seqLen = tokens.count
         let prefillStart = CFAbsoluteTimeGetCurrent()
@@ -97,7 +105,7 @@ public struct MetalInferenceModel: @unchecked Sendable {
 
         // Execute sequence graph
         guard let commandBuffer = commandQueue.makeCommandBuffer(),
-              let encoder = commandBuffer.makeComputeCommandEncoder() else { return }
+              let encoder = commandBuffer.makeComputeCommandEncoder() else { return -1 }
 
         var dispatchCount = 0
         for step in prefill.steps {
@@ -143,17 +151,62 @@ public struct MetalInferenceModel: @unchecked Sendable {
 
         if let error = commandBuffer.error {
             print("[MetalInference] PREFILL FAILED: \(error.localizedDescription)")
-            return
+            return -1
         }
 
-        // Transfer state: prefill float32 hidden → decode float16 hidden
+        // Diagnostic: check prefill output before transfer
+        do {
+            let hiddenDim = self.plan.buffers.hidden.length / MemoryLayout<Float32>.size
+            let prefillHiddenStride = hiddenDim * MemoryLayout<Float32>.size
+            let lastOff = (seqLen - 1) * prefillHiddenStride
+            let pHidden = (prefill.buffers.hidden.contents() + lastOff).bindMemory(to: Float32.self, capacity: hiddenDim)
+            var pNorm: Float = 0; var pNan = 0; var pZero = 0
+            for i in 0..<hiddenDim {
+                let v = Float(pHidden[i])
+                if v.isNaN { pNan += 1 }
+                if v == 0 { pZero += 1 }
+                pNorm += v * v
+            }
+            pNorm = sqrtf(pNorm)
+            print("[Prefill→Decode] prefill hidden (last token): [\(Float(pHidden[0])), \(Float(pHidden[1])), \(Float(pHidden[2])), \(Float(pHidden[3]))] norm=\(pNorm) nan=\(pNan) zero=\(pZero)/\(hiddenDim)")
+
+            // Check prefill logits
+            let logitsDim = prefill.buffers.logits.length / MemoryLayout<Float32>.size
+            let pLogits = prefill.buffers.logits.contents().bindMemory(to: Float32.self, capacity: logitsDim)
+            var maxVal: Float = -.infinity; var maxIdx = 0; var lNan = 0
+            for i in 0..<logitsDim {
+                let v = Float(pLogits[i])
+                if v.isNaN { lNan += 1 }
+                if v > maxVal { maxVal = v; maxIdx = i }
+            }
+            print("[Prefill→Decode] prefill logits[\(logitsDim)]: max=\(maxVal)@\(maxIdx) nan=\(lNan)")
+
+            // Check conv_state
+            if let cs = prefill.buffers.convState {
+                let csDim = cs.length / MemoryLayout<Float32>.size
+                let csPtr = cs.contents().bindMemory(to: Float32.self, capacity: csDim)
+                var csNan = 0; var csZero = 0
+                for i in 0..<csDim {
+                    let v = Float(csPtr[i])
+                    if v.isNaN { csNan += 1 }
+                    if v == 0 { csZero += 1 }
+                }
+                print("[Prefill→Decode] conv_state[\(csDim)]: nan=\(csNan) zero=\(csZero) first=[\(Float(csPtr[0])), \(Float(csPtr[1]))]")
+            }
+        }
+
+        // Transfer hidden: convert last token from prefill F32 to decode F16
         let decodeHiddenSize = self.plan.buffers.hidden.length / MemoryLayout<Float16>.size
-        let prefillHiddenStride = decodeHiddenSize * MemoryLayout<Float>.size
+        let prefillHiddenStride = decodeHiddenSize * MemoryLayout<Float32>.size
         let lastTokenOffset = (seqLen - 1) * prefillHiddenStride
         if lastTokenOffset + prefillHiddenStride <= prefill.buffers.hidden.length {
-            let src = (prefill.buffers.hidden.contents() + lastTokenOffset).bindMemory(to: Float.self, capacity: decodeHiddenSize)
-            let dst = self.plan.buffers.hidden.contents().bindMemory(to: Float16.self, capacity: decodeHiddenSize)
-            for i in 0..<decodeHiddenSize { dst[i] = Float16(src[i]) }
+            let src = (prefill.buffers.hidden.contents() + lastTokenOffset)
+                .bindMemory(to: Float32.self, capacity: decodeHiddenSize)
+            let dst = self.plan.buffers.hidden.contents()
+                .bindMemory(to: Float16.self, capacity: decodeHiddenSize)
+            for i in 0..<decodeHiddenSize {
+                dst[i] = Float16(src[i])
+            }
         }
 
         // Copy KV cache
@@ -166,9 +219,19 @@ public struct MetalInferenceModel: @unchecked Sendable {
                    min(decodeKV.values.length, prefillKV.values.length))
         }
 
+        // Copy conv_state (already in Float16 from extract_conv_state kernel)
+        if let prefillConvState = prefill.buffers.convState,
+           let decodeConvState = self.plan.buffers.convState {
+            memcpy(decodeConvState.contents(), prefillConvState.contents(),
+                   min(decodeConvState.length, prefillConvState.length))
+        }
+
         let totalTime = CFAbsoluteTimeGetCurrent() - prefillStart
         print("[MetalInference] prefill: \(seqLen) tokens, \(dispatchCount) dispatches [\(String(format: "%.3f", totalTime))s] \(String(format: "%.0f", Double(seqLen) / totalTime)) tok/s")
         position += seqLen
+
+        // Return the first predicted token (argmax of prefill logits)
+        return prefill.buffers.tokenOut.contents().bindMemory(to: Int32.self, capacity: 1).pointee
     }
 
     private func encodeBatchStep(_ encoder: MTLComputeCommandEncoder, step: MetalPrefillStep, sequenceLength: UInt32) {

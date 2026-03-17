@@ -42,3 +42,6 @@ Thumbs.db
 
 # Claude Code
 .claude/
+
+# Test data (model weights — too large for git)
+TestData/

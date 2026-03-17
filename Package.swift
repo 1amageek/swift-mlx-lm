@@ -56,7 +56,7 @@ let package = Package(
         .testTarget(name: "ModelsTests", dependencies: [
             "ModelDeclarations", "LMArchitecture",
             .product(name: "TestHeartbeat", package: "swift-testing-heartbeat"),
-        ], exclude: ["ModelDeclarationTests.swift"]),
+        ]),
         .testTarget(name: "SwiftLMTests", dependencies: [
             "SwiftLM",
             .product(name: "TestHeartbeat", package: "swift-testing-heartbeat"),

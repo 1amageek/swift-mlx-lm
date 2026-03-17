@@ -1,180 +1,135 @@
 # swift-lm
 
-High-performance LLM inference on Apple Silicon.
+High-performance LLM inference on Apple Silicon using direct Metal compute.
 
 ## Overview
 
-A Swift package for LLM inference on Apple Silicon. Models are loaded directly from HuggingFace directories (config.json + safetensors + tokenizer.json) — no model-specific Swift types required.
+A Swift package for LLM inference on Apple Silicon. Models are loaded directly from HuggingFace directories (config.json + safetensors + tokenizer.json) — no model-specific Swift types required. The consumer specifies only a HuggingFace repo ID.
 
 ```swift
-import LMInference
+import SwiftLM
 
-// Just specify a HuggingFace repo ID — that's all
-let container = try await ModelBundleLoader().load(repo: "mlx-community/Qwen2.5-0.5B-Instruct-4bit")
+let container = try await ModelBundleLoader().load(repo: "LiquidAI/LFM2.5-1.2B-Instruct")
 
-let input = UserInput(chat: [
-    .system("You are a helpful assistant."),
-    .user("What is 1+1?"),
-])
-let lmInput = try await container.prepare(input: input)
-
-let stream = try await container.generate(input: lmInput, parameters: GenerateParameters())
-for await generation in stream {
-    switch generation {
-    case .chunk(let text):
-        print(text, terminator: "")
-    case .info(let info):
-        print("\n\(info.tokensPerSecond) tok/s")
-    default:
-        break
-    }
+for await generation in container.generate(input: try container.prepare(input: UserInput("Hello"))) {
+    if let text = generation.chunk { print(text, terminator: "") }
 }
 ```
 
 ## Architecture
 
-Three core modules with clear separation of concerns:
-
-| Module | Depends on | Description |
-|--------|------------|-------------|
-| **SwiftLM** | — | IR schema + declarative DSL for model architectures |
-| **ModelDeclarations** | SwiftLM | DSL model declarations (design & training) |
-| **LMCompiler** | SwiftLM | Compiles IR to optimized inference engines (MLX + MPSGraph) |
-| **LMInference** | SwiftLM, LMCompiler | HF loader, tokenizer, generation pipeline, backend selection |
-
 ```
-SwiftLM ─── ModelDeclarations
+LMIR (IR — no dependencies)
+    │  ModelGraph, OperationKind, ParameterBinding, OperationAttributes
     │
-LMCompiler
+    ├── LMArchitecture (DSL + Validation — re-exports LMIR)
+    │   ├── ModelComponent protocol + @ModelComponentBuilder
+    │   ├── Components: Attention, MLP, RMSNorm, ShortConv, ...
+    │   └── SemanticNormalizer, GraphValidator, DimensionValidator
     │
-LMInference
+    ├── ModelDeclarations (depends: LMArchitecture)
+    │   └── Transformer, Qwen35, LFM2, Cohere
+    │
+    ├── MetalCompiler (depends: LMIR only)
+    │   ├── MetalKernelFragment protocol + fragment tree
+    │   ├── MetalSourceGenerator (on-demand MSL generation)
+    │   ├── MetalInferenceCompiler (IR walk → fusion → dispatch plan)
+    │   ├── MetalInferenceModel (decode/prefill execution)
+    │   └── STAF (weight format, parameter resolution)
+    │
+    └── SwiftLM (consumer API)
+        ├── ModelBundleLoader (HF download → STAF → compile)
+        ├── ModelContainer (generate, encode, decode)
+        └── UserInput, ChatMessage, GenerateParameters
 ```
 
-**Important**: LMInference does not depend on ModelDeclarations. `IRGraphAssembler` builds IR directly from config.json.
+## Metal Backend
 
-### Inference Backends
+All inference runs on direct Metal compute — no MLX, no MPSGraph.
 
-MPSGraph and MLX are independent backends. Each can be selected explicitly.
+### Fragment-Driven Kernel Generation
 
-| Backend | Advantage |
-|---|---|
-| **MPSGraph** | MPSGraph fused execution, compiled graph plan |
-| **MLX** | Dynamic shapes, LoRA, quantization, custom kernels |
-
-```swift
-// Select backend explicitly
-let container = try await ModelBundleLoader().load(repo: "...", backend: .mpsgraph)
-let container = try await ModelBundleLoader().load(repo: "...", backend: .mlx)
-```
-
-### HF-First Pipeline
+Each `ModelComponent` has a corresponding `MetalKernelFragment`, declaring its Metal execution as a compositional tree:
 
 ```
-HF Directory (config.json + *.safetensors + tokenizer.json)
-     │
-     ▼
-ModelBundleLoader
-  ├── HFConfigDecoder: config.json → ModelConfig
-  ├── HFArchitectureDetector: model_type → DetectedArchitecture
-  ├── IRGraphAssembler: (ModelConfig, DetectedArchitecture) → ModelGraph (IR)
-  │
-  ├── [MPSGraph path]
-  │   └── MPSGraphInferenceCompiler → MPSGraphInferenceModel → MPSGraphLanguageModel
-  │
-  └── [MLX path]
-      ├── HFDirectoryBundle: safetensors → WeightManifest → RawWeights
-      ├── MLXWeightPathBinder: RawWeights → BoundWeights
-      └── MLXInferenceCompiler → MLXInferenceModel → MLXLanguageModel
-           │
-           ▼
-     ModelContainer → TokenIterator → generate()
+LMArchitecture/Components/          MetalCompiler/Fragments/
+├── Attention.swift            ↔    ├── AttentionFragment.swift
+├── MLP.swift                  ↔    ├── MLPFragment.swift
+├── Norm.swift                 ↔    ├── NormFragment.swift
+├── ShortConv.swift            ↔    ├── ShortConvFragment.swift
+├── TokenEmbedding.swift       ↔    ├── TokenEmbeddingFragment.swift
+├── OutputHead.swift           ↔    ├── OutputHeadFragment.swift
+└── ...                        ↔    └── ...
 ```
 
-## Supported Architectures
+The compiler walks the fragment tree to:
+1. Emit dispatch entries from primitive fragments (Reduction, Linear, FlashAttention, ...)
+2. Fuse adjacent fragments (residualAdd + copy + RMSNorm → single kernel)
+3. Generate MSL kernel source on-demand from fragment parameters + weight format + buffer precision
+4. Compile into MTLLibrary → dispatch plan
 
-### Declarative Models (ModelDeclarations)
+No hardcoded kernel variants. dtype/precision is determined by the compiler from STAF weight format and execution phase.
 
-| Model | Architecture | VLM |
-|-------|-------------|-----|
-| `Transformer` | Standard pre-norm decoder (Llama, Qwen 2, Mistral, Phi, Gemma, Mixtral MoE) | — |
-| `Qwen35` | Hybrid Gated DeltaNet + Full Attention | — |
-| `Cohere` | LayerNorm + QK normalization (Command-R) | — |
-| `LFM2` | Hybrid ShortConv + GQA Attention (LiquidAI LFM2/2.5) | — |
+### Precision
 
-## Features
+- **Prefill**: Float32 hidden/residual/scratch — prevents accumulation error across 16+ layers
+- **Decode**: Float16 — single token per step, no accumulation
+- **Weights**: BFloat16 natively supported — `bf16_to_float()` conversion in kernel
+- **KV cache**: Float16
 
-- **HF-first loading** — config.json + safetensors + tokenizer.json is all you need
-- **Dual backends** — MPSGraph and MLX as independent inference backends
-- **Chat template** — Jinja2 evaluation via [swift-jinja](https://github.com/huggingface/swift-jinja), no hand-written formatters
-- **Streaming generation** — `AsyncStream<Generation>` with token-by-token output
-- **Tool calling** — JSON and XML tool call format detection
-- **LoRA/DoRA** — adapter loading support
-- **Prompt caching** — `PrefixCachePool` for live cache reuse, `PromptCacheSnapshot` for serialized prefix restore
-- **Hybrid caching** — KV cache for attention layers, recurrent state for DeltaNet layers
-- **Pre-quantized models** — mlx-community safetensors with native quantization format
+### STAF (SafeTensor Accelerated Format)
 
-## SwiftLM DSL
+Weights are converted from safetensors to STAF for zero-copy GPU loading:
 
-SwiftLM is a declarative model description framework. It separates **what a model is** (structure) from **how it runs** (backend).
-
-```swift
-import SwiftLM
-import ModelDeclarations
-
-let llama = Transformer(config: .init(
-    hiddenSize: 4096,
-    hiddenLayers: 32,
-    intermediateSize: 11008,
-    attentionHeads: 32,
-    kvHeads: 8,
-    vocabularySize: 32000
-))
-
-let graph = try llama.makeModelGraph()
+```
+*.safetensors → STAFConverter (once) → *.staf → mmap + bytesNoCopy → MTLBuffer
 ```
 
-### Components
+## Supported Models
 
-Models are composed from semantic building blocks:
+| Model | Type | Architecture |
+|-------|------|-------------|
+| Transformer | Dense / MoE | Llama, Qwen 2/3, Mistral, Gemma, Phi, Mixtral, DeepSeek |
+| Qwen 3.5 | Hybrid | Gated DeltaNet + Full Attention |
+| LFM2 / LFM2.5 | Hybrid | ShortConv + GQA Attention (dense and MoE) |
+| Cohere | Dense | LayerNorm + QK normalization (Command-R) |
 
-| Component | Description |
-|-----------|-------------|
-| `TokenEmbedding` | Token ID → dense vector |
-| `Attention` | Multi-head attention with GQA, RoPE, M-RoPE, QK norm, sliding window |
-| `MLP` | Feed-forward with configurable activation and gating (SwiGLU, GELU, etc.) |
-| `MoE` | Mixture-of-Experts routing |
-| `RMSNorm` / `LayerNorm` | Normalization layers |
-| `StateSpace` | SSM variants (Mamba, DeltaNet, ShortConv) |
-| `OutputHead` | Hidden → vocabulary logits (optional weight tying) |
-| `Residual` | Skip connection |
-| `Parallel` | Multi-branch with merge strategy |
-| `Repeat` | Stack identical blocks N times |
+## Build & Test
 
-## Installation
-
-Add to your `Package.swift`:
-
-```swift
-dependencies: [
-    .package(url: "https://github.com/1amageek/swift-lm.git", from: "0.1.0"),
-],
-targets: [
-    .target(
-        name: "YourTarget",
-        dependencies: [
-            .product(name: "LMInference", package: "swift-lm"),
-        ]
-    ),
-]
+```bash
+swift build
 ```
 
-Requires macOS 15+, iOS 18+, or visionOS 2+. Swift 6.2.
+Tests require Metal GPU — use `xcodebuild test`, not `swift test`:
+
+```bash
+xcodebuild test -scheme swift-lm-Package -destination 'platform=macOS' \
+    -only-testing 'ModelsTests' -parallel-testing-enabled NO
+```
+
+### Reference Comparison Tests
+
+Verify Metal output against Python HuggingFace reference:
+
+```bash
+# Generate reference tensors
+python3 scripts/dump_lfm2_reference.py
+
+# Run comparison
+xcodebuild test -scheme swift-lm-Package -destination 'platform=macOS' \
+    -only-testing 'MetalCompilerTests/ReferenceComparisonTests'
+```
+
+## Requirements
+
+- macOS 15+ / iOS 18+ / visionOS 2+
+- Swift 6.2+
+- Apple Silicon (Metal GPU)
 
 ## Dependencies
 
-- [mlx-swift](https://github.com/ml-explore/mlx-swift) (0.30.6+) — MLX framework
-- [swift-jinja](https://github.com/huggingface/swift-jinja) (2.3.2+) — Chat template evaluation
-- [swift-transformers](https://github.com/huggingface/swift-transformers) (1.1.9+) — Tokenizers and HuggingFace Hub
+- [swift-jinja](https://github.com/huggingface/swift-jinja) — Chat template evaluation
+- [swift-transformers](https://github.com/huggingface/swift-transformers) — Tokenizers and HuggingFace Hub
 
 ## License
 

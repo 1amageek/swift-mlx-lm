@@ -1,153 +1,6 @@
 import Metal
 import LMIR
 
-// MARK: - Dispatch Plan Types
-
-public struct MetalDispatchStep: @unchecked Sendable {
-    public let pipeline: MTLComputePipelineState
-    public let gridSize: MTLSize
-    public let threadgroupSize: MTLSize
-    public let bufferBindings: [(index: Int, buffer: MTLBuffer, offset: Int)]
-    public let bytesBindings: [(index: Int, value: [UInt8])]
-    public let threadgroupMemoryLength: Int
-    public let sync: SynchronizationKind
-}
-
-public struct MetalDispatchPlan: @unchecked Sendable {
-    public let steps: [MetalDispatchStep]
-    public let buffers: MetalBufferSet
-    /// Number of entries before fusion (for diagnostics).
-    public let unfusedEntryCount: Int
-    /// Number of entries after fusion (for diagnostics).
-    public let fusedEntryCount: Int
-}
-
-public struct MetalBufferSet: @unchecked Sendable {
-    public let hidden: MTLBuffer
-    public let residual: MTLBuffer
-    public let scratch: MTLBuffer
-    public let weights: [MTLBuffer]
-    /// Consolidated KV cache (single K + single V buffer for all layers).
-    public let kvCache: MetalKVCache?
-    /// Conv state for ShortConv layers: [numConvLayers × kernelSize × convDimension] in Float16.
-    /// Each conv layer has a temporal window of the last kernelSize tokens' conv inputs.
-    public let convState: MTLBuffer?
-    /// Conv state layout: dimension per conv layer slot.
-    public let convStateDimension: Int
-    /// Conv state layout: kernel size (temporal window).
-    public let convStateKernelSize: Int
-    public let logits: MTLBuffer
-    public let position: MTLBuffer
-    public let tokenIn: MTLBuffer
-    public let tokenOut: MTLBuffer
-}
-
-// MARK: - Prefill Plan Types
-
-/// Execution mode for a prefill step.
-public enum PrefillStepMode: Sendable {
-    /// Dispatched once for the entire sequence. Grid includes seqLen dimension.
-    /// Kernel operates on [seqLen × dim] buffers.
-    case batch
-    /// Dispatched once per sequence position. Used for attention (KV cache is position-dependent).
-    /// The runtime loops over positions and adjusts offsets per dispatch.
-    case perPosition
-    /// Dispatched once, for the last token only. Used for output head and argmax.
-    /// Runtime adjusts input buffer offsets by (seqLen - 1) * stride using perPositionStrides.
-    case lastToken
-}
-
-/// A single step in the prefill sequence graph.
-///
-/// `steps.count = O(layers × ops_per_layer)` — does NOT scale with token count.
-/// Batch steps operate on [seqLen × dim] buffers. PerPosition steps are looped
-/// by the runtime for the attention KV cache fill.
-public struct MetalPrefillStep: @unchecked Sendable {
-    public let pipeline: MTLComputePipelineState
-    /// Grid size for batch steps. For perPosition steps, this is the per-token grid.
-    public let gridSize: MTLSize
-    public let threadgroupSize: MTLSize
-    public let bufferBindings: [(index: Int, buffer: MTLBuffer, offset: Int)]
-    public let bytesBindings: [(index: Int, value: [UInt8])]
-    public let threadgroupMemoryLength: Int
-    public let sync: SynchronizationKind
-    public let mode: PrefillStepMode
-    /// For batch steps with seqLen in grid.y: the seqLen bytes binding index.
-    /// Runtime overwrites this with actual sequence length.
-    public let sequenceLengthBindingIndex: Int?
-    /// For perPosition steps: the buffer binding index for the position value.
-    public let positionBufferIndex: Int?
-    /// For perPosition steps: per-buffer-binding stride (bytes per position).
-    /// Key = buffer binding index, Value = stride in bytes.
-    /// Buffers not in this map are not adjusted per position (e.g., KV cache, weights).
-    public let perPositionStrides: [Int: Int]
-}
-
-/// Sequence-aware execution plan for prefill.
-///
-/// `steps.count` is constant regardless of token count.
-/// The runtime dispatches batch steps once and loops perPosition steps.
-///
-/// Buffer layout: all intermediate buffers are [maxSeqLen × dim].
-public struct MetalPrefillPlan: @unchecked Sendable {
-    public let steps: [MetalPrefillStep]
-    public let buffers: PrefillBufferSet
-    /// Maximum sequence length supported by the allocated buffers.
-    public let maximumSequenceLength: Int
-    /// Step count (should be constant, not proportional to token count).
-    public let stepCount: Int
-}
-
-/// Prefill-specific buffer set with [maxSeqLen × dim] layout.
-public struct PrefillBufferSet: @unchecked Sendable {
-    /// Hidden states: [maxSeqLen × hiddenSize]
-    public let hidden: MTLBuffer
-    /// Residual: [maxSeqLen × hiddenSize]
-    public let residual: MTLBuffer
-    /// Scratch workspace: [maxSeqLen × maxDim]
-    public let scratch: MTLBuffer
-    /// Weight buffers (shared with decode — same STAF data)
-    public let weights: [MTLBuffer]
-    /// KV cache (shared with decode)
-    public let kvCache: MetalKVCache?
-    /// Logits: [vocabSize] — only last token needed
-    public let logits: MTLBuffer
-    /// Token IDs input: [maxSeqLen]
-    public let tokenIDs: MTLBuffer
-    /// Position array: [maxSeqLen]
-    public let positions: MTLBuffer
-    /// Token output: [1]
-    public let tokenOut: MTLBuffer
-}
-
-// MARK: - Dispatch Entry (Intermediate Representation)
-
-/// A single kernel dispatch in the plan.
-/// Produced by the IR walk, transformed by the fusion pass.
-public struct DispatchEntry: Sendable {
-    public let index: Int
-    public let kind: DispatchKind
-    /// Parameter bindings from the IR operation (weight tensor names).
-    public let parameterBindings: [ParameterBinding]
-    public let layerIndex: Int?
-
-    public init(index: Int, kind: DispatchKind, parameterBindings: [ParameterBinding] = [], layerIndex: Int? = nil) {
-        self.index = index
-        self.kind = kind
-        self.parameterBindings = parameterBindings
-        self.layerIndex = layerIndex
-    }
-}
-
-public enum DispatchKind: Sendable {
-    /// GEMV projection. `isOutput` marks the last projection in an operation
-    /// (writes to hidden buffer instead of scratch).
-    case projection(MetalProjection, isOutput: Bool = false)
-    case compute(any MetalComputeOperation)
-    case structuralCopy(dimension: Int)
-    case structuralAdd(dimension: Int)
-}
-
 // MARK: - Compiler
 
 /// Compiles a ModelGraph into a MetalDispatchPlan.
@@ -186,10 +39,11 @@ public struct MetalInferenceCompiler: Sendable {
         // Phase 2: Fusion pass
         let fusedEntries = fusionPass(entries: walkContext.entries)
 
-        // Phase 3: Compile all kernel source → single MTLLibrary
-        // Use MTLBinaryArchive to cache compiled pipelines on disk.
-        // First load avoids JIT compilation on subsequent launches.
-        let library = try Self.getOrCompileLibrary(device: device)
+        // Phase 3: Compile only the kernels needed by this model's dispatch entries
+        // Decode uses F16 buffers (single token, no accumulation)
+        let library = try compileLibrary(
+            entries: fusedEntries, stafWeightStore: stafWeightStore,
+            bufferPrecision: .float16, device: device)
 
         // Build pipeline cache: kernelName → MTLComputePipelineState
         var pipelineCache: [String: MTLComputePipelineState] = [:]
@@ -225,8 +79,11 @@ public struct MetalInferenceCompiler: Sendable {
 
         let scratchElementCount = max(decodeSlotDimension * 4, resolvedIntermediateSize * 4)
 
-        // DEBUG: all buffers shared for CPU inspection. Change back to private for production.
-        let gpuOnlyOptions: MTLResourceOptions = [.storageModeShared]
+        // GPU-only buffers: private + untracked for optimal GPU access.
+        // No CPU cache coherency overhead, no automatic hazard tracking.
+        // We insert barriers manually via SynchronizationKind.bufferBarrier.
+        let gpuOnlyOptions: MTLResourceOptions = [.storageModePrivate, .hazardTrackingModeUntracked]
+        // CPU-accessible buffers: shared for CPU read/write each step.
         let cpuAccessOptions: MTLResourceOptions = [.storageModeShared]
 
         let hiddenBuffer = device.makeBuffer(length: hiddenSize * elementSize, options: gpuOnlyOptions)!
@@ -262,7 +119,7 @@ public struct MetalInferenceCompiler: Sendable {
         var convDimension = 0
         var convKernelSize = 0
         for entry in fusedEntries {
-            if case .compute(let op) = entry.kind, let convOp = op as? Conv1dOperation {
+            if case .fragment(let frag) = entry.kind, let convOp = frag as? Conv1dFragment {
                 convLayerCount += 1
                 convDimension = max(convDimension, convOp.dimension)
                 convKernelSize = max(convKernelSize, convOp.kernelSize)
@@ -313,7 +170,7 @@ public struct MetalInferenceCompiler: Sendable {
         var routingState = BufferRoutingState()
 
         for entry in fusedEntries {
-            var resolvedKernelName = kernelName(for: entry.kind, entry: entry, stafWeightStore: stafWeightStore)
+            let resolvedKernelName = kernelName(for: entry.kind, entry: entry, stafWeightStore: stafWeightStore)
             guard let pipeline = pipelineCache[resolvedKernelName] else {
                 throw MetalCompilerError.kernelNotFound(resolvedKernelName)
             }
@@ -384,8 +241,10 @@ public struct MetalInferenceCompiler: Sendable {
         // Fusion pass (same as decode — fuses norm + structural)
         let fusedEntries = fusionPass(entries: walkContext.entries)
 
-        // Get compiled library
-        let library = try Self.getOrCompileLibrary(device: device)
+        // Compile only the kernels needed by this model's prefill dispatch entries
+        let library = try compileLibrary(
+            entries: fusedEntries, stafWeightStore: stafWeightStore,
+            bufferPrecision: .float32, device: device)
         var pipelineCache: [String: MTLComputePipelineState] = [:]
         for name in library.functionNames {
             if let function = library.makeFunction(name: name) {
@@ -408,16 +267,40 @@ public struct MetalInferenceCompiler: Sendable {
         }
 
         // Allocate sequence-sized buffers
+        // Prefill uses Float32 for hidden/residual/scratch to avoid Float16 precision loss
+        // across 16+ layers. Decode stays Float16 (single token, no accumulation).
         let elementSize = MemoryLayout<Float16>.size
+        let f32ElementSize = MemoryLayout<Float32>.size
         let resolvedIntermediateSize = max(intermediateSize, hiddenSize * 4)
         let resolvedVocabSize = max(vocabSize, 1)
         // Slot stride must accommodate the largest projection output
         let slotDimension = max(hiddenSize, resolvedIntermediateSize, maxProjectionOutputDimension)
         let maxSeq = maximumSequenceLength
         let scratchElementCount = max(slotDimension * 4, resolvedIntermediateSize * 4)
+        // Prefill buffers: shared for CPU read during prefill→decode transfer.
+        // (hidden F32→F16 conversion, KV cache memcpy, conv_state memcpy)
         let gpuOptions: MTLResourceOptions = [.storageModeShared]
 
-        let f32ElementSize = MemoryLayout<Float>.size  // 4 bytes — all intermediate buffers are float32
+        // Count conv layers for prefill conv_state allocation
+        var prefillConvLayerCount = 0
+        var prefillConvDimension = 0
+        var prefillConvKernelSize = 0
+        for entry in fusedEntries {
+            if case .fragment(let frag) = entry.kind, let convOp = frag as? Conv1dFragment {
+                prefillConvLayerCount += 1
+                prefillConvDimension = max(prefillConvDimension, convOp.dimension)
+                prefillConvKernelSize = max(prefillConvKernelSize, convOp.kernelSize)
+            }
+        }
+        let prefillConvStateBuffer: MTLBuffer?
+        if prefillConvLayerCount > 0 {
+            let convStateBytes = prefillConvLayerCount * prefillConvKernelSize * prefillConvDimension * elementSize
+            prefillConvStateBuffer = device.makeBuffer(length: convStateBytes, options: [.storageModeShared])
+            if let buf = prefillConvStateBuffer { memset(buf.contents(), 0, buf.length) }
+        } else {
+            prefillConvStateBuffer = nil
+        }
+
         let prefillBuffers = PrefillBufferSet(
             hidden: device.makeBuffer(length: maxSeq * hiddenSize * f32ElementSize, options: gpuOptions)!,
             residual: device.makeBuffer(length: maxSeq * hiddenSize * f32ElementSize, options: gpuOptions)!,
@@ -432,7 +315,10 @@ public struct MetalInferenceCompiler: Sendable {
                         kvHeadCount: firstSlot.kvHeadCount,
                         headDimension: firstSlot.headDimension))
             }(),
-            logits: device.makeBuffer(length: resolvedVocabSize * elementSize, options: gpuOptions)!,
+            convState: prefillConvStateBuffer,
+            convStateDimension: prefillConvDimension,
+            convStateKernelSize: prefillConvKernelSize,
+            logits: device.makeBuffer(length: resolvedVocabSize * f32ElementSize, options: gpuOptions)!,
             tokenIDs: device.makeBuffer(length: maxSeq * 4, options: [.storageModeShared])!,
             positions: device.makeBuffer(length: maxSeq * 4, options: [.storageModeShared])!,
             tokenOut: device.makeBuffer(length: 4, options: [.storageModeShared])!
@@ -517,10 +403,10 @@ public struct MetalInferenceCompiler: Sendable {
         switch entry.kind {
 
         // MARK: Embedding (batch)
-        case .compute(let op) where op is EmbeddingLookupOperation:
-            let embOp = op as! EmbeddingLookupOperation
+        case .fragment(let frag) where frag is GatherFragment:
+            let embOp = frag as! GatherFragment
             let (weightBuffer, weightOffset) = resolveWeight(role: "embedding_table")
-            // Determine kernel variant (BF16 or FP16)
+            // Determine kernel variant: F32 output for prefill precision
             var kernelName = "embedding_lookup_seq_f32"
             if let staf = stafWeightStore,
                let binding = entry.parameterBindings.first(where: { $0.role == "embedding_table" }),
@@ -559,12 +445,11 @@ public struct MetalInferenceCompiler: Sendable {
             let (weightBuffer, weightOffset) = resolveWeight(role: projection.field)
             let isOutputHead = isOutput && projection.outputDimension > hiddenSize
 
-            // Select GEMM kernel variant based on weight format
+            // Select GEMM kernel variant: F32 scratch I/O to prevent precision loss
             var kernelName = "gemm_f32s"
             if let binding = entry.parameterBindings.first(where: { $0.role == projection.field }),
                let staf = stafWeightStore,
                let tensorInfo = staf.tensor(for: binding.tensorName) {
-                // Select float32 scratch GEMM variant based on weight format
                 let baseGemv = tensorInfo.format.gemvKernelName
                 if baseGemv == "gemv_bf16" {
                     kernelName = "gemm_bf16_f32s"
@@ -577,7 +462,6 @@ public struct MetalInferenceCompiler: Sendable {
                 }
                 if pipelineCache[kernelName] == nil { kernelName = "gemm_f32s" }
             }
-            // All projections use f32s (float32 I/O) — hidden is also float32 now
             let pipeline = try getPipeline(kernelName)
 
             let inputBuffer: MTLBuffer
@@ -615,16 +499,14 @@ public struct MetalInferenceCompiler: Sendable {
             let gridX = (projection.outputDimension + 1) / 2
 
             // Output head: only process last token (logits buffer is [vocabSize], not [seqLen × vocabSize]).
-            // Uses GEMV-style single-token dispatch. Runtime adjusts input offset to last token.
+            // Uses the same GEMM kernel but with seqLen=1 (lastToken mode).
+            // Runtime adjusts input offset to the last token's position.
             if isOutputHead {
-                // Use float32 input → half output kernel for output head (hidden is float32, logits is float16)
-                let gemvPipeline = try getPipeline("gemm_bf16_f32_to_half")
-                let gemvThreads = min(2 * gemvPipeline.threadExecutionWidth, gemvPipeline.maxTotalThreadsPerThreadgroup)
                 let inputStride = projection.inputDimension * scratchElementSize
                 return [MetalPrefillStep(
-                    pipeline: gemvPipeline,
+                    pipeline: pipeline,
                     gridSize: MTLSize(width: gridX, height: 1, depth: 1),
-                    threadgroupSize: MTLSize(width: gemvThreads, height: 1, depth: 1),
+                    threadgroupSize: MTLSize(width: threads, height: 1, depth: 1),
                     bufferBindings: [
                         (0, inputBuffer, inputOffset),
                         (1, weightBuffer, weightOffset),
@@ -633,6 +515,7 @@ public struct MetalInferenceCompiler: Sendable {
                     bytesBindings: [
                         uint32Binding(3, UInt32(projection.inputDimension)),
                         uint32Binding(4, UInt32(projection.outputDimension)),
+                        uint32Binding(5, UInt32(1)),  // seqLen=1 for last token
                     ],
                     threadgroupMemoryLength: 0,
                     sync: .bufferBarrier,
@@ -666,13 +549,12 @@ public struct MetalInferenceCompiler: Sendable {
             )]
 
         // MARK: RMS Norm (batch)
-        // Standalone RMSNorm writes in-place to hidden (Float16).
+        // Standalone RMSNorm writes in-place to hidden (Float32 in prefill).
         // embedding_norm and final_norm results stay in hidden for the next operation.
-        // Uses Float16 kernel (NOT f32s) because output is hidden, not scratch.
-        case .compute(let op) where op is RMSNormOperation:
-            let normOp = op as! RMSNormOperation
+        case .fragment(let frag) where frag is Reduction:
+            let normOp = frag as! Reduction
             let (weightBuffer, weightOffset) = resolveWeight(role: "scale")
-            // Detect BF16 norm weights — still Float16 output (hidden is Float16)
+            // F32 in-place norm: hidden(F32) → hidden(F32)
             var normKernelName = "rms_norm_seq_f32_inplace"
             if let staf = stafWeightStore,
                let binding = entry.parameterBindings.first(where: { $0.role == "scale" }),
@@ -707,10 +589,11 @@ public struct MetalInferenceCompiler: Sendable {
             )]
 
         // MARK: Fused Copy+RMSNorm (batch) — treat as separate steps for prefill
-        case .compute(let op) where op is CopyRMSNormOperation:
-            let fusedOp = op as! CopyRMSNormOperation
+        case .fusedCopyNorm(let fusedOp):
+            
             let (weightBuffer, weightOffset) = resolveWeight(role: "scale")
 
+            // F32 hidden → F32 scratch via F32 norm kernel
             var normKernelForFused = "rms_norm_seq_f32_inplace"
             if let staf = stafWeightStore,
                let binding = entry.parameterBindings.first(where: { $0.role == "scale" }),
@@ -772,10 +655,11 @@ public struct MetalInferenceCompiler: Sendable {
             ]
 
         // MARK: Fused ResidualAdd+Copy+RMSNorm (batch) — decompose for prefill
-        case .compute(let op) where op is ResidualAddCopyRMSNormOperation:
-            let fusedOp = op as! ResidualAddCopyRMSNormOperation
+        case .fusedResidualAddCopyNorm(let fusedOp):
+            
             let (weightBuffer, weightOffset) = resolveWeight(role: "scale")
 
+            // F32 variant for all sub-operations
             var normKernelForResidual = "rms_norm_seq_f32_inplace"
             if let staf = stafWeightStore,
                let binding = entry.parameterBindings.first(where: { $0.role == "scale" }),
@@ -858,8 +742,8 @@ public struct MetalInferenceCompiler: Sendable {
             ]
 
         // MARK: Flash Attention (perPosition — KV cache is position-dependent)
-        case .compute(let op) where op is FlashAttentionDecodeOperation:
-            let flashOp = op as! FlashAttentionDecodeOperation
+        case .fragment(let frag) where frag is FlashAttentionFragment:
+            let flashOp = frag as! FlashAttentionFragment
             let layerIndex = kvCacheIndex
             kvCacheIndex += 1
             let scale: Float = 1.0 / Float(flashOp.headDimension).squareRoot()
@@ -928,13 +812,13 @@ public struct MetalInferenceCompiler: Sendable {
                 ]
             )]
 
-        // MARK: SwiGLU (batch)
-        case .compute(let op) where op is SwiGLUOperation:
-            let swigluOp = op as! SwiGLUOperation
+        // MARK: SwiGLU (batch) — F32 scratch I/O
+        case .fragment(let frag) where frag is ElementwiseFragment:
+            let swigluOp = frag as! ElementwiseFragment
             let pipeline = try getPipeline("swiglu_seq_f32")
             let maxScratchSlot = slotDimension * scratchElementSize * maximumSequenceLength
             let tgSize = min(256, pipeline.maxTotalThreadsPerThreadgroup)
-            let gridX = (swigluOp.dimension + tgSize - 1) / tgSize
+            let gridX = (swigluOp.count + tgSize - 1) / tgSize
             routingState.lastOutputIsHidden = false
             routingState.projectionIndex = 0
             return [MetalPrefillStep(
@@ -947,7 +831,7 @@ public struct MetalInferenceCompiler: Sendable {
                     (2, buffers.scratch, 0),
                 ],
                 bytesBindings: [
-                    uint32Binding(3, UInt32(swigluOp.dimension)),
+                    uint32Binding(3, UInt32(swigluOp.count)),
                     seqLenBinding(4),
                 ],
                 threadgroupMemoryLength: 0,
@@ -984,7 +868,7 @@ public struct MetalInferenceCompiler: Sendable {
                 perPositionStrides: [:]
             )]
 
-        // MARK: Structural Add (batch)
+        // MARK: Structural Add (batch) — F32 buffers
         case .structuralAdd(let dimension):
             let pipeline = try getPipeline("residual_add_seq_f32")
             let tgSize = min(256, pipeline.maxTotalThreadsPerThreadgroup)
@@ -1012,8 +896,8 @@ public struct MetalInferenceCompiler: Sendable {
             )]
 
         // MARK: RoPE (batch)
-        case .compute(let op) where op is RoPEOperation:
-            let ropeOp = op as! RoPEOperation
+        case .fragment(let frag) where frag is RoPEFragment:
+            let ropeOp = frag as! RoPEFragment
             let pipeline = try getPipeline("rope_seq_f32")
             let threads = min(32, pipeline.maxTotalThreadsPerThreadgroup)
             let totalHeads = ropeOp.headCount + ropeOp.kvHeadCount
@@ -1044,15 +928,9 @@ public struct MetalInferenceCompiler: Sendable {
             )]
 
         // MARK: QK Norm (batch)
-        case .compute(let op) where op is QKNormOperation:
-            let qkOp = op as! QKNormOperation
-            var qkNormKernelName = "qk_rms_norm_seq_f32"
-            if let staf = stafWeightStore,
-               let binding = entry.parameterBindings.first(where: { $0.role == qkOp.weightRole }),
-               let info = staf.tensor(for: binding.tensorName),
-               info.format.schemeIdentifier == .bf16RowMajor {
-                qkNormKernelName = "qk_rms_norm_seq_f32"
-            }
+        case .fragment(let frag) where frag is QKNormFragment:
+            let qkOp = frag as! QKNormFragment
+            let qkNormKernelName = "qk_rms_norm_seq_f32"
             let pipeline = try getPipeline(qkNormKernelName)
             let scratchSlotSize = slotDimension * scratchElementSize * maximumSequenceLength
             let scratchSlotIndex = qkOp.weightRole == "q_layernorm" ? 1 : 2
@@ -1083,9 +961,9 @@ public struct MetalInferenceCompiler: Sendable {
             )]
 
         // MARK: Argmax (single token — last position only)
-        case .compute(let op) where op is ArgmaxOperation:
-            let argmaxOp = op as! ArgmaxOperation
-            let pipeline = try getPipeline("argmax")
+        case .fragment(let frag) where frag is ArgmaxFragment:
+            let argmaxOp = frag as! ArgmaxFragment
+            let pipeline = try getPipeline("argmax_f32")
             let threads = min(roundUp(min(max(argmaxOp.vocabularySize, 1), 1024), to: pipeline.threadExecutionWidth), pipeline.maxTotalThreadsPerThreadgroup)
             return [MetalPrefillStep(
                 pipeline: pipeline,
@@ -1106,44 +984,80 @@ public struct MetalInferenceCompiler: Sendable {
                 perPositionStrides: [:]
             )]
 
-        // MARK: Conv1d (gated depthwise conv for ShortConv — perPosition due to conv state)
-        case .compute(let op) where op is Conv1dOperation:
-            let convOp = op as! Conv1dOperation
+        // MARK: Conv1d (causal temporal conv across positions — batch mode)
+        // in_proj GEMM writes [seqLen × inProjDim] to scratch slot 1.
+        // conv1d_causal_seq reads first convDim elements across positions
+        // with causal left-padding, writes [seqLen × convDim] to scratch slot 0.
+        // Then extract_conv_state saves the last kernelSize positions' inputs
+        // to conv_state for decode warm-start.
+        case .fragment(let frag) where frag is Conv1dFragment:
+            let convOp = frag as! Conv1dFragment
             let (weightBuffer, weightOffset) = resolveWeight(role: "conv_weight")
-            let pipeline = try getPipeline("conv1d_f32")
-            let tgSize = min(256, pipeline.maxTotalThreadsPerThreadgroup)
-            let gridX = (convOp.dimension + tgSize - 1) / tgSize
-            // in_proj wrote to scratch slot 1. Conv1d reads from slot 1, writes to slot 0.
-            // The GEMM output stride per position is outputDimension (= convOp.dimension * convOp.kernelSize)
             let scratchSlotBytes = slotDimension * scratchElementSize * maximumSequenceLength
-            let inProjOutputDimension = convOp.dimension * convOp.kernelSize
-            let perPosInputStride = inProjOutputDimension * scratchElementSize
-            let perPosOutputStride = convOp.dimension * scratchElementSize
+            // in_proj GEMM output dimension = 3 * convDim (for ShortConv: in_proj, gate, up)
+            let inProjDim = convOp.dimension * 3
             routingState.lastOutputIsHidden = false
             routingState.projectionIndex = 0  // reset for out_proj
-            return [MetalPrefillStep(
-                pipeline: pipeline,
-                gridSize: MTLSize(width: gridX, height: 1, depth: 1),
-                threadgroupSize: MTLSize(width: tgSize, height: 1, depth: 1),
+
+            // Step 1: Causal temporal conv1d across all positions (F32 I/O)
+            let causalPipeline = try getPipeline("conv1d_causal_seq_f32")
+            let causalTgSize = min(256, causalPipeline.maxTotalThreadsPerThreadgroup)
+            let causalGridX = (convOp.dimension + causalTgSize - 1) / causalTgSize
+            var steps: [MetalPrefillStep] = []
+            steps.append(MetalPrefillStep(
+                pipeline: causalPipeline,
+                gridSize: MTLSize(width: causalGridX, height: maximumSequenceLength, depth: 1),
+                threadgroupSize: MTLSize(width: causalTgSize, height: 1, depth: 1),
                 bufferBindings: [
-                    (0, buffers.scratch, 1 * scratchSlotBytes),  // input from in_proj (slot 1)
-                    (1, weightBuffer, weightOffset),
-                    (2, buffers.scratch, 0),                      // output to slot 0
+                    (0, buffers.scratch, 1 * scratchSlotBytes),  // in_proj output [seqLen × inProjDim]
+                    (1, weightBuffer, weightOffset),             // conv weight [convDim × kernelSize]
+                    (2, buffers.scratch, 0),                     // output [seqLen × convDim]
                 ],
                 bytesBindings: [
                     uint32Binding(3, UInt32(convOp.dimension)),
-                    uint32Binding(4, UInt32(convOp.kernelSize)),
+                    uint32Binding(4, UInt32(inProjDim)),
+                    uint32Binding(5, UInt32(convOp.kernelSize)),
+                    seqLenBinding(6),
                 ],
                 threadgroupMemoryLength: 0,
                 sync: .bufferBarrier,
-                mode: .perPosition,
-                sequenceLengthBindingIndex: nil,
+                mode: .batch,
+                sequenceLengthBindingIndex: 6,
                 positionBufferIndex: nil,
-                perPositionStrides: [
-                    0: perPosInputStride,   // in_proj output layout per position
-                    2: perPosOutputStride,   // conv output layout per position
-                ]
-            )]
+                perPositionStrides: [:]
+            ))
+
+            // Step 2: Extract conv_state from in_proj output (last kernelSize positions)
+            if let convState = buffers.convState {
+                let extractPipeline = try getPipeline("extract_conv_state_f32")
+                let extractTgSize = min(256, extractPipeline.maxTotalThreadsPerThreadgroup)
+                let extractGridX = (convOp.dimension + extractTgSize - 1) / extractTgSize
+                let convLayerOffset = routingState.convLayerIndex
+                    * buffers.convStateKernelSize * buffers.convStateDimension * elementSize
+                routingState.convLayerIndex += 1
+                steps.append(MetalPrefillStep(
+                    pipeline: extractPipeline,
+                    gridSize: MTLSize(width: extractGridX, height: convOp.kernelSize, depth: 1),
+                    threadgroupSize: MTLSize(width: extractTgSize, height: 1, depth: 1),
+                    bufferBindings: [
+                        (0, buffers.scratch, 1 * scratchSlotBytes),  // in_proj output
+                        (1, convState, convLayerOffset),             // conv_state for this layer
+                    ],
+                    bytesBindings: [
+                        uint32Binding(2, UInt32(convOp.dimension)),
+                        uint32Binding(3, UInt32(inProjDim)),
+                        uint32Binding(4, UInt32(convOp.kernelSize)),
+                        seqLenBinding(5),
+                    ],
+                    threadgroupMemoryLength: 0,
+                    sync: .bufferBarrier,
+                    mode: .batch,
+                    sequenceLengthBindingIndex: 5,
+                    positionBufferIndex: nil,
+                    perPositionStrides: [:]
+                ))
+            }
+            return steps
 
         // MARK: Default — skip unsupported ops in prefill
         default:
@@ -1216,7 +1130,7 @@ public struct MetalInferenceCompiler: Sendable {
     ) {
         for (operationIndex, operation) in region.operations.enumerated() {
             let operationPath = pathComponents + [.operation(operationIndex)]
-            let path = StructuralPath(components: operationPath)
+            let _ = StructuralPath(components: operationPath)
 
             switch operation.kind {
             case .residual(_, let body):
@@ -1250,58 +1164,123 @@ public struct MetalInferenceCompiler: Sendable {
                 }
 
             case .primitive(let attributes):
-                guard let component = attributes as? (any MetalComponent) else { continue }
-                // Resolve layer index in parameterBindings:
-                // ParameterResolver uses layer 0 as template in repeating bodies.
-                // When compiler unrolls, substitute the actual layer index.
+                // Resolve layer index in parameterBindings
                 let bindings: [ParameterBinding]
                 if let currentLayerIndex = layerIndex {
                     bindings = operation.parameterBindings.map { binding in
                         let resolved = binding.tensorName.replacingOccurrences(
                             of: ".layers.0.", with: ".layers.\(currentLayerIndex).")
-                        if resolved != binding.tensorName {
-                            print("[Compiler] layer substitution: \(binding.tensorName) → \(resolved) (layer=\(currentLayerIndex))")
-                        }
                         return ParameterBinding(role: binding.role, tensorName: resolved)
                     }
                 } else {
-                    // LayerStack: parameterBindings already have correct layer-specific names.
-                    // No substitution needed.
                     bindings = operation.parameterBindings
                 }
 
-                for cacheSlot in component.cacheSlots where cacheSlot.kind == .kv {
-                    if let flashAttention = component.dispatchDeclarations
-                        .compactMap({ decl -> FlashAttentionDecodeOperation? in
-                            if case .compute(let op) = decl {
-                                return op as? FlashAttentionDecodeOperation
-                            }
-                            return nil
-                        }).first {
-                        context.cacheSlots.append(CacheSlotInfo(
-                            kvHeadCount: flashAttention.kvHeadCount,
-                            headDimension: flashAttention.headDimension))
-                    }
-                }
+                // Fragment-driven path: walk the MetalKernelFragment tree
+                guard let fragment = attributes as? (any MetalKernelFragment) else { continue }
+                let startIndex = context.entries.count
+                emitFragmentTree(fragment, bindings: bindings, layerIndex: layerIndex, context: &context)
+                markLastProjectionAsOutput(entries: &context.entries, from: startIndex)
+            }
+        }
+    }
 
-                // Find the last projection index to mark it as output
-                let declarations = component.dispatchDeclarations
-                let lastProjectionIndex = declarations.lastIndex(where: {
-                    if case .projection = $0 { return true }
-                    return false
-                })
+    // MARK: - Fragment Tree Walk
 
-                for (declarationIndex, declaration) in declarations.enumerated() {
-                    switch declaration {
-                    case .projection(let projection):
-                        let isOutput = (declarationIndex == lastProjectionIndex)
-                        context.emit(.projection(projection, isOutput: isOutput),
-                                     parameterBindings: bindings, layerIndex: layerIndex)
-                    case .compute(let computeOperation):
-                        context.emit(.compute(computeOperation),
-                                     parameterBindings: bindings, layerIndex: layerIndex)
-                    }
-                }
+    /// Recursively walk a MetalKernelFragment tree and emit dispatch entries.
+    ///
+    /// - Primitive fragments (Reduction, LinearFragment, etc.) → emit as .fragment or .projection
+    /// - TupleFragment → walk each child in order
+    /// - OptionalFragment → walk content if present
+    /// - ConditionalFragment → walk the active branch
+    private func emitFragmentTree(
+        _ fragment: any MetalKernelFragment,
+        bindings: [ParameterBinding],
+        layerIndex: Int?,
+        context: inout WalkContext
+    ) {
+        // Primitive fragment → emit dispatch entry
+        if let primitive = fragment as? any PrimitiveMetalKernelFragment {
+            // LinearFragment → .projection (for GEMV/GEMM dispatch)
+            if let linear = primitive as? LinearFragment {
+                let projection = MetalProjection(
+                    field: linear.field,
+                    inputDimension: linear.inputDimension,
+                    outputDimension: linear.outputDimension)
+                // isOutput is resolved later by marking the last projection
+                context.emit(.projection(projection), parameterBindings: bindings, layerIndex: layerIndex)
+            }
+            // FlashAttentionFragment → register KV cache slot + emit .fragment
+            else if let flash = primitive as? FlashAttentionFragment {
+                context.cacheSlots.append(CacheSlotInfo(
+                    kvHeadCount: flash.kvHeadCount,
+                    headDimension: flash.headDimension))
+                context.emit(.fragment(primitive), parameterBindings: bindings, layerIndex: layerIndex)
+            }
+            // Other primitives → emit .fragment
+            else {
+                context.emit(.fragment(primitive), parameterBindings: bindings, layerIndex: layerIndex)
+            }
+            return
+        }
+
+        // Walk composite fragments by type-casting
+        walkCompositeFragment(fragment, bindings: bindings, layerIndex: layerIndex, context: &context)
+    }
+
+    /// Walk composite (non-primitive) fragment types.
+    private func walkCompositeFragment(
+        _ fragment: any MetalKernelFragment,
+        bindings: [ParameterBinding],
+        layerIndex: Int?,
+        context: inout WalkContext
+    ) {
+        // TupleFragment — use parameter pack iteration
+        if let _ = fragment as? any _TupleFragmentProtocol {
+            (fragment as! any _TupleFragmentProtocol)._visitChildren { child in
+                emitFragmentTree(child, bindings: bindings, layerIndex: layerIndex, context: &context)
+            }
+            return
+        }
+
+        // OptionalFragment
+        if let opt = fragment as? any _OptionalFragmentProtocol {
+            opt._visitContent { child in
+                emitFragmentTree(child, bindings: bindings, layerIndex: layerIndex, context: &context)
+            }
+            return
+        }
+
+        // ConditionalFragment
+        if let cond = fragment as? any _ConditionalFragmentProtocol {
+            cond._visitActive { child in
+                emitFragmentTree(child, bindings: bindings, layerIndex: layerIndex, context: &context)
+            }
+            return
+        }
+
+        // Generic composite: recurse into the fragment's body.
+        // Uses type-erased access to avoid associated type constraints.
+        if let bodyAccessor = fragment as? any _FragmentBodyAccessor {
+            bodyAccessor._visitBody { child in
+                emitFragmentTree(child, bindings: bindings, layerIndex: layerIndex, context: &context)
+            }
+        }
+    }
+
+    // MARK: - isOutput Resolution
+
+    /// Mark the last projection in a range of entries as isOutput.
+    private func markLastProjectionAsOutput(entries: inout [DispatchEntry], from startIndex: Int) {
+        // Find the last projection in the range [startIndex..<entries.count]
+        for i in stride(from: entries.count - 1, through: startIndex, by: -1) {
+            if case .projection(let proj, _) = entries[i].kind {
+                entries[i] = DispatchEntry(
+                    index: entries[i].index,
+                    kind: .projection(proj, isOutput: true),
+                    parameterBindings: entries[i].parameterBindings,
+                    layerIndex: entries[i].layerIndex)
+                break
             }
         }
     }
@@ -1317,16 +1296,23 @@ public struct MetalInferenceCompiler: Sendable {
             var index = 0
 
             while index < result.count {
-                // Pattern 1: structuralAdd + structuralCopy + rmsNorm → fused (3 → 1)
+                // Extract Reduction from .fragment or .compute
+                func extractReduction(at i: Int) -> Reduction? {
+                    if case .fragment(let frag) = result[i].kind {
+                        return frag as? Reduction
+                    }
+                    return nil
+                }
+
+                // Pattern 1: structuralAdd + structuralCopy + Reduction → fused (3 → 1)
                 if index + 2 < result.count,
                    case .structuralAdd(let addDimension) = result[index].kind,
                    case .structuralCopy = result[index + 1].kind,
-                   case .compute(let operation) = result[index + 2].kind,
-                   let normOperation = operation as? RMSNormOperation {
+                   let reduction = extractReduction(at: index + 2) {
                     let fused = DispatchEntry(
                         index: result[index].index,
-                        kind: .compute(ResidualAddCopyRMSNormOperation(
-                            dimension: addDimension, epsilon: normOperation.epsilon)),
+                        kind: .fusedResidualAddCopyNorm(FusedResidualAddCopyNorm(
+                            dimension: addDimension, epsilon: reduction.epsilon)),
                         parameterBindings: result[index + 2].parameterBindings,
                         layerIndex: result[index].layerIndex)
                     result.replaceSubrange(index...index + 2, with: [fused])
@@ -1334,15 +1320,14 @@ public struct MetalInferenceCompiler: Sendable {
                     continue
                 }
 
-                // Pattern 2: structuralCopy + rmsNorm → fused (2 → 1)
+                // Pattern 2: structuralCopy + Reduction → fused (2 → 1)
                 if index + 1 < result.count,
                    case .structuralCopy = result[index].kind,
-                   case .compute(let operation) = result[index + 1].kind,
-                   let normOperation = operation as? RMSNormOperation {
+                   let reduction = extractReduction(at: index + 1) {
                     let fused = DispatchEntry(
                         index: result[index].index,
-                        kind: .compute(CopyRMSNormOperation(
-                            dimension: normOperation.dimension, epsilon: normOperation.epsilon)),
+                        kind: .fusedCopyNorm(FusedCopyNorm(
+                            dimension: reduction.dimension, epsilon: reduction.epsilon)),
                         parameterBindings: result[index + 1].parameterBindings,
                         layerIndex: result[index].layerIndex)
                     result.replaceSubrange(index...index + 1, with: [fused])
@@ -1378,34 +1363,57 @@ public struct MetalInferenceCompiler: Sendable {
                 return tensorInfo.format.gemvKernelName
             }
             return "gemv"  // fallback to float16
-        case .compute(let operation):
-            // Check if this operation's weight uses BF16 — select BF16 variant kernel
-            let baseName = operation.kernelName
-            if let staf = stafWeightStore {
-                // QKNormOperation: check the specific weight role for BF16
-                if let qkNormOperation = operation as? QKNormOperation {
-                    if let binding = entry.parameterBindings.first(where: { $0.role == qkNormOperation.weightRole }),
-                       let tensorInfo = staf.tensor(for: binding.tensorName),
-                       tensorInfo.format.schemeIdentifier == .bf16RowMajor {
-                        return baseName + "_bf16"
-                    }
-                    return baseName
-                }
-                let weightRoles = ["scale", "embedding_table"]
-                for role in weightRoles {
-                    if let binding = entry.parameterBindings.first(where: { $0.role == role }),
-                       let tensorInfo = staf.tensor(for: binding.tensorName),
-                       tensorInfo.format.schemeIdentifier == .bf16RowMajor {
-                        let bf16Name = baseName + "_bf16"
-                        return bf16Name
-                    }
-                }
+        case .fusedCopyNorm:
+            let isBF16 = entry.parameterBindings.contains { binding in
+                guard let staf = stafWeightStore,
+                      let info = staf.tensor(for: binding.tensorName) else { return false }
+                return info.format.schemeIdentifier == .bf16RowMajor
             }
-            return baseName
+            return isBF16 ? "fused_copy_rms_norm_bf16" : "fused_copy_rms_norm"
+        case .fusedResidualAddCopyNorm:
+            let isBF16 = entry.parameterBindings.contains { binding in
+                guard let staf = stafWeightStore,
+                      let info = staf.tensor(for: binding.tensorName) else { return false }
+                return info.format.schemeIdentifier == .bf16RowMajor
+            }
+            return isBF16 ? "fused_residual_add_copy_rms_norm_bf16" : "fused_residual_add_copy_rms_norm"
+        case .fragment(let frag):
+            // Fragment-driven: kernel name derived from fragment type + weight format
+            // TODO: implement dynamic name resolution from fragment parameters
+            return resolveFragmentKernelName(frag, entry: entry, stafWeightStore: stafWeightStore)
         case .structuralCopy:
             return "copy_buffer"
         case .structuralAdd:
             return "residual_add"
+        }
+    }
+
+    /// Derive kernel name from a primitive fragment and its context.
+    private func resolveFragmentKernelName(
+        _ fragment: any PrimitiveMetalKernelFragment,
+        entry: DispatchEntry,
+        stafWeightStore: STAFWeightStore?
+    ) -> String {
+        // Determine weight format suffix from STAF
+        let isBF16 = entry.parameterBindings.contains { binding in
+            guard let staf = stafWeightStore,
+                  let info = staf.tensor(for: binding.tensorName) else { return false }
+            return info.format.schemeIdentifier == .bf16RowMajor
+        }
+        let suffix = isBF16 ? "_bf16" : ""
+
+        switch fragment {
+        case is Reduction: return "rms_norm" + suffix
+        case is ElementwiseFragment: return "swiglu"
+        case is GatherFragment: return "embedding_lookup" + suffix
+        case is ArgmaxFragment: return "argmax"
+        case is FlashAttentionFragment: return "flash_attn_decode"
+        case is RoPEFragment: return "rope"
+        case is QKNormFragment: return "qk_rms_norm" + suffix
+        case is Conv1dFragment: return "conv_state_update"
+        case is SSMRecurrenceFragment: return "ssm_recurrence"
+        case is SigmoidGateFragment: return "sigmoid_gate"
+        default: return "unknown_fragment"
         }
     }
 
@@ -1414,8 +1422,12 @@ public struct MetalInferenceCompiler: Sendable {
         switch kind {
         case .projection(let projection, _):
             return .gemv(outputDimension: projection.outputDimension, inputDimension: projection.inputDimension)
-        case .compute(let operation):
-            return operation.dispatchDimension
+        case .fusedCopyNorm(let fused):
+            return .reduction(dimension: fused.dimension)
+        case .fusedResidualAddCopyNorm(let fused):
+            return .reduction(dimension: fused.dimension)
+        case .fragment(let frag):
+            return frag.dispatchDimension
         case .structuralCopy(let dimension):
             return .elementwise(count: dimension)
         case .structuralAdd(let dimension):
@@ -1471,46 +1483,14 @@ public struct MetalInferenceCompiler: Sendable {
         switch entry.kind {
 
         // MARK: Embedding Lookup
-        case .compute(let operation) where operation is EmbeddingLookupOperation:
-            let embeddingOperation = operation as! EmbeddingLookupOperation
-            let (weightBuffer, weightOffset) = resolveWeight(role: "embedding_table")
-            routingState.lastOutputIsHidden = true
-            return (
-                buffers: [
-                    (0, bufferSet.tokenIn, 0),
-                    (1, weightBuffer, weightOffset),
-                    (2, bufferSet.hidden, 0),
-                ],
-                bytes: [
-                    uint32Binding(3, UInt32(embeddingOperation.embeddingDimension)),
-                ]
-            )
-
         // MARK: RMS Norm
         // Standalone RMSNorm (not fused with structuralCopy) writes in-place to hidden.
         // This ensures embedding_norm and final_norm results stay in hidden for
         // the next operation (Residual's structuralCopy or OutputHead projection).
         // In-place is safe: the kernel reads all elements for RMS before any writes.
-        case .compute(let operation) where operation is RMSNormOperation:
-            let normOperation = operation as! RMSNormOperation
-            let (weightBuffer, weightOffset) = resolveWeight(role: "scale")
-            routingState.lastOutputIsHidden = true
-            routingState.projectionIndex = 0
-            return (
-                buffers: [
-                    (0, bufferSet.hidden, 0),
-                    (1, weightBuffer, weightOffset),
-                    (2, bufferSet.hidden, 0),  // in-place: output = hidden
-                ],
-                bytes: [
-                    uint32Binding(3, UInt32(normOperation.dimension)),
-                    floatBinding(4, normOperation.epsilon),
-                ]
-            )
-
         // MARK: Fused Copy + RMS Norm
-        case .compute(let operation) where operation is CopyRMSNormOperation:
-            let fusedOperation = operation as! CopyRMSNormOperation
+        case .fusedCopyNorm(let fusedOperation):
+            
             let (weightBuffer, weightOffset) = resolveWeight(role: "scale")
             routingState.lastOutputIsHidden = false
             routingState.projectionIndex = 0
@@ -1528,8 +1508,8 @@ public struct MetalInferenceCompiler: Sendable {
             )
 
         // MARK: Fused Residual Add + Copy + RMS Norm
-        case .compute(let operation) where operation is ResidualAddCopyRMSNormOperation:
-            let fusedOperation = operation as! ResidualAddCopyRMSNormOperation
+        case .fusedResidualAddCopyNorm(let fusedOperation):
+            
             let (weightBuffer, weightOffset) = resolveWeight(role: "scale")
             routingState.lastOutputIsHidden = false
             routingState.projectionIndex = 0
@@ -1599,86 +1579,8 @@ public struct MetalInferenceCompiler: Sendable {
             )
 
         // MARK: Flash Attention Decode
-        case .compute(let operation) where operation is FlashAttentionDecodeOperation:
-            let flashAttention = operation as! FlashAttentionDecodeOperation
-            let layerIndex = kvCacheIndex
-            kvCacheIndex += 1
-            let scale: Float = 1.0 / Float(flashAttention.headDimension).squareRoot()
-
-            routingState.lastOutputIsHidden = false
-            routingState.projectionIndex = 0
-
-            guard let cache = bufferSet.kvCache else {
-                return (buffers: [], bytes: [])
-            }
-            let keyLayerOffset = cache.specification.layerOffset(
-                layer: layerIndex, scheme: cache.specification.keyQuantizationScheme)
-            let valueLayerOffset = cache.specification.layerOffset(
-                layer: layerIndex, scheme: cache.specification.valueQuantizationScheme)
-
-            // Scratch layout after Q/K/V projections:
-            //   scratch[1 * slot]: Q (headCount * headDim)
-            //   scratch[2 * slot]: K (kvHeadCount * headDim)
-            //   scratch[3 * slot]: V (kvHeadCount * headDim)
-            let scratchSlotSize = slotDimension * elementSize
-            let kHeadSlotBytes = cache.specification.bytesPerHeadSlot(
-                scheme: cache.specification.keyQuantizationScheme)
-            let vHeadSlotBytes = cache.specification.bytesPerHeadSlot(
-                scheme: cache.specification.valueQuantizationScheme)
-            return (
-                buffers: [
-                    (0, bufferSet.scratch, 1 * scratchSlotSize),  // Q (after RoPE)
-                    (1, bufferSet.scratch, 2 * scratchSlotSize),  // new K (after RoPE)
-                    (2, bufferSet.scratch, 3 * scratchSlotSize),  // new V
-                    (3, cache.keys, keyLayerOffset),               // K cache (read+write)
-                    (4, cache.values, valueLayerOffset),           // V cache (read+write)
-                    (5, bufferSet.scratch, 0),                     // output
-                    (6, bufferSet.position, 0),                    // position (runtime)
-                ],
-                bytes: [
-                    uint32Binding(7, UInt32(flashAttention.headCount)),
-                    uint32Binding(8, UInt32(flashAttention.kvHeadCount)),
-                    uint32Binding(9, UInt32(flashAttention.headDimension)),
-                    floatBinding(10, scale),
-                    uint32Binding(11, UInt32(cache.specification.layoutMode.rawValue)),
-                    uint32Binding(12, UInt32(cache.specification.maximumSequenceLength)),
-                    uint32Binding(13, UInt32(cache.specification.keyQuantizationScheme.rawValue)),
-                    uint32Binding(14, UInt32(cache.specification.valueQuantizationScheme.rawValue)),
-                    uint32Binding(15, UInt32(kHeadSlotBytes)),
-                    uint32Binding(16, UInt32(vHeadSlotBytes)),
-                ]
-            )
-
         // MARK: SwiGLU
-        case .compute(let operation) where operation is SwiGLUOperation:
-            let swigluOperation = operation as! SwiGLUOperation
-            let maxScratchSlot = slotDimension * elementSize
-            routingState.lastOutputIsHidden = false
-            routingState.projectionIndex = 0
-            return (
-                buffers: [
-                    (0, bufferSet.scratch, 1 * maxScratchSlot),  // gate
-                    (1, bufferSet.scratch, 2 * maxScratchSlot),  // up
-                    (2, bufferSet.scratch, 0),                    // output
-                ],
-                bytes: [
-                    uint32Binding(3, UInt32(swigluOperation.dimension)),
-                ]
-            )
-
         // MARK: Argmax
-        case .compute(let operation) where operation is ArgmaxOperation:
-            let argmaxOperation = operation as! ArgmaxOperation
-            return (
-                buffers: [
-                    (0, bufferSet.logits, 0),
-                    (1, bufferSet.tokenOut, 0),
-                ],
-                bytes: [
-                    uint32Binding(2, UInt32(argmaxOperation.vocabularySize)),
-                ]
-            )
-
         // MARK: Structural Copy
         case .structuralCopy(let dimension):
             routingState.projectionIndex = 0
@@ -1707,68 +1609,201 @@ public struct MetalInferenceCompiler: Sendable {
             )
 
         // MARK: RoPE
-        case .compute(let operation) where operation is RoPEOperation:
-            let ropeOperation = operation as! RoPEOperation
-            // RoPE is applied in-place to Q (scratch[1]) and K (scratch[2])
-            // after their respective GEMV projections.
-            let scratchSlotSize = slotDimension * elementSize
-            return (
-                buffers: [
-                    (0, bufferSet.scratch, 1 * scratchSlotSize),  // Q (in-place)
-                    (1, bufferSet.scratch, 2 * scratchSlotSize),  // K (in-place)
-                    (2, bufferSet.position, 0),                    // position (runtime)
-                ],
-                bytes: [
-                    uint32Binding(3, UInt32(ropeOperation.headCount)),
-                    uint32Binding(4, UInt32(ropeOperation.kvHeadCount)),
-                    uint32Binding(5, UInt32(ropeOperation.headDimension)),
-                    uint32Binding(6, UInt32(ropeOperation.ropeDimension)),
-                    floatBinding(7, ropeOperation.base),
-                ]
-            )
-
         // MARK: QK Norm (per-head RMS norm on Q or K in scratch)
-        case .compute(let operation) where operation is QKNormOperation:
-            let qkNormOperation = operation as! QKNormOperation
-            let scratchSlotSize = slotDimension * elementSize
-            // Q lives in scratch[1], K lives in scratch[2].
-            // weightRole tells us which one: "q_layernorm" → scratch[1], "k_layernorm" → scratch[2].
-            let scratchSlotIndex = qkNormOperation.weightRole == "q_layernorm" ? 1 : 2
-            let (weightBuffer, weightOffset) = resolveWeight(role: qkNormOperation.weightRole)
+        // MARK: Conv1d (double-gated depthwise conv with conv_state)
+        //
+        // in_proj output [3 × hiddenSize] per token: [B | C | x].
+        // conv_state_update kernel: Bx = B*x → shift + append to conv_state → conv → C*convOut.
+        // conv_state is required — ShortConv always declares a .conv cache slot.
+        // MARK: Fragment-driven buffer routing
+
+        case .fragment(let fragment) where fragment is Reduction:
+            let reduction = fragment as! Reduction
+            let (weightBuffer, weightOffset) = resolveWeight(role: "scale")
+            routingState.lastOutputIsHidden = true
+            routingState.projectionIndex = 0
             return (
                 buffers: [
-                    (0, bufferSet.scratch, scratchSlotIndex * scratchSlotSize),  // in-place Q or K
-                    (1, weightBuffer, weightOffset),                             // norm weight [headDim]
+                    (0, bufferSet.hidden, 0),
+                    (1, weightBuffer, weightOffset),
+                    (2, bufferSet.hidden, 0),
                 ],
                 bytes: [
-                    uint32Binding(2, UInt32(qkNormOperation.headCount)),
-                    uint32Binding(3, UInt32(qkNormOperation.headDimension)),
-                    floatBinding(4, qkNormOperation.epsilon),
+                    uint32Binding(3, UInt32(reduction.dimension)),
+                    floatBinding(4, reduction.epsilon),
                 ]
             )
 
-        // MARK: Conv1d (depthwise conv for ShortConv)
-        // in_proj [3*hiddenSize] is treated as [kernelSize × hiddenSize] — the temporal
-        // window is encoded within the single-token projection, not across tokens.
-        case .compute(let operation) where operation is Conv1dOperation:
-            let convOp = operation as! Conv1dOperation
-            let (weightBuffer, weightOffset) = resolveWeight(role: "conv_weight")
+        case .fragment(let fragment) where fragment is ElementwiseFragment:
+            let swiglu = fragment as! ElementwiseFragment
             let slotBytes = slotDimension * elementSize
             routingState.lastOutputIsHidden = false
             routingState.projectionIndex = 0
             return (
                 buffers: [
-                    (0, bufferSet.scratch, 1 * slotBytes),   // input from in_proj (slot 1)
-                    (1, weightBuffer, weightOffset),          // conv weight
-                    (2, bufferSet.scratch, 0),                // output to slot 0
+                    (0, bufferSet.scratch, 1 * slotBytes),
+                    (1, bufferSet.scratch, 2 * slotBytes),
+                    (2, bufferSet.scratch, 0),
                 ],
                 bytes: [
-                    uint32Binding(3, UInt32(convOp.dimension)),
-                    uint32Binding(4, UInt32(convOp.kernelSize)),
+                    uint32Binding(3, UInt32(swiglu.count)),
                 ]
             )
 
-        // MARK: Default (unsupported compute operations)
+        case .fragment(let fragment) where fragment is GatherFragment:
+            let gather = fragment as! GatherFragment
+            let (weightBuffer, weightOffset) = resolveWeight(role: "embedding_table")
+            routingState.lastOutputIsHidden = true
+            return (
+                buffers: [
+                    (0, bufferSet.tokenIn, 0),
+                    (1, weightBuffer, weightOffset),
+                    (2, bufferSet.hidden, 0),
+                ],
+                bytes: [
+                    uint32Binding(3, UInt32(gather.embeddingDimension)),
+                ]
+            )
+
+        case .fragment(let fragment) where fragment is ArgmaxFragment:
+            let argmax = fragment as! ArgmaxFragment
+            let threads = min(1024, argmax.vocabularySize)
+            return (
+                buffers: [
+                    (0, bufferSet.logits, 0),
+                    (1, bufferSet.tokenOut, 0),
+                ],
+                bytes: [
+                    uint32Binding(2, UInt32(argmax.vocabularySize)),
+                ]
+            )
+
+        case .fragment(let fragment) where fragment is FlashAttentionFragment:
+            let flashAttention = fragment as! FlashAttentionFragment
+            let layerIndex = kvCacheIndex
+            kvCacheIndex += 1
+            let scale: Float = 1.0 / Float(flashAttention.headDimension).squareRoot()
+
+            routingState.lastOutputIsHidden = false
+            routingState.projectionIndex = 0
+
+            guard let cache = bufferSet.kvCache else {
+                fatalError("[Compiler] FlashAttentionFragment requires KV cache")
+            }
+            let keyLayerOffset = cache.specification.layerOffset(
+                layer: layerIndex, scheme: cache.specification.keyQuantizationScheme)
+            let valueLayerOffset = cache.specification.layerOffset(
+                layer: layerIndex, scheme: cache.specification.valueQuantizationScheme)
+            let kHeadSlotBytes = cache.specification.bytesPerHeadSlot(
+                scheme: cache.specification.keyQuantizationScheme)
+            let vHeadSlotBytes = cache.specification.bytesPerHeadSlot(
+                scheme: cache.specification.valueQuantizationScheme)
+
+            return (
+                buffers: [
+                    (0, bufferSet.scratch, 1 * slotDimension * elementSize),
+                    (1, bufferSet.scratch, 2 * slotDimension * elementSize),
+                    (2, bufferSet.scratch, 3 * slotDimension * elementSize),
+                    (3, cache.keys, keyLayerOffset),
+                    (4, cache.values, valueLayerOffset),
+                    (5, bufferSet.scratch, 0),
+                    (6, bufferSet.position, 0),
+                ],
+                bytes: [
+                    uint32Binding(7, UInt32(flashAttention.headCount)),
+                    uint32Binding(8, UInt32(flashAttention.kvHeadCount)),
+                    uint32Binding(9, UInt32(flashAttention.headDimension)),
+                    floatBinding(10, scale),
+                    uint32Binding(11, UInt32(cache.specification.layoutMode.rawValue)),
+                    uint32Binding(12, UInt32(cache.specification.maximumSequenceLength)),
+                    uint32Binding(13, UInt32(cache.specification.keyQuantizationScheme.rawValue)),
+                    uint32Binding(14, UInt32(cache.specification.valueQuantizationScheme.rawValue)),
+                    uint32Binding(15, UInt32(kHeadSlotBytes)),
+                    uint32Binding(16, UInt32(vHeadSlotBytes)),
+                ]
+            )
+
+        case .fragment(let fragment) where fragment is RoPEFragment:
+            let ropeOp = fragment as! RoPEFragment
+            let slotBytes = slotDimension * elementSize
+            return (
+                buffers: [
+                    (0, bufferSet.scratch, 1 * slotBytes),
+                    (1, bufferSet.scratch, 2 * slotBytes),
+                    (2, bufferSet.position, 0),
+                ],
+                bytes: [
+                    uint32Binding(3, UInt32(ropeOp.headCount)),
+                    uint32Binding(4, UInt32(ropeOp.kvHeadCount)),
+                    uint32Binding(5, UInt32(ropeOp.headDimension)),
+                    uint32Binding(6, UInt32(ropeOp.ropeDimension)),
+                    floatBinding(7, ropeOp.base),
+                ]
+            )
+
+        case .fragment(let fragment) where fragment is QKNormFragment:
+            let qkNorm = fragment as! QKNormFragment
+            let slotBytes = slotDimension * elementSize
+            let scratchSlotIndex = qkNorm.weightRole == "q_layernorm" ? 1 : 2
+            let (weightBuffer, weightOffset) = resolveWeight(role: qkNorm.weightRole)
+            return (
+                buffers: [
+                    (0, bufferSet.scratch, scratchSlotIndex * slotBytes),
+                    (1, weightBuffer, weightOffset),
+                ],
+                bytes: [
+                    uint32Binding(2, UInt32(qkNorm.headCount)),
+                    uint32Binding(3, UInt32(qkNorm.headDimension)),
+                    floatBinding(4, qkNorm.epsilon),
+                ]
+            )
+
+        case .fragment(let fragment) where fragment is Conv1dFragment:
+            let convOp = fragment as! Conv1dFragment
+            let (weightBuffer, weightOffset) = resolveWeight(role: "conv_weight")
+            let slotBytes = slotDimension * elementSize
+            routingState.lastOutputIsHidden = false
+            routingState.projectionIndex = 0
+
+            guard let convState = bufferSet.convState else {
+                fatalError("[Compiler] Conv1dFragment requires conv_state buffer")
+            }
+            let convLayerOffset = routingState.convLayerIndex
+                * bufferSet.convStateKernelSize * bufferSet.convStateDimension * elementSize
+            routingState.convLayerIndex += 1
+            return (
+                buffers: [
+                    (0, convState, convLayerOffset),
+                    (1, bufferSet.scratch, 1 * slotBytes),
+                    (2, weightBuffer, weightOffset),
+                    (3, bufferSet.scratch, 0),
+                ],
+                bytes: [
+                    uint32Binding(4, UInt32(convOp.dimension)),
+                    uint32Binding(5, UInt32(convOp.kernelSize)),
+                ]
+            )
+
+        case .fragment(let fragment) where fragment is SigmoidGateFragment:
+            let gate = fragment as! SigmoidGateFragment
+            let slotBytes = slotDimension * elementSize
+            routingState.lastOutputIsHidden = false
+            return (
+                buffers: [
+                    (0, bufferSet.scratch, 0),
+                    (1, bufferSet.scratch, 1 * slotBytes),
+                    (2, bufferSet.scratch, 0),
+                ],
+                bytes: [
+                    uint32Binding(3, UInt32(gate.dimension)),
+                ]
+            )
+
+        case .fragment:
+            print("[Compiler] WARNING: unhandled fragment in buffer routing")
+            return (buffers: [], bytes: [])
+
+        // MARK: Default
         default:
             print("[Compiler] WARNING: unhandled operation in buffer routing")
             return (buffers: [], bytes: [])
@@ -1825,41 +1860,156 @@ public struct MetalInferenceCompiler: Sendable {
 
     // MARK: - Metal Library Cache
 
-    /// Cached MTLLibrary to avoid recompiling MSL on every load.
-    private static let libraryCache = LibraryCache()
 
-    private final class LibraryCache: @unchecked Sendable {
-        private var cached: MTLLibrary?
-        private let lock = NSLock()
+    /// Compile a Metal library containing only the kernels needed by the given dispatch entries.
+    ///
+    /// Kernel source is generated on-demand from fragment parameters + STAF weight format.
+    /// No hardcoded catalog — only the kernels actually used are compiled.
+    private func compileLibrary(
+        entries: [DispatchEntry],
+        stafWeightStore: STAFWeightStore?,
+        bufferPrecision: MetalSourceGenerator.BufferPrecision,
+        device: MTLDevice
+    ) throws -> MTLLibrary {
+        var sources: [String] = [MetalSourceGenerator.commonHeader]
+        var generatedNames: Set<String> = []
 
-        func get() -> MTLLibrary? {
-            lock.lock()
-            defer { lock.unlock() }
-            return cached
+        // Collect flash_attn helper (shared by F16/F32 variants)
+        var needsFlashAttnHelper = false
+
+        for entry in entries {
+            let name: String
+            switch entry.kind {
+            case .projection(let proj, _):
+                // Determine weight format from STAF
+                let weightFormat = resolveWeightFormat(role: proj.field, entry: entry, stafWeightStore: stafWeightStore)
+                name = weightFormat == .bfloat16 ? "gemv_bf16" : "gemv"
+                let isSeq = bufferPrecision == .float32
+                if generatedNames.insert(isSeq ? name.replacingOccurrences(of: "gemv", with: "gemm") + (bufferPrecision == .float32 ? "_f32s" : "") : name).inserted {
+                    if isSeq {
+                        let gemmName = weightFormat == .bfloat16 ? "gemm_bf16_f32s" : "gemm_f32s"
+                        sources.append(MetalSourceGenerator.generateGEMM(name: gemmName, bufferPrecision: bufferPrecision, weightFormat: weightFormat))
+                    } else {
+                        sources.append(MetalSourceGenerator.generateGEMV(name: name, bufferPrecision: bufferPrecision, weightFormat: weightFormat))
+                    }
+                }
+
+            case .fragment(let frag):
+                let weightFormat = resolveWeightFormat(forFragment: frag, entry: entry, stafWeightStore: stafWeightStore)
+                name = resolveFragmentKernelName(frag, entry: entry, stafWeightStore: stafWeightStore)
+                let kernelName = resolveKernelNameForPrecision(baseName: name, bufferPrecision: bufferPrecision)
+                if generatedNames.insert(kernelName).inserted {
+                    if let src = MetalSourceGenerator.generateForFragment(frag, name: kernelName, bufferPrecision: bufferPrecision, weightFormat: weightFormat) {
+                        if frag is FlashAttentionFragment { needsFlashAttnHelper = true }
+                        sources.append(src)
+                    }
+                }
+                // Conv1d in prefill also needs extract_conv_state kernel
+                if frag is Conv1dFragment && bufferPrecision == .float32 {
+                    let extractName = "extract_conv_state_f32"
+                    if generatedNames.insert(extractName).inserted {
+                        sources.append(MetalSourceGenerator.generateExtractConvState(name: extractName, bufferPrecision: bufferPrecision))
+                    }
+                }
+
+            case .fusedCopyNorm(_):
+                let weightFormat = resolveWeightFormat(role: "scale", entry: entry, stafWeightStore: stafWeightStore)
+                if bufferPrecision == .float16 {
+                    let baseName = weightFormat == .bfloat16 ? "fused_copy_rms_norm_bf16" : "fused_copy_rms_norm"
+                    if generatedNames.insert(baseName).inserted {
+                        sources.append(MetalSourceGenerator.generateFusedCopyRMSNorm(name: baseName, bufferPrecision: bufferPrecision, weightFormat: weightFormat))
+                    }
+                } else {
+                    let copyName = "copy_buffer_seq_f32"
+                    let normName = weightFormat == .bfloat16 ? "rms_norm_seq_bf16_f32_inplace" : "rms_norm_seq_f32_inplace"
+                    if generatedNames.insert(copyName).inserted {
+                        sources.append(MetalSourceGenerator.generateCopy(name: copyName, bufferPrecision: bufferPrecision))
+                    }
+                    if generatedNames.insert(normName).inserted {
+                        sources.append(MetalSourceGenerator.generateReduction(name: normName, dimension: 0, epsilon: 0, bufferPrecision: bufferPrecision, weightFormat: weightFormat))
+                    }
+                }
+
+            case .fusedResidualAddCopyNorm(_):
+                let weightFormat = resolveWeightFormat(role: "scale", entry: entry, stafWeightStore: stafWeightStore)
+                if bufferPrecision == .float16 {
+                    let baseName = weightFormat == .bfloat16 ? "fused_residual_add_copy_rms_norm_bf16" : "fused_residual_add_copy_rms_norm"
+                    if generatedNames.insert(baseName).inserted {
+                        sources.append(MetalSourceGenerator.generateFusedResidualAddCopyRMSNorm(name: baseName, bufferPrecision: bufferPrecision, weightFormat: weightFormat))
+                    }
+                } else {
+                    let addName = "residual_add_seq_f32"
+                    let copyName = "copy_buffer_seq_f32"
+                    let normName = weightFormat == .bfloat16 ? "rms_norm_seq_bf16_f32_inplace" : "rms_norm_seq_f32_inplace"
+                    if generatedNames.insert(addName).inserted {
+                        sources.append(MetalSourceGenerator.generateResidualAdd(name: addName, bufferPrecision: bufferPrecision))
+                    }
+                    if generatedNames.insert(copyName).inserted {
+                        sources.append(MetalSourceGenerator.generateCopy(name: copyName, bufferPrecision: bufferPrecision))
+                    }
+                    if generatedNames.insert(normName).inserted {
+                        sources.append(MetalSourceGenerator.generateReduction(name: normName, dimension: 0, epsilon: 0, bufferPrecision: bufferPrecision, weightFormat: weightFormat))
+                    }
+                }
+
+
+            case .structuralCopy(_):
+                let kernelName = bufferPrecision == .float32 ? "copy_buffer_seq_f32" : "copy_buffer"
+                if generatedNames.insert(kernelName).inserted {
+                    sources.append(MetalSourceGenerator.generateCopy(name: kernelName, bufferPrecision: bufferPrecision, isSequence: bufferPrecision == .float32))
+                }
+
+            case .structuralAdd(_):
+                let kernelName = bufferPrecision == .float32 ? "residual_add_seq_f32" : "residual_add"
+                if generatedNames.insert(kernelName).inserted {
+                    sources.append(MetalSourceGenerator.generateResidualAdd(name: kernelName, bufferPrecision: bufferPrecision, isSequence: bufferPrecision == .float32))
+                }
+            }
         }
 
-        func set(_ library: MTLLibrary) {
-            lock.lock()
-            defer { lock.unlock() }
-            cached = library
+        if needsFlashAttnHelper {
+            sources.insert(MetalSourceGenerator.flashAttentionHelperSource, at: 1)
         }
-    }
-
-    /// Get or compile the Metal library. Cached in memory after first compilation.
-    private static func getOrCompileLibrary(device: MTLDevice) throws -> MTLLibrary {
-        // Disable library cache to ensure fresh compilation with current options.
-        // TODO: re-enable cache after fastMath investigation is complete.
-        // if let cached = libraryCache.get() {
-        //     return cached
-        // }
 
         let compileOptions = MTLCompileOptions()
         compileOptions.fastMathEnabled = false
         compileOptions.languageVersion = .version3_0
-        let library = try device.makeLibrary(
-            source: MetalKernelSource.allKernelSource, options: compileOptions)
-        libraryCache.set(library)
-        return library
+        return try device.makeLibrary(source: sources.joined(separator: "\n\n"), options: compileOptions)
+    }
+
+    /// Determine weight format from STAF for a given role.
+    private func resolveWeightFormat(role: String, entry: DispatchEntry, stafWeightStore: STAFWeightStore?) -> MetalSourceGenerator.WeightFormat {
+        guard let staf = stafWeightStore,
+              let binding = entry.parameterBindings.first(where: { $0.role == role }),
+              let info = staf.tensor(for: binding.tensorName) else { return .float16 }
+        return info.format.schemeIdentifier == .bf16RowMajor ? .bfloat16 : .float16
+    }
+
+    /// Determine weight format from STAF for a primitive fragment.
+    private func resolveWeightFormat(forFragment frag: any PrimitiveMetalKernelFragment, entry: DispatchEntry, stafWeightStore: STAFWeightStore?) -> MetalSourceGenerator.WeightFormat {
+        let roles = frag.weightSlots.compactMap(\.field) + ["scale", "embedding_table", "conv_weight"]
+        for role in roles {
+            let format = resolveWeightFormat(role: role, entry: entry, stafWeightStore: stafWeightStore)
+            if format == .bfloat16 { return .bfloat16 }
+        }
+        return .float16
+    }
+
+    /// Derive prefill/decode kernel name from base name + precision.
+    private func resolveKernelNameForPrecision(baseName: String, bufferPrecision: MetalSourceGenerator.BufferPrecision) -> String {
+        guard bufferPrecision == .float32 else { return baseName }
+        // Prefill F32 kernel naming convention
+        switch baseName {
+        case "rms_norm", "rms_norm_bf16": return baseName.replacingOccurrences(of: "rms_norm", with: "rms_norm_seq") + "_f32_inplace"
+        case "swiglu": return "swiglu_seq_f32"
+        case "embedding_lookup", "embedding_lookup_bf16": return baseName.replacingOccurrences(of: "embedding_lookup", with: "embedding_lookup_seq") + "_f32"
+        case "argmax": return "argmax_f32"
+        case "rope": return "rope_seq_f32"
+        case "qk_rms_norm", "qk_rms_norm_bf16": return "qk_rms_norm_seq_f32"
+        case "conv_state_update": return "conv1d_causal_seq_f32"
+        case "flash_attn_decode": return "flash_attn_decode_f32"
+        default: return baseName
+        }
     }
 
     // MARK: - Helpers

@@ -34,7 +34,7 @@ struct ModelDeclarationTests {
 
         let canonical1 = canonicalize(graph1)
         let canonical2 = canonicalize(graph2)
-        #expect(canonical1 == canonical2)
+        #expect(canonical1.dump() == canonical2.dump())
     }
 
     // MARK: - Qwen 3.5
@@ -69,7 +69,7 @@ struct ModelDeclarationTests {
 
         // First op should be tokenEmbedding, NOT parallel
         let firstOp = graph.rootRegion.operations[0]
-        if case .tokenEmbedding = firstOp.kind {
+        if case .primitive(let attrs) = firstOp.kind, attrs is TokenEmbeddingAttributes {
             // OK
         } else {
             Issue.record("Expected tokenEmbedding as first op for text-only, got \(firstOp.kind)")
@@ -82,10 +82,11 @@ struct ModelDeclarationTests {
 
         // Find the first attention operation (inside repeating > residual)
         let attnOp = findFirstOperation(in: graph.rootRegion) { kind in
-            if case .attention = kind { return true }
+            if kind is AttentionAttributes { return true }
             return false
         }
-        guard case .attention(let attrs) = attnOp?.kind else {
+        guard case .primitive(let rawAttrs) = attnOp?.kind,
+              let attrs = rawAttrs as? AttentionAttributes else {
             Issue.record("No attention operation found")
             return
         }
@@ -105,7 +106,7 @@ struct ModelDeclarationTests {
 
         let canonical1 = canonicalize(graph1)
         let canonical2 = canonicalize(graph2)
-        #expect(canonical1 == canonical2)
+        #expect(canonical1.dump() == canonical2.dump())
     }
 
     // MARK: - Cohere
@@ -180,7 +181,7 @@ struct ModelDeclarationTests {
 
         let canonical1 = canonicalize(graph1)
         let canonical2 = canonicalize(graph2)
-        #expect(canonical1 == canonical2)
+        #expect(canonical1.dump() == canonical2.dump())
     }
 
     @Test("LFM2 MoE deterministic")
@@ -190,7 +191,7 @@ struct ModelDeclarationTests {
 
         let canonical1 = canonicalize(graph1)
         let canonical2 = canonicalize(graph2)
-        #expect(canonical1 == canonical2)
+        #expect(canonical1.dump() == canonical2.dump())
     }
 
     @Test("LFM2 24B-A2B numDenseLayers splits dense and MoE layers")
@@ -200,11 +201,11 @@ struct ModelDeclarationTests {
 
         // Count MLP and MoE ops in the graph
         let mlpCount = countOperations(in: graph.rootRegion) { kind in
-            if case .mlp = kind { return true }
+            if kind is MLPAttributes { return true }
             return false
         }
         let moeCount = countOperations(in: graph.rootRegion) { kind in
-            if case .moe = kind { return true }
+            if kind is MoEAttributes { return true }
             return false
         }
 
@@ -218,11 +219,11 @@ struct ModelDeclarationTests {
         let graph = try LFM2(config: TestConfigs.lfm2_8B_A1B).makeModelGraph()
 
         let mlpCount = countOperations(in: graph.rootRegion) { kind in
-            if case .mlp = kind { return true }
+            if kind is MLPAttributes { return true }
             return false
         }
         let moeCount = countOperations(in: graph.rootRegion) { kind in
-            if case .moe = kind { return true }
+            if kind is MoEAttributes { return true }
             return false
         }
 
@@ -236,11 +237,11 @@ struct ModelDeclarationTests {
         let graph = try LFM2(config: TestConfigs.lfm25_1_2B).makeModelGraph()
 
         let mlpCount = countOperations(in: graph.rootRegion) { kind in
-            if case .mlp = kind { return true }
+            if kind is MLPAttributes { return true }
             return false
         }
         let moeCount = countOperations(in: graph.rootRegion) { kind in
-            if case .moe = kind { return true }
+            if kind is MoEAttributes { return true }
             return false
         }
 
@@ -256,11 +257,11 @@ struct ModelDeclarationTests {
         let model = try LFM2(config: config)
         let graph = try model.makeModelGraph()
         let mlpCount = countOperations(in: graph.rootRegion) { kind in
-            if case .mlp = kind { return true }
+            if kind is MLPAttributes { return true }
             return false
         }
         let moeCount = countOperations(in: graph.rootRegion) { kind in
-            if case .moe = kind { return true }
+            if kind is MoEAttributes { return true }
             return false
         }
         #expect(mlpCount == 1)
@@ -274,11 +275,11 @@ struct ModelDeclarationTests {
         let graph = try LFM2(config: TestConfigs.lfm2_350M).makeModelGraph()
 
         let convCount = countOperations(in: graph.rootRegion) { kind in
-            if case .shortConv = kind { return true }
+            if kind is ShortConvAttributes { return true }
             return false
         }
         let attnCount = countOperations(in: graph.rootRegion) { kind in
-            if case .attention = kind { return true }
+            if kind is AttentionAttributes { return true }
             return false
         }
 
@@ -296,11 +297,11 @@ struct ModelDeclarationTests {
         // Qwen35 uses LayerStack with flat layer schedule.
         // Count stateSpace and attention ops across all layers.
         let deltaNetCount = countOperations(in: graph.rootRegion) { kind in
-            if case .stateSpace = kind { return true }
+            if kind is StateSpaceAttributes { return true }
             return false
         }
         let attnCount = countOperations(in: graph.rootRegion) { kind in
-            if case .attention = kind { return true }
+            if kind is AttentionAttributes { return true }
             return false
         }
 
@@ -318,7 +319,7 @@ struct ModelDeclarationTests {
 
         let canonTransformer = canonicalize(transformer)
         let canonQwen35 = canonicalize(qwen35)
-        #expect(canonTransformer != canonQwen35)
+        #expect(canonTransformer.dump() != canonQwen35.dump())
     }
 
     @Test("LFM2 graph differs from Transformer and Qwen35")
@@ -328,7 +329,7 @@ struct ModelDeclarationTests {
 
         let canonLFM2 = canonicalize(lfm2)
         let canonTransformer = canonicalize(transformer)
-        #expect(canonLFM2 != canonTransformer)
+        #expect(canonLFM2.dump() != canonTransformer.dump())
     }
 
     @Test("LFM2 dense vs MoE produce different graphs")
@@ -338,7 +339,7 @@ struct ModelDeclarationTests {
 
         let canonDense = canonicalize(dense)
         let canonMoE = canonicalize(moe)
-        #expect(canonDense != canonMoE)
+        #expect(canonDense.dump() != canonMoE.dump())
     }
 
     @Test("LFM2 custom config with arbitrary sections")
@@ -650,13 +651,19 @@ private enum TestConfigs {
 
 // MARK: - Helpers
 
-/// Depth-first search for the first operation matching a predicate.
+/// Extract primitive attributes from an operation, returning nil for structural operations.
+private func primitiveAttributes(_ kind: OperationKind) -> (any OperationAttributes)? {
+    guard case .primitive(let attrs) = kind else { return nil }
+    return attrs
+}
+
+/// Depth-first search for the first operation whose primitive attributes match the predicate.
 private func findFirstOperation(
     in region: Region,
-    matching predicate: (OperationKind) -> Bool
+    matching predicate: (any OperationAttributes) -> Bool
 ) -> Operation? {
     for op in region.operations {
-        if predicate(op.kind) { return op }
+        if let attrs = primitiveAttributes(op.kind), predicate(attrs) { return op }
         switch op.kind {
         case .residual(_, let body):
             if let found = findFirstOperation(in: body, matching: predicate) {
@@ -672,11 +679,12 @@ private func findFirstOperation(
             if let found = findFirstOperation(in: body, matching: predicate) {
                 return found
             }
-        case .layerStack(let layers):
-            for layer in layers {
-                if let found = findFirstOperation(in: layer, matching: predicate) {
-                    return found
-                }
+        case .conditional(_, let thenBody, let elseBody):
+            if let found = findFirstOperation(in: thenBody, matching: predicate) {
+                return found
+            }
+            if let found = findFirstOperation(in: elseBody, matching: predicate) {
+                return found
             }
         default:
             break
@@ -685,14 +693,14 @@ private func findFirstOperation(
     return nil
 }
 
-/// Count all operations matching a predicate, recursing into all nested regions.
+/// Count all primitive operations matching a predicate, recursing into all nested regions.
 private func countOperations(
     in region: Region,
-    matching predicate: (OperationKind) -> Bool
+    matching predicate: (any OperationAttributes) -> Bool
 ) -> Int {
     var count = 0
     for op in region.operations {
-        if predicate(op.kind) { count += 1 }
+        if let attrs = primitiveAttributes(op.kind), predicate(attrs) { count += 1 }
         switch op.kind {
         case .residual(_, let body):
             count += countOperations(in: body, matching: predicate)
@@ -702,10 +710,9 @@ private func countOperations(
             }
         case .repeating(_, let body):
             count += countOperations(in: body, matching: predicate)
-        case .layerStack(let layers):
-            for layer in layers {
-                count += countOperations(in: layer, matching: predicate)
-            }
+        case .conditional(_, let thenBody, let elseBody):
+            count += countOperations(in: thenBody, matching: predicate)
+            count += countOperations(in: elseBody, matching: predicate)
         default:
             break
         }
@@ -716,7 +723,7 @@ private func countOperations(
 /// Count operations inside the first repeating body found (for Repeat-based models).
 private func countOperations(
     inRepeatingBody region: Region,
-    matching predicate: (OperationKind) -> Bool
+    matching predicate: (any OperationAttributes) -> Bool
 ) -> Int {
     for op in region.operations {
         switch op.kind {

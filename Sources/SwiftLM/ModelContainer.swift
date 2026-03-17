@@ -124,21 +124,38 @@ public final class ModelContainer: @unchecked Sendable {
                 // Prefill: batch all prompt tokens with minimal GPU sync
                 let prefillStart = CFAbsoluteTimeGetCurrent()
                 let promptTokens = input.text.tokens.map { Int32($0) }
-                self.inferenceModel.prefill(tokens: promptTokens)
+                let firstToken = self.inferenceModel.prefill(tokens: promptTokens)
                 let prefillTime = CFAbsoluteTimeGetCurrent() - prefillStart
                 print("[ModelContainer] prefill done: \(input.text.tokens.count) tokens [\(String(format: "%.3f", prefillTime))s] \(String(format: "%.0f", Double(input.text.tokens.count) / prefillTime)) tok/s")
+                print("[ModelContainer] first predicted token: \(firstToken)")
 
-                // Generate tokens
-                var previousToken: Int32 = -1
-                for step in 0..<maxTokens {
-                    let inputToken = previousToken >= 0 ? previousToken : Int32(input.text.tokens.last ?? 0)
+                // First generated token comes from prefill argmax
+                guard firstToken >= 0 else {
+                    print("[ModelContainer] prefill returned negative token, aborting")
+                    continuation.finish()
+                    return
+                }
+                if self.modelConfiguration.eosTokenIds.contains(Int(firstToken)) {
+                    print("[ModelContainer] prefill predicted EOS token \(firstToken)")
+                    continuation.finish()
+                    return
+                }
 
+                // Yield the first token (from prefill)
+                let firstText = self.modelTokenizer.decode(tokens: [Int(firstToken)])
+                print("[ModelContainer] token 0: id=\(firstToken) text='\(firstText)'")
+                continuation.yield(.chunk(firstText))
+                tokenCount += 1
+
+                // Decode subsequent tokens
+                var previousToken = firstToken
+                while tokenCount < maxTokens {
                     let decodeStart = CFAbsoluteTimeGetCurrent()
-                    let outputToken = self.inferenceModel.decodeSync(tokenID: inputToken)
+                    let outputToken = self.inferenceModel.decodeSync(tokenID: previousToken)
                     let decodeTime = CFAbsoluteTimeGetCurrent() - decodeStart
 
-                    if step < 3 || step % 50 == 0 {
-                        print("[ModelContainer] decode step \(step): input=\(inputToken) → output=\(outputToken) [\(String(format: "%.3f", decodeTime))s]")
+                    if tokenCount < 10 || tokenCount % 50 == 0 {
+                        print("[ModelContainer] decode step \(tokenCount): input=\(previousToken) → output=\(outputToken) [\(String(format: "%.3f", decodeTime))s]")
                     }
 
                     if outputToken < 0 {
