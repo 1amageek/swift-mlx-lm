@@ -1480,63 +1480,6 @@ public struct MetalInferenceCompiler: Sendable {
         }
     }
 
-    // MARK: - Fusion Pass
-
-    func fusionPass(entries: [DispatchEntry]) -> [DispatchEntry] {
-        var result = entries
-        var changed = true
-
-        while changed {
-            changed = false
-            var index = 0
-
-            while index < result.count {
-                // Extract Reduction from .fragment or .compute
-                func extractReduction(at i: Int) -> Reduction? {
-                    if case .fragment(let frag) = result[i].kind {
-                        return frag as? Reduction
-                    }
-                    return nil
-                }
-
-                // Pattern 1: structuralAdd + structuralCopy + Reduction → fused (3 → 1)
-                if index + 2 < result.count,
-                   case .structuralAdd(let addDimension) = result[index].kind,
-                   case .structuralCopy = result[index + 1].kind,
-                   let reduction = extractReduction(at: index + 2) {
-                    let fused = DispatchEntry(
-                        index: result[index].index,
-                        kind: .fusedResidualAddCopyNorm(FusedResidualAddCopyNorm(
-                            dimension: addDimension, epsilon: reduction.epsilon)),
-                        parameterBindings: result[index + 2].parameterBindings,
-                        layerIndex: result[index].layerIndex)
-                    result.replaceSubrange(index...index + 2, with: [fused])
-                    changed = true
-                    continue
-                }
-
-                // Pattern 2: structuralCopy + Reduction → fused (2 → 1)
-                if index + 1 < result.count,
-                   case .structuralCopy = result[index].kind,
-                   let reduction = extractReduction(at: index + 1) {
-                    let fused = DispatchEntry(
-                        index: result[index].index,
-                        kind: .fusedCopyNorm(FusedCopyNorm(
-                            dimension: reduction.dimension, epsilon: reduction.epsilon)),
-                        parameterBindings: result[index + 1].parameterBindings,
-                        layerIndex: result[index].layerIndex)
-                    result.replaceSubrange(index...index + 1, with: [fused])
-                    changed = true
-                    continue
-                }
-
-                index += 1
-            }
-        }
-
-        return result
-    }
-
     // MARK: - Kernel Name Resolution
 
     /// Map a DispatchKind to the MSL kernel function name.
