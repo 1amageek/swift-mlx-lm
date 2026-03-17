@@ -16,4 +16,8 @@ public struct LinearFragment: PrimitiveMetalKernelFragment {
         .gemv(outputDimension: outputDimension, inputDimension: inputDimension)
     }
     public var weightSlots: [MetalWeightSlot] { [MetalWeightSlot(field: field, role: .weight)] }
+
+    public func decodeBindings(context: BufferBindingContext) -> FragmentBindings {
+        fatalError("[Compiler] LinearFragment is dispatched via .projection, not .fragment")
+    }
 }

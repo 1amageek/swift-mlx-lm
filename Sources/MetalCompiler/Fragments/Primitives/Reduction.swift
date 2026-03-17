@@ -1,3 +1,5 @@
+import Metal
+
 /// Reduction: all threads cooperate to reduce across a dimension.
 /// Used by: RMSNorm, LayerNorm.
 public struct Reduction: PrimitiveMetalKernelFragment {
@@ -20,4 +22,21 @@ public struct Reduction: PrimitiveMetalKernelFragment {
     }
     public var dispatchDimension: MetalDispatchDimension { .reduction(dimension: dimension) }
     public var weightSlots: [MetalWeightSlot] { [MetalWeightSlot(field: nil, role: .weight)] }
+
+    public func decodeBindings(context: BufferBindingContext) -> FragmentBindings {
+        let (weightBuffer, weightOffset) = context.resolveWeight("scale")
+        return FragmentBindings(
+            buffers: [
+                (0, context.bufferSet.hidden, 0),
+                (1, weightBuffer, weightOffset),
+                (2, context.bufferSet.hidden, 0),
+            ],
+            bytes: [
+                uint32Binding(3, UInt32(dimension)),
+                floatBinding(4, epsilon),
+            ],
+            outputIsHidden: true,
+            resetsProjectionIndex: true
+        )
+    }
 }

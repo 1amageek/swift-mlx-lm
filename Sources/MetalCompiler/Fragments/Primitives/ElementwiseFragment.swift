@@ -1,3 +1,5 @@
+import Metal
+
 /// Elementwise: one thread per element, trivially parallel.
 /// Used by: SwiGLU, SigmoidGate.
 public struct ElementwiseFragment: PrimitiveMetalKernelFragment {
@@ -24,4 +26,20 @@ public struct ElementwiseFragment: PrimitiveMetalKernelFragment {
         }
     }
     public var dispatchDimension: MetalDispatchDimension { .elementwise(count: count) }
+
+    public func decodeBindings(context: BufferBindingContext) -> FragmentBindings {
+        let slotBytes = context.slotDimension * context.elementSize
+        return FragmentBindings(
+            buffers: [
+                (0, context.bufferSet.scratch, 1 * slotBytes),
+                (1, context.bufferSet.scratch, 2 * slotBytes),
+                (2, context.bufferSet.scratch, 0),
+            ],
+            bytes: [
+                uint32Binding(3, UInt32(count)),
+            ],
+            outputIsHidden: false,
+            resetsProjectionIndex: true
+        )
+    }
 }

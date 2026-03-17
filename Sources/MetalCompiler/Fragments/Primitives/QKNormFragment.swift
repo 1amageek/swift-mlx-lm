@@ -1,3 +1,5 @@
+import Metal
+
 /// Per-head RMS normalization for Q or K projections.
 public struct QKNormFragment: PrimitiveMetalKernelFragment {
     public let headCount: Int
@@ -21,4 +23,22 @@ public struct QKNormFragment: PrimitiveMetalKernelFragment {
     }
     public var dispatchDimension: MetalDispatchDimension { .perHead(headCount: headCount) }
     public var weightSlots: [MetalWeightSlot] { [MetalWeightSlot(field: weightRole, role: .weight)] }
+
+    public func decodeBindings(context: BufferBindingContext) -> FragmentBindings {
+        let slotBytes = context.slotDimension * context.elementSize
+        let scratchSlotIndex = weightRole == "q_layernorm" ? 1 : 2
+        let (weightBuffer, weightOffset) = context.resolveWeight(weightRole)
+        return FragmentBindings(
+            buffers: [
+                (0, context.bufferSet.scratch, scratchSlotIndex * slotBytes),
+                (1, weightBuffer, weightOffset),
+            ],
+            bytes: [
+                uint32Binding(2, UInt32(headCount)),
+                uint32Binding(3, UInt32(headDimension)),
+                floatBinding(4, epsilon),
+            ],
+            outputIsHidden: false
+        )
+    }
 }

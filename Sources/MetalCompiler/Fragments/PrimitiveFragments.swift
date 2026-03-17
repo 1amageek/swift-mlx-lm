@@ -48,6 +48,13 @@ public protocol PrimitiveMetalKernelFragment: MetalKernelFragment where Fragment
     /// based on `context.bufferPrecision` and `context.weightFormat`.
     func kernelName(context: KernelContext) -> String
 
+    /// Declare buffer bindings for decode dispatch.
+    ///
+    /// The compiler provides a context with buffer set, slot dimensions,
+    /// and weight resolution. The fragment returns its concrete bindings
+    /// and routing state updates.
+    func decodeBindings(context: BufferBindingContext) -> FragmentBindings
+
     /// Generate the composable MSL computation body for this fragment.
     ///
     /// Fusable fragments return a body using standardized variable names
@@ -85,6 +92,9 @@ extension PrimitiveMetalKernelFragment {
     public var cacheSlots: [MetalCacheSlot] { [] }
     public var isInPlace: Bool { false }
     public var normEpsilon: Float? { nil }
+    public func decodeBindings(context: BufferBindingContext) -> FragmentBindings {
+        fatalError("Fragment \(type(of: self)) must implement decodeBindings(context:)")
+    }
     public func kernelBody(bufferPrecision: BufferPrecision, weightFormat: WeightFormat) -> String? { nil }
     public func kernelSource(name: String, bufferPrecision: BufferPrecision, weightFormat: WeightFormat) -> String {
         fatalError("Fragment \(type(of: self)) must implement either kernelBody() or kernelSource()")

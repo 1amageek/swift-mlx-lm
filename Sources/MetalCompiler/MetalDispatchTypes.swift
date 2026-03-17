@@ -1,3 +1,5 @@
+import Metal
+
 /// Metal dispatch types used by the compiler.
 ///
 /// Shared types: MetalDispatchDimension, MetalProjection, MetalWeightSlot,
@@ -76,6 +78,72 @@ public struct KernelContext: Sendable {
         self.bufferPrecision = bufferPrecision
         self.weightFormat = weightFormat
     }
+}
+
+// MARK: - Buffer Binding Context
+
+/// Context provided by the compiler for fragment buffer binding resolution.
+///
+/// Fragments use this to declare their decode-path buffer layout
+/// without knowing the concrete MTLBuffer allocation details.
+public struct BufferBindingContext: @unchecked Sendable {
+    public let bufferSet: MetalBufferSet
+    public let slotDimension: Int
+    public let elementSize: Int
+    public let kvCacheIndex: Int
+    public let convLayerIndex: Int
+    public let resolveWeight: (String) -> (buffer: MTLBuffer, offset: Int)
+
+    public init(bufferSet: MetalBufferSet, slotDimension: Int, elementSize: Int,
+                kvCacheIndex: Int, convLayerIndex: Int,
+                resolveWeight: @escaping (String) -> (buffer: MTLBuffer, offset: Int)) {
+        self.bufferSet = bufferSet
+        self.slotDimension = slotDimension
+        self.elementSize = elementSize
+        self.kvCacheIndex = kvCacheIndex
+        self.convLayerIndex = convLayerIndex
+        self.resolveWeight = resolveWeight
+    }
+}
+
+/// Buffer bindings declared by a fragment for decode dispatch.
+public struct FragmentBindings: @unchecked Sendable {
+    public let buffers: [(index: Int, buffer: MTLBuffer, offset: Int)]
+    public let bytes: [(index: Int, value: [UInt8])]
+    /// Whether this fragment's output goes to hidden (true) or scratch (false).
+    public let outputIsHidden: Bool
+    /// Whether to reset projection index after this fragment.
+    public let resetsProjectionIndex: Bool
+    /// Whether this fragment consumes a KV cache layer slot.
+    public let consumesKVCacheLayer: Bool
+    /// Whether this fragment consumes a conv state layer slot.
+    public let consumesConvLayer: Bool
+
+    public init(buffers: [(index: Int, buffer: MTLBuffer, offset: Int)],
+                bytes: [(index: Int, value: [UInt8])],
+                outputIsHidden: Bool,
+                resetsProjectionIndex: Bool = false,
+                consumesKVCacheLayer: Bool = false,
+                consumesConvLayer: Bool = false) {
+        self.buffers = buffers
+        self.bytes = bytes
+        self.outputIsHidden = outputIsHidden
+        self.resetsProjectionIndex = resetsProjectionIndex
+        self.consumesKVCacheLayer = consumesKVCacheLayer
+        self.consumesConvLayer = consumesConvLayer
+    }
+}
+
+// MARK: - Binding Helpers
+
+/// Create a bytes binding for a UInt32 constant.
+public func uint32Binding(_ index: Int, _ value: UInt32) -> (index: Int, value: [UInt8]) {
+    withUnsafeBytes(of: value) { (index: index, value: Array($0)) }
+}
+
+/// Create a bytes binding for a Float constant.
+public func floatBinding(_ index: Int, _ value: Float) -> (index: Int, value: [UInt8]) {
+    withUnsafeBytes(of: value) { (index: index, value: Array($0)) }
 }
 
 // MARK: - Dispatch Dimension
