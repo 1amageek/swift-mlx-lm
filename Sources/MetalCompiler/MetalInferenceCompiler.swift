@@ -472,6 +472,103 @@ public struct MetalInferenceCompiler: Sendable {
         // Determine the sequence-aware kernel and buffer routing
         switch entry.kind {
 
+        // MARK: GEMM Projection (compiler-owned — STAF-dependent kernel selection)
+        case .projection(let projection, let isOutput):
+            let (weightBuffer, weightOffset) = resolveWeight(role: projection.field)
+            let isOutputHead = isOutput && projection.outputDimension > hiddenSize
+
+            var kernelName = "gemm_f32s"
+            if let binding = entry.parameterBindings.first(where: { $0.role == projection.field }),
+               let staf = stafWeightStore,
+               let tensorInfo = staf.tensor(for: binding.tensorName) {
+                let baseGemv = tensorInfo.format.gemvKernelName
+                if baseGemv == "gemv_bf16" { kernelName = "gemm_bf16_f32s" }
+                else if baseGemv == "gemv_q4_g64" { kernelName = "gemm_q4_g64_f32s" }
+                else if baseGemv == "gemv_q4_g128" { kernelName = "gemm_q4_g128_f32s" }
+                if pipelineCache[kernelName] == nil { kernelName = "gemm_f32s" }
+            }
+            let pipeline = try getPipeline(kernelName)
+
+            let inputBuffer = routingState.lastOutputIsHidden ? buffers.hidden : buffers.scratch
+            let outputBuffer: MTLBuffer
+            let outputOffset: Int
+            if isOutputHead {
+                outputBuffer = buffers.logits; outputOffset = 0
+                routingState.lastOutputIsHidden = false
+            } else if isOutput {
+                outputBuffer = buffers.hidden; outputOffset = 0
+                routingState.lastOutputIsHidden = true
+            } else {
+                let scratchSlot = routingState.projectionIndex + 1
+                outputBuffer = buffers.scratch
+                outputOffset = scratchSlot * slotDimension * scratchElementSize * maximumSequenceLength
+                routingState.lastOutputIsHidden = false
+            }
+            routingState.projectionIndex += 1
+
+            let threads = min(2 * pipeline.threadExecutionWidth, pipeline.maxTotalThreadsPerThreadgroup)
+            let gridX = (projection.outputDimension + 1) / 2
+
+            if isOutputHead {
+                let inputStride = projection.inputDimension * scratchElementSize
+                return [MetalPrefillStep(
+                    pipeline: pipeline,
+                    gridSize: MTLSize(width: gridX, height: 1, depth: 1),
+                    threadgroupSize: MTLSize(width: threads, height: 1, depth: 1),
+                    bufferBindings: [(0, inputBuffer, 0), (1, weightBuffer, weightOffset), (2, outputBuffer, outputOffset)],
+                    bytesBindings: [uint32Binding(3, UInt32(projection.inputDimension)),
+                                    uint32Binding(4, UInt32(projection.outputDimension)),
+                                    uint32Binding(5, UInt32(1))],
+                    threadgroupMemoryLength: 0, sync: .bufferBarrier, mode: .lastToken,
+                    sequenceLengthBindingIndex: nil, positionBufferIndex: nil,
+                    perPositionStrides: [0: inputStride]
+                )]
+            }
+
+            return [MetalPrefillStep(
+                pipeline: pipeline,
+                gridSize: MTLSize(width: gridX, height: maximumSequenceLength, depth: 1),
+                threadgroupSize: MTLSize(width: threads, height: 1, depth: 1),
+                bufferBindings: [(0, inputBuffer, 0), (1, weightBuffer, weightOffset), (2, outputBuffer, outputOffset)],
+                bytesBindings: [uint32Binding(3, UInt32(projection.inputDimension)),
+                                uint32Binding(4, UInt32(projection.outputDimension)),
+                                seqLenBinding(5)],
+                threadgroupMemoryLength: 0, sync: .bufferBarrier, mode: .batch,
+                sequenceLengthBindingIndex: 5, positionBufferIndex: nil, perPositionStrides: [:]
+            )]
+
+        // MARK: Structural Copy (compiler-owned)
+        case .structuralCopy(let dimension):
+            let pipeline = try getPipeline("copy_buffer_seq_f32")
+            let tgSize = min(256, pipeline.maxTotalThreadsPerThreadgroup)
+            let gridX = (dimension + tgSize - 1) / tgSize
+            routingState.projectionIndex = 0
+            return [MetalPrefillStep(
+                pipeline: pipeline,
+                gridSize: MTLSize(width: gridX, height: maximumSequenceLength, depth: 1),
+                threadgroupSize: MTLSize(width: tgSize, height: 1, depth: 1),
+                bufferBindings: [(0, buffers.hidden, 0), (1, buffers.residual, 0)],
+                bytesBindings: [uint32Binding(2, UInt32(dimension)), seqLenBinding(3)],
+                threadgroupMemoryLength: 0, sync: .bufferBarrier, mode: .batch,
+                sequenceLengthBindingIndex: 3, positionBufferIndex: nil, perPositionStrides: [:]
+            )]
+
+        // MARK: Structural Add (compiler-owned)
+        case .structuralAdd(let dimension):
+            let pipeline = try getPipeline("residual_add_seq_f32")
+            let tgSize = min(256, pipeline.maxTotalThreadsPerThreadgroup)
+            let gridX = (dimension + tgSize - 1) / tgSize
+            routingState.lastOutputIsHidden = true
+            return [MetalPrefillStep(
+                pipeline: pipeline,
+                gridSize: MTLSize(width: gridX, height: maximumSequenceLength, depth: 1),
+                threadgroupSize: MTLSize(width: tgSize, height: 1, depth: 1),
+                bufferBindings: [(0, buffers.hidden, 0), (1, buffers.residual, 0), (2, buffers.hidden, 0)],
+                bytesBindings: [uint32Binding(3, UInt32(dimension)), seqLenBinding(4)],
+                threadgroupMemoryLength: 0, sync: .bufferBarrier, mode: .batch,
+                sequenceLengthBindingIndex: 4, positionBufferIndex: nil, perPositionStrides: [:]
+            )]
+
         // MARK: Fragment-driven prefill steps (protocol dispatch — no type checks)
         case .fragment(let frag):
             let prefillContext = PrefillBindingContext(
@@ -490,6 +587,42 @@ public struct MetalInferenceCompiler: Sendable {
             if result.consumesConvLayer { routingState.convLayerIndex += 1 }
             routingState.lastOutputIsHidden = result.outputIsHidden
             return result.steps
+
+        // MARK: Fused Copy + Norm → decompose into copy + norm steps for prefill
+        case .fusedCopyNorm(let fusedOp):
+            let copyEntry = DispatchEntry(index: entry.index, kind: .structuralCopy(dimension: fusedOp.dimension),
+                                          parameterBindings: [], layerIndex: entry.layerIndex)
+            let normEntry = DispatchEntry(index: entry.index + 1,
+                                          kind: .fragment(Reduction(dimension: fusedOp.dimension, epsilon: fusedOp.epsilon)),
+                                          parameterBindings: entry.parameterBindings, layerIndex: entry.layerIndex)
+            var steps: [MetalPrefillStep] = []
+            for decomposed in [copyEntry, normEntry] {
+                let s = try buildPrefillSteps(entry: decomposed, buffers: buffers, stafWeightStore: stafWeightStore,
+                    hiddenSize: hiddenSize, intermediateSize: intermediateSize, slotDimension: slotDimension,
+                    vocabSize: vocabSize, maximumSequenceLength: maximumSequenceLength, scratchElementSize: scratchElementSize,
+                    kvCacheIndex: &kvCacheIndex, routingState: &routingState, pipelineCache: pipelineCache, device: device)
+                steps.append(contentsOf: s)
+            }
+            return steps
+
+        // MARK: Fused Residual Add + Copy + Norm → decompose into add + copy + norm
+        case .fusedResidualAddCopyNorm(let fusedOp):
+            let addEntry = DispatchEntry(index: entry.index, kind: .structuralAdd(dimension: fusedOp.dimension),
+                                         parameterBindings: [], layerIndex: entry.layerIndex)
+            let copyEntry = DispatchEntry(index: entry.index + 1, kind: .structuralCopy(dimension: fusedOp.dimension),
+                                          parameterBindings: [], layerIndex: entry.layerIndex)
+            let normEntry = DispatchEntry(index: entry.index + 2,
+                                          kind: .fragment(Reduction(dimension: fusedOp.dimension, epsilon: fusedOp.epsilon)),
+                                          parameterBindings: entry.parameterBindings, layerIndex: entry.layerIndex)
+            var steps: [MetalPrefillStep] = []
+            for decomposed in [addEntry, copyEntry, normEntry] {
+                let s = try buildPrefillSteps(entry: decomposed, buffers: buffers, stafWeightStore: stafWeightStore,
+                    hiddenSize: hiddenSize, intermediateSize: intermediateSize, slotDimension: slotDimension,
+                    vocabSize: vocabSize, maximumSequenceLength: maximumSequenceLength, scratchElementSize: scratchElementSize,
+                    kvCacheIndex: &kvCacheIndex, routingState: &routingState, pipelineCache: pipelineCache, device: device)
+                steps.append(contentsOf: s)
+            }
+            return steps
 
         // MARK: Batched Projection → decompose into individual GEMMs
         case .batchedProjection(let batched):
