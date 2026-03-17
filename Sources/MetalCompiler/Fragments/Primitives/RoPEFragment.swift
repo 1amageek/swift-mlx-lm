@@ -44,4 +44,39 @@ public struct RoPEFragment: PrimitiveMetalKernelFragment {
             outputIsHidden: false
         )
     }
+
+    public func prefillSteps(context: PrefillBindingContext) throws -> FragmentPrefillSteps {
+        let kernelName = kernelName(context: context.kernelContext)
+        let pipeline = try context.getPipeline(kernelName)
+        let threads = min(32, pipeline.maxTotalThreadsPerThreadgroup)
+        let totalHeads = headCount + kvHeadCount
+        let scratchSlotSize = context.slotDimension * context.scratchElementSize * context.maximumSequenceLength
+        return FragmentPrefillSteps(
+            steps: [MetalPrefillStep(
+                pipeline: pipeline,
+                gridSize: MTLSize(width: totalHeads, height: context.maximumSequenceLength, depth: 1),
+                threadgroupSize: MTLSize(width: threads, height: 1, depth: 1),
+                bufferBindings: [
+                    (0, context.buffers.scratch, 1 * scratchSlotSize),
+                    (1, context.buffers.scratch, 2 * scratchSlotSize),
+                    (2, context.buffers.positions, 0),
+                ],
+                bytesBindings: [
+                    uint32Binding(3, UInt32(headCount)),
+                    uint32Binding(4, UInt32(kvHeadCount)),
+                    uint32Binding(5, UInt32(headDimension)),
+                    uint32Binding(6, UInt32(ropeDimension)),
+                    floatBinding(7, base),
+                    uint32Binding(8, UInt32(context.maximumSequenceLength)),
+                ],
+                threadgroupMemoryLength: 0,
+                sync: .bufferBarrier,
+                mode: .batch,
+                sequenceLengthBindingIndex: 8,
+                positionBufferIndex: nil,
+                perPositionStrides: [:]
+            )],
+            outputIsHidden: false
+        )
+    }
 }

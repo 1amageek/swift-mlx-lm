@@ -39,4 +39,39 @@ public struct Reduction: PrimitiveMetalKernelFragment {
             resetsProjectionIndex: true
         )
     }
+
+    public func prefillSteps(context: PrefillBindingContext) throws -> FragmentPrefillSteps {
+        let (weightBuffer, weightOffset) = context.resolveWeight("scale")
+        let kernelName = kernelName(context: context.kernelContext)
+        let pipeline = try context.getPipeline(kernelName)
+        let simdWidth = pipeline.threadExecutionWidth
+        let clamped = min(max(dimension, 1), 1024)
+        let rounded = ((clamped + simdWidth - 1) / simdWidth) * simdWidth
+        let threads = min(rounded, pipeline.maxTotalThreadsPerThreadgroup)
+        return FragmentPrefillSteps(
+            steps: [MetalPrefillStep(
+                pipeline: pipeline,
+                gridSize: MTLSize(width: context.maximumSequenceLength, height: 1, depth: 1),
+                threadgroupSize: MTLSize(width: threads, height: 1, depth: 1),
+                bufferBindings: [
+                    (0, context.buffers.hidden, 0),
+                    (1, weightBuffer, weightOffset),
+                    (2, context.buffers.hidden, 0),
+                ],
+                bytesBindings: [
+                    uint32Binding(3, UInt32(dimension)),
+                    floatBinding(4, epsilon),
+                    uint32Binding(5, UInt32(context.maximumSequenceLength)),
+                ],
+                threadgroupMemoryLength: 0,
+                sync: .bufferBarrier,
+                mode: .batch,
+                sequenceLengthBindingIndex: 5,
+                positionBufferIndex: nil,
+                perPositionStrides: [:]
+            )],
+            outputIsHidden: true,
+            resetsProjectionIndex: true
+        )
+    }
 }

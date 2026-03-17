@@ -17,4 +17,8 @@ public struct QuantizeKVFragment: PrimitiveMetalKernelFragment {
     public func decodeBindings(context: BufferBindingContext) -> FragmentBindings {
         fatalError("[Compiler] QuantizeKVFragment decode bindings not yet implemented")
     }
+
+    public func prefillSteps(context: PrefillBindingContext) throws -> FragmentPrefillSteps {
+        fatalError("[Compiler] QuantizeKVFragment prefill steps not yet implemented")
+    }
 }

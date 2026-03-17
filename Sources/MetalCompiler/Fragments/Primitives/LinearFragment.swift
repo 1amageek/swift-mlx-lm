@@ -20,4 +20,8 @@ public struct LinearFragment: PrimitiveMetalKernelFragment {
     public func decodeBindings(context: BufferBindingContext) -> FragmentBindings {
         fatalError("[Compiler] LinearFragment is dispatched via .projection, not .fragment")
     }
+
+    public func prefillSteps(context: PrefillBindingContext) throws -> FragmentPrefillSteps {
+        fatalError("[Compiler] LinearFragment is dispatched via .projection, not .fragment")
+    }
 }

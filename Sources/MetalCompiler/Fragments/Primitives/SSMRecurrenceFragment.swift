@@ -17,4 +17,8 @@ public struct SSMRecurrenceFragment: PrimitiveMetalKernelFragment {
     public func decodeBindings(context: BufferBindingContext) -> FragmentBindings {
         fatalError("[Compiler] SSMRecurrenceFragment decode bindings not yet implemented")
     }
+
+    public func prefillSteps(context: PrefillBindingContext) throws -> FragmentPrefillSteps {
+        fatalError("[Compiler] SSMRecurrenceFragment prefill steps not yet implemented")
+    }
 }

@@ -26,4 +26,8 @@ public struct SigmoidGateFragment: PrimitiveMetalKernelFragment {
             outputIsHidden: false
         )
     }
+
+    public func prefillSteps(context: PrefillBindingContext) throws -> FragmentPrefillSteps {
+        fatalError("[Compiler] SigmoidGateFragment prefill steps not used in prefill currently")
+    }
 }

@@ -42,4 +42,36 @@ public struct ElementwiseFragment: PrimitiveMetalKernelFragment {
             resetsProjectionIndex: true
         )
     }
+
+    public func prefillSteps(context: PrefillBindingContext) throws -> FragmentPrefillSteps {
+        let kernelName = kernelName(context: context.kernelContext)
+        let pipeline = try context.getPipeline(kernelName)
+        let scratchSlotSize = context.slotDimension * context.scratchElementSize * context.maximumSequenceLength
+        let tgSize = min(256, pipeline.maxTotalThreadsPerThreadgroup)
+        let gridX = (count + tgSize - 1) / tgSize
+        return FragmentPrefillSteps(
+            steps: [MetalPrefillStep(
+                pipeline: pipeline,
+                gridSize: MTLSize(width: gridX, height: context.maximumSequenceLength, depth: 1),
+                threadgroupSize: MTLSize(width: tgSize, height: 1, depth: 1),
+                bufferBindings: [
+                    (0, context.buffers.scratch, 1 * scratchSlotSize),
+                    (1, context.buffers.scratch, 2 * scratchSlotSize),
+                    (2, context.buffers.scratch, 0),
+                ],
+                bytesBindings: [
+                    uint32Binding(3, UInt32(count)),
+                    uint32Binding(4, UInt32(context.maximumSequenceLength)),
+                ],
+                threadgroupMemoryLength: 0,
+                sync: .bufferBarrier,
+                mode: .batch,
+                sequenceLengthBindingIndex: 4,
+                positionBufferIndex: nil,
+                perPositionStrides: [:]
+            )],
+            outputIsHidden: false,
+            resetsProjectionIndex: true
+        )
+    }
 }

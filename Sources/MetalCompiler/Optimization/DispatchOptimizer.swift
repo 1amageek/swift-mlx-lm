@@ -49,7 +49,7 @@ public protocol DispatchOptimizer: Sendable {
 ///
 /// The compiler collects all primitives from a composite fragment's tree,
 /// passes them to the optimizer, then emits the optimized result.
-public struct CollectedPrimitive: @unchecked Sendable {
+public struct CollectedPrimitive: Sendable {
     /// The primitive fragment (carries dispatchDimension, isFusable, isInPlace, etc.).
     public let fragment: any PrimitiveMetalKernelFragment
     /// Parameter bindings for weight resolution (layer-resolved).
@@ -72,7 +72,7 @@ public struct CollectedPrimitive: @unchecked Sendable {
 ///
 /// The optimizer returns a sequence of these, which the compiler
 /// translates into `DispatchEntry` values.
-public enum OptimizedEntry: @unchecked Sendable {
+public enum OptimizedEntry: Sendable {
     /// Single dispatch — no optimization applied.
     case single(CollectedPrimitive)
     /// Batched projections — N non-output GEMV in one dispatch.

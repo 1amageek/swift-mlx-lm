@@ -55,6 +55,13 @@ public protocol PrimitiveMetalKernelFragment: MetalKernelFragment where Fragment
     /// and routing state updates.
     func decodeBindings(context: BufferBindingContext) -> FragmentBindings
 
+    /// Build prefill steps for this fragment.
+    ///
+    /// The compiler provides a context with prefill buffers, slot dimensions,
+    /// pipeline cache, and kernel context. The fragment returns its prefill
+    /// steps (batch, perPosition, or lastToken mode).
+    func prefillSteps(context: PrefillBindingContext) throws -> FragmentPrefillSteps
+
     /// Generate the composable MSL computation body for this fragment.
     ///
     /// Fusable fragments return a body using standardized variable names
@@ -94,6 +101,9 @@ extension PrimitiveMetalKernelFragment {
     public var normEpsilon: Float? { nil }
     public func decodeBindings(context: BufferBindingContext) -> FragmentBindings {
         fatalError("Fragment \(type(of: self)) must implement decodeBindings(context:)")
+    }
+    public func prefillSteps(context: PrefillBindingContext) throws -> FragmentPrefillSteps {
+        fatalError("Fragment \(type(of: self)) must implement prefillSteps(context:)")
     }
     public func kernelBody(bufferPrecision: BufferPrecision, weightFormat: WeightFormat) -> String? { nil }
     public func kernelSource(name: String, bufferPrecision: BufferPrecision, weightFormat: WeightFormat) -> String {

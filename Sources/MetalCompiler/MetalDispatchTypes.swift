@@ -108,6 +108,7 @@ public struct BufferBindingContext: @unchecked Sendable {
 
 /// Buffer bindings declared by a fragment for decode dispatch.
 public struct FragmentBindings: @unchecked Sendable {
+    // @unchecked: contains MTLBuffer (Metal protocol, not Sendable)
     public let buffers: [(index: Int, buffer: MTLBuffer, offset: Int)]
     public let bytes: [(index: Int, value: [UInt8])]
     /// Whether this fragment's output goes to hidden (true) or scratch (false).
@@ -127,6 +128,59 @@ public struct FragmentBindings: @unchecked Sendable {
                 consumesConvLayer: Bool = false) {
         self.buffers = buffers
         self.bytes = bytes
+        self.outputIsHidden = outputIsHidden
+        self.resetsProjectionIndex = resetsProjectionIndex
+        self.consumesKVCacheLayer = consumesKVCacheLayer
+        self.consumesConvLayer = consumesConvLayer
+    }
+}
+
+// MARK: - Prefill Binding Context
+
+/// Context provided by the compiler for fragment prefill step generation.
+public struct PrefillBindingContext: @unchecked Sendable {
+    // @unchecked: contains MTLBuffer (via PrefillBufferSet) and MTLComputePipelineState
+    public let buffers: PrefillBufferSet
+    public let slotDimension: Int
+    public let scratchElementSize: Int
+    public let maximumSequenceLength: Int
+    public let kvCacheIndex: Int
+    public let convLayerIndex: Int
+    public let kernelContext: KernelContext
+    public let resolveWeight: (String) -> (buffer: MTLBuffer, offset: Int)
+    public let getPipeline: (String) throws -> MTLComputePipelineState
+
+    public init(buffers: PrefillBufferSet, slotDimension: Int, scratchElementSize: Int,
+                maximumSequenceLength: Int, kvCacheIndex: Int, convLayerIndex: Int,
+                kernelContext: KernelContext,
+                resolveWeight: @escaping (String) -> (buffer: MTLBuffer, offset: Int),
+                getPipeline: @escaping (String) throws -> MTLComputePipelineState) {
+        self.buffers = buffers
+        self.slotDimension = slotDimension
+        self.scratchElementSize = scratchElementSize
+        self.maximumSequenceLength = maximumSequenceLength
+        self.kvCacheIndex = kvCacheIndex
+        self.convLayerIndex = convLayerIndex
+        self.kernelContext = kernelContext
+        self.resolveWeight = resolveWeight
+        self.getPipeline = getPipeline
+    }
+}
+
+/// Prefill steps declared by a fragment.
+public struct FragmentPrefillSteps: @unchecked Sendable {
+    // @unchecked: contains [MetalPrefillStep] which has MTLBuffer/MTLComputePipelineState
+    public let steps: [MetalPrefillStep]
+    public let outputIsHidden: Bool
+    public let resetsProjectionIndex: Bool
+    public let consumesKVCacheLayer: Bool
+    public let consumesConvLayer: Bool
+
+    public init(steps: [MetalPrefillStep], outputIsHidden: Bool,
+                resetsProjectionIndex: Bool = false,
+                consumesKVCacheLayer: Bool = false,
+                consumesConvLayer: Bool = false) {
+        self.steps = steps
         self.outputIsHidden = outputIsHidden
         self.resetsProjectionIndex = resetsProjectionIndex
         self.consumesKVCacheLayer = consumesKVCacheLayer
@@ -226,7 +280,7 @@ public struct BatchedProjection: Sendable {
 /// Batched in-place fragments with the same dispatch dimension.
 /// The compiler dispatches all instances in a single kernel, routing
 /// threadgroups to the correct data/weight buffers.
-public struct BatchedFragment: @unchecked Sendable {
+public struct BatchedFragment: Sendable {
     public let fragments: [any PrimitiveMetalKernelFragment]
     public let dispatchDimension: MetalDispatchDimension
 

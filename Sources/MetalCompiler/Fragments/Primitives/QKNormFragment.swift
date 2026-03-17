@@ -41,4 +41,39 @@ public struct QKNormFragment: PrimitiveMetalKernelFragment {
             outputIsHidden: false
         )
     }
+
+    public func prefillSteps(context: PrefillBindingContext) throws -> FragmentPrefillSteps {
+        let kernelName = kernelName(context: context.kernelContext)
+        let pipeline = try context.getPipeline(kernelName)
+        let scratchSlotSize = context.slotDimension * context.scratchElementSize * context.maximumSequenceLength
+        let scratchSlotIndex = weightRole == "q_layernorm" ? 1 : 2
+        let (weightBuffer, weightOffset) = context.resolveWeight(weightRole)
+        let totalDimension = headCount * headDimension
+        let threads = min(32, pipeline.maxTotalThreadsPerThreadgroup)
+        return FragmentPrefillSteps(
+            steps: [MetalPrefillStep(
+                pipeline: pipeline,
+                gridSize: MTLSize(width: headCount, height: context.maximumSequenceLength, depth: 1),
+                threadgroupSize: MTLSize(width: threads, height: 1, depth: 1),
+                bufferBindings: [
+                    (0, context.buffers.scratch, scratchSlotIndex * scratchSlotSize),
+                    (1, weightBuffer, weightOffset),
+                ],
+                bytesBindings: [
+                    uint32Binding(2, UInt32(headCount)),
+                    uint32Binding(3, UInt32(headDimension)),
+                    floatBinding(4, epsilon),
+                    uint32Binding(5, UInt32(context.maximumSequenceLength)),
+                    uint32Binding(6, UInt32(totalDimension)),
+                ],
+                threadgroupMemoryLength: 0,
+                sync: .bufferBarrier,
+                mode: .batch,
+                sequenceLengthBindingIndex: 5,
+                positionBufferIndex: nil,
+                perPositionStrides: [:]
+            )],
+            outputIsHidden: false
+        )
+    }
 }
