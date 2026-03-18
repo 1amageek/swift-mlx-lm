@@ -330,6 +330,22 @@ swift build
 
 Vision encoder と text decoder は独立したモデル。IR に vision encoder を含めない。
 
+## Metal 4 / Apple GPU References
+
+- [Metal Shading Language Specification v4](https://developer.apple.com/metal/Metal-Shading-Language-Specification.pdf) — cooperative tensor, tensor_inline, matmul2d_descriptor, Metal Performance Primitives (MPP)
+- [Metal 4 matmul example](https://github.com/liuliu/example_matmul_metal4) — tensor_inline で既存 MTLBuffer をラップし matmul2d を compute shader から呼ぶ実装例。Metal 3 API でも動作
+- [Discover Metal 4 (WWDC25)](https://developer.apple.com/videos/play/wwdc2025/205/) — MTL4CommandBuffer reuse, command allocator, argument tables, barrier model
+- [Combine Metal 4 ML and graphics (WWDC25)](https://developer.apple.com/videos/play/wwdc2025/262/) — MTL4MachineLearningCommandEncoder, CoreML model を GPU timeline で直接実行
+- [Explore LLMs on Apple Silicon with MLX (WWDC25)](https://developer.apple.com/videos/play/wwdc2025/298/) — Apple Silicon 上の LLM 推論最適化手法
+- [Apple GPU TBDR Architecture](https://developer.apple.com/documentation/metal/tailor-your-apps-for-apple-gpus-and-tile-based-deferred-rendering) — tile memory, imageblocks, threadgroup memory の特性
+- [Resource Storage Modes for Apple GPUs](https://developer.apple.com/documentation/metal/choosing-a-resource-storage-mode-for-apple-gpus) — shared/private/memoryless の使い分け
+
+### Performance Findings
+
+- Decode GEMV は memory bandwidth bound (~516 GB/s)。kernel 最適化 (threadgroup cache, vectorized load) は Apple Silicon の L2 cache により逆効果
+- Prefill GEMM は Metal 4 `matmul2d` への置換で AMX 最適化パスが期待できる
+- Weight quantization (Q4/Q8) が decode 高速化の最大レバー (帯域 2-4x 削減)
+
 ## Family と Model の境界
 
 - Family: 計算グラフ上の再利用可能な単位 (DeltaNet, MoE, parallel attention+MLP)

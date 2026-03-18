@@ -34,7 +34,7 @@ struct EmbeddingDiagnosticTests {
             options: .storageModeShared)!
 
         let options = MTLCompileOptions()
-        options.languageVersion = .version3_0
+        options.languageVersion = .version4_0
         let library = try device.makeLibrary(
             source: MetalSourceGenerator.generateCompleteLibrary(weightFormat: .bfloat16), options: options)
 
@@ -149,7 +149,7 @@ struct EmbeddingDiagnosticTests {
             length: seqLen * embeddingDimension * 2, options: .storageModeShared)!
 
         let options = MTLCompileOptions()
-        options.languageVersion = .version3_0
+        options.languageVersion = .version4_0
         let library = try device.makeLibrary(
             source: MetalSourceGenerator.generateCompleteLibrary(weightFormat: .bfloat16), options: options)
         let pipeline = try device.makeComputePipelineState(
@@ -224,7 +224,7 @@ struct EmbeddingDiagnosticTests {
             length: seqLen * dimension * 2, options: .storageModeShared)!
 
         let options = MTLCompileOptions()
-        options.languageVersion = .version3_0
+        options.languageVersion = .version4_0
         let library = try device.makeLibrary(
             source: MetalSourceGenerator.generateCompleteLibrary(weightFormat: .bfloat16), options: options)
         let pipeline = try device.makeComputePipelineState(
@@ -314,7 +314,7 @@ struct EmbeddingDiagnosticTests {
         }
 
         let options = MTLCompileOptions()
-        options.languageVersion = .version3_0
+        options.languageVersion = .version4_0
         let library = try device.makeLibrary(
             source: MetalSourceGenerator.generateCompleteLibrary(weightFormat: .bfloat16), options: options)
         let pipeline = try device.makeComputePipelineState(

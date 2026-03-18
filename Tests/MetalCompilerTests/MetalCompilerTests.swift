@@ -139,7 +139,7 @@ struct KernelCompletenessTests {
         }
         let options = MTLCompileOptions()
         options.fastMathEnabled = true
-        options.languageVersion = .version3_0
+        options.languageVersion = .version4_0
         let library = try device.makeLibrary(
             source: MetalSourceGenerator.generateCompleteLibrary(weightFormat: .bfloat16), options: options)
         let available = Set(library.functionNames)
@@ -187,7 +187,7 @@ struct KernelCompletenessTests {
         }
         let options = MTLCompileOptions()
         options.fastMathEnabled = true
-        options.languageVersion = .version3_0
+        options.languageVersion = .version4_0
         let library = try device.makeLibrary(
             source: MetalSourceGenerator.generateCompleteLibrary(weightFormat: .bfloat16), options: options)
         let available = Set(library.functionNames)

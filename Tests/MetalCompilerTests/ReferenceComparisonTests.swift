@@ -150,14 +150,18 @@ struct ReferenceComparisonTests {
                 .bindMemory(to: Float16.self, capacity: kernelSize * convDim)
             let metalVals = (0..<kernelSize * convDim).map { Float(metalPtr[$0]) }
 
-            let error = maxAbsoluteError(metalVals, refData)
+            var maxErr: Float = 0
+            var maxErrIdx = 0
+            for i in 0..<min(metalVals.count, refData.count) {
+                let e = abs(metalVals[i] - refData[i])
+                if e > maxErr { maxErr = e; maxErrIdx = i }
+            }
+            let k = maxErrIdx / convDim
+            let ch = maxErrIdx % convDim
+            print("[RefComp] conv_state[\(convIdx)]: maxErr=\(String(format: "%.6f", maxErr)) at k=\(k) ch=\(ch) metal=\(String(format: "%.4f", metalVals[maxErrIdx])) python=\(String(format: "%.4f", refData[maxErrIdx]))")
 
-            print("[RefComp] conv_state[\(convIdx)]: maxErr=\(String(format: "%.6f", error))")
-
-            // BF16 (Python) vs F32→F16 (Metal) across 16 layers:
-            // early layers ~0.03, later layers up to ~0.6
-            #expect(error < 1.0,
-                    "conv_state[\(convIdx)] diverges: maxErr=\(error)")
+            #expect(maxErr < 1.0,
+                    "conv_state[\(convIdx)] diverges: maxErr=\(maxErr)")
         }
     }
 

@@ -64,7 +64,7 @@ struct STAFDeepTests {
 
         // Compile gemv_q4_g64 kernel
         let options = MTLCompileOptions()
-        options.languageVersion = .version3_0
+        options.languageVersion = .version4_0
         let library = try device.makeLibrary(
             source: MetalSourceGenerator.generateCompleteLibrary(weightFormat: .bfloat16), options: options)
         guard let function = library.makeFunction(name: "gemv_q4_g64") else {
@@ -165,7 +165,7 @@ struct STAFDeepTests {
         }
 
         let options = MTLCompileOptions()
-        options.languageVersion = .version3_0
+        options.languageVersion = .version4_0
         let library = try device.makeLibrary(
             source: MetalSourceGenerator.generateCompleteLibrary(weightFormat: .bfloat16), options: options)
         let pipeline = try device.makeComputePipelineState(
@@ -468,7 +468,7 @@ struct STAFDeepTests {
         }
 
         let options = MTLCompileOptions()
-        options.languageVersion = .version3_0
+        options.languageVersion = .version4_0
         let library = try device.makeLibrary(
             source: MetalSourceGenerator.generateCompleteLibrary(weightFormat: .bfloat16), options: options)
         let pipeline = try device.makeComputePipelineState(
@@ -559,7 +559,7 @@ struct STAFDeepTests {
         }
 
         let options = MTLCompileOptions()
-        options.languageVersion = .version3_0
+        options.languageVersion = .version4_0
         let library = try device.makeLibrary(
             source: MetalSourceGenerator.generateCompleteLibrary(weightFormat: .bfloat16), options: options)
         let pipeline = try device.makeComputePipelineState(

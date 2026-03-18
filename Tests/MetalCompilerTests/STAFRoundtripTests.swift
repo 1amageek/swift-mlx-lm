@@ -328,7 +328,7 @@ struct STAFRoundtripTests {
         // Compile the embedding_lookup kernel
         let options = MTLCompileOptions()
         options.fastMathEnabled = true
-        options.languageVersion = .version3_0
+        options.languageVersion = .version4_0
         let library = try device.makeLibrary(
             source: MetalSourceGenerator.generateCompleteLibrary(weightFormat: .bfloat16), options: options)
         guard let function = library.makeFunction(name: "embedding_lookup") else {

@@ -23,7 +23,7 @@ struct MetalSourceGeneratorTests {
                         bufferPrecision: precision, weightFormat: weightFormat)
 
                 let options = MTLCompileOptions()
-                options.languageVersion = .version3_0
+                options.languageVersion = .version4_0
                 let library = try device.makeLibrary(source: source, options: options)
                 let function = library.makeFunction(name: name)
                 #expect(function != nil, "Failed to compile \(name)")
@@ -41,7 +41,7 @@ struct MetalSourceGeneratorTests {
                 + MetalSourceGenerator.generateSwiGLU(name: name, bufferPrecision: precision)
 
             let options = MTLCompileOptions()
-            options.languageVersion = .version3_0
+            options.languageVersion = .version4_0
             let library = try device.makeLibrary(source: source, options: options)
             #expect(library.makeFunction(name: name) != nil, "Failed to compile \(name)")
         }
@@ -63,7 +63,7 @@ struct MetalSourceGeneratorTests {
                         name: name, bufferPrecision: precision, weightFormat: format)
 
                 let options = MTLCompileOptions()
-                options.languageVersion = .version3_0
+                options.languageVersion = .version4_0
                 let library = try device.makeLibrary(source: source, options: options)
                 #expect(library.makeFunction(name: name) != nil, "Failed to compile \(name)")
             }
@@ -86,7 +86,7 @@ struct MetalSourceGeneratorTests {
                 name: "emb_\(precision)", bufferPrecision: precision, weightFormat: .bfloat16)
 
             let options = MTLCompileOptions()
-            options.languageVersion = .version3_0
+            options.languageVersion = .version4_0
             let library = try device.makeLibrary(source: allSource, options: options)
             #expect(library.makeFunction(name: "copy_\(precision)") != nil)
             #expect(library.makeFunction(name: "add_\(precision)") != nil)

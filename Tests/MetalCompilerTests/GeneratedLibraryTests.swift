@@ -11,7 +11,7 @@ struct GeneratedLibraryTests {
 
         let source = MetalSourceGenerator.generateCompleteLibrary(weightFormat: .bfloat16)
         let options = MTLCompileOptions()
-        options.languageVersion = .version3_0
+        options.languageVersion = .version4_0
 
         let library = try device.makeLibrary(source: source, options: options)
 

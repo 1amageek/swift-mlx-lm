@@ -535,7 +535,10 @@ public struct MetalInferenceCompiler: Sendable {
                 let scratchSlot = routingState.projectionIndex + 1
                 outputBuffer = buffers.scratch
                 outputOffset = scratchSlot * slotDimension * scratchElementSize * maximumSequenceLength
-                routingState.lastOutputIsHidden = false
+                // Do not change lastOutputIsHidden here.
+                // Parallel projections (gate+up in MLP, Q+K+V in attention) must all
+                // read from the same input buffer. Only fragment and structural steps
+                // update the routing state.
             }
             routingState.projectionIndex += 1
 
@@ -1963,7 +1966,7 @@ public struct MetalInferenceCompiler: Sendable {
 
         let compileOptions = MTLCompileOptions()
         compileOptions.fastMathEnabled = false
-        compileOptions.languageVersion = .version3_0
+        compileOptions.languageVersion = .version4_0
         let library = try device.makeLibrary(source: sources.joined(separator: "\n\n"), options: compileOptions)
 
         // Build base pipeline cache from Metal 3 library
