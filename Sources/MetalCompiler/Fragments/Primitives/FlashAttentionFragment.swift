@@ -93,49 +93,81 @@ public struct FlashAttentionFragment: PrimitiveMetalKernelFragment {
         let vHeadSlotBytes = cache.specification.bytesPerHeadSlot(
             scheme: cache.specification.valueQuantizationScheme)
 
-        let kernelName = kernelName(context: context.kernelContext)
-        let pipeline = try context.getPipeline(kernelName)
-        let threads = min(256, pipeline.maxTotalThreadsPerThreadgroup)
         let scratchSlotSize = context.slotDimension * context.scratchElementSize * context.maximumSequenceLength
 
+        var steps: [MetalPrefillStep] = []
+
+        // Step 1: Fill KV cache for all positions in one batch dispatch.
+        // Each threadgroup handles one position; threads within handle headDim elements.
+        // Loops over all kvHeads internally.
+        let fillPipeline = try context.getPipeline("kv_cache_fill_seq_f32")
+        let fillTgSize = min(headDimension, fillPipeline.maxTotalThreadsPerThreadgroup)
+        steps.append(MetalPrefillStep(
+            pipeline: fillPipeline,
+            gridSize: MTLSize(width: context.maximumSequenceLength, height: 1, depth: 1),
+            threadgroupSize: MTLSize(width: fillTgSize, height: 1, depth: 1),
+            bufferBindings: [
+                (0, context.buffers.scratch, 2 * scratchSlotSize),
+                (1, context.buffers.scratch, 3 * scratchSlotSize),
+                (2, cache.keys, keyLayerOffset),
+                (3, cache.values, valueLayerOffset),
+            ],
+            bytesBindings: [
+                uint32Binding(4, UInt32(kvHeadCount)),
+                uint32Binding(5, UInt32(headDimension)),
+                uint32Binding(6, UInt32(cache.specification.maximumSequenceLength)),
+                uint32Binding(7, UInt32(context.maximumSequenceLength)),
+                uint32Binding(8, UInt32(cache.specification.layoutMode.rawValue)),
+                uint32Binding(9, UInt32(kHeadSlotBytes)),
+                uint32Binding(10, UInt32(vHeadSlotBytes)),
+            ],
+            threadgroupMemoryLength: 0,
+            sync: .bufferBarrier,
+            mode: .batch,
+            sequenceLengthBindingIndex: 7,
+            positionBufferIndex: nil,
+            perPositionStrides: [:]
+        ))
+
+        // Step 2: Batch causal attention — one threadgroup per (head, position) pair.
+        // 1D grid: flatGroupId = posId * headCount + headIndex.
+        // Causal masking: each position attends to positions [0..posId].
+        let attnPipeline = try context.getPipeline("flash_attn_batch_f32")
+        let threads = min(256, attnPipeline.maxTotalThreadsPerThreadgroup)
+        let attnGridSize = headCount * context.maximumSequenceLength
+        steps.append(MetalPrefillStep(
+            pipeline: attnPipeline,
+            gridSize: MTLSize(width: attnGridSize, height: 1, depth: 1),
+            threadgroupSize: MTLSize(width: threads, height: 1, depth: 1),
+            bufferBindings: [
+                (0, context.buffers.scratch, 1 * scratchSlotSize),
+                (1, cache.keys, keyLayerOffset),
+                (2, cache.values, valueLayerOffset),
+                (3, context.buffers.scratch, 0),
+            ],
+            bytesBindings: [
+                uint32Binding(4, UInt32(headCount)),
+                uint32Binding(5, UInt32(kvHeadCount)),
+                uint32Binding(6, UInt32(headDimension)),
+                floatBinding(7, scale),
+                uint32Binding(8, UInt32(cache.specification.layoutMode.rawValue)),
+                uint32Binding(9, UInt32(cache.specification.maximumSequenceLength)),
+                uint32Binding(10, UInt32(context.maximumSequenceLength)),
+                uint32Binding(11, UInt32(cache.specification.keyQuantizationScheme.rawValue)),
+                uint32Binding(12, UInt32(cache.specification.valueQuantizationScheme.rawValue)),
+                uint32Binding(13, UInt32(kHeadSlotBytes)),
+                uint32Binding(14, UInt32(vHeadSlotBytes)),
+            ],
+            threadgroupMemoryLength: 0,
+            sync: .bufferBarrier,
+            mode: .batch,
+            sequenceLengthBindingIndex: 10,
+            positionBufferIndex: nil,
+            perPositionStrides: [:]
+        ))
+
         return FragmentPrefillSteps(
-            steps: [MetalPrefillStep(
-                pipeline: pipeline,
-                gridSize: MTLSize(width: headCount, height: 1, depth: 1),
-                threadgroupSize: MTLSize(width: threads, height: 1, depth: 1),
-                bufferBindings: [
-                    (0, context.buffers.scratch, 1 * scratchSlotSize),  // Q
-                    (1, context.buffers.scratch, 2 * scratchSlotSize),  // K
-                    (2, context.buffers.scratch, 3 * scratchSlotSize),  // V
-                    (3, cache.keys, keyLayerOffset),
-                    (4, cache.values, valueLayerOffset),
-                    (5, context.buffers.scratch, 0),                     // output
-                    (6, context.buffers.positions, 0),                   // position
-                ],
-                bytesBindings: [
-                    uint32Binding(7, UInt32(headCount)),
-                    uint32Binding(8, UInt32(kvHeadCount)),
-                    uint32Binding(9, UInt32(headDimension)),
-                    floatBinding(10, scale),
-                    uint32Binding(11, UInt32(cache.specification.layoutMode.rawValue)),
-                    uint32Binding(12, UInt32(cache.specification.maximumSequenceLength)),
-                    uint32Binding(13, UInt32(cache.specification.keyQuantizationScheme.rawValue)),
-                    uint32Binding(14, UInt32(cache.specification.valueQuantizationScheme.rawValue)),
-                    uint32Binding(15, UInt32(kHeadSlotBytes)),
-                    uint32Binding(16, UInt32(vHeadSlotBytes)),
-                ],
-                threadgroupMemoryLength: 0,
-                sync: .bufferBarrier,
-                mode: .perPosition,
-                sequenceLengthBindingIndex: nil,
-                positionBufferIndex: 6,
-                perPositionStrides: [
-                    0: headCount * headDimension * context.scratchElementSize,
-                    1: kvHeadCount * headDimension * context.scratchElementSize,
-                    2: kvHeadCount * headDimension * context.scratchElementSize,
-                    5: headCount * headDimension * context.scratchElementSize,
-                ]
-            )],
+            steps: steps,
             outputIsHidden: false,
             resetsProjectionIndex: true,
             consumesKVCacheLayer: true

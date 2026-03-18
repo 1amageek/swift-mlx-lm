@@ -93,6 +93,8 @@ public struct MetalSourceGenerator: Sendable {
         sources.append(flashAttentionHelperSource)  // helper functions once
         sources.append(generateFlashAttentionKernel(name: "flash_attn_decode", bufferPrecision: decode))
         sources.append(generateFlashAttentionKernel(name: "flash_attn_decode_f32", bufferPrecision: prefill))
+        sources.append(generateBatchFlashAttention(name: "flash_attn_batch_f32", bufferPrecision: prefill))
+        sources.append(generateKVCacheFillSeq(name: "kv_cache_fill_seq_f32", bufferPrecision: prefill))
 
         // === Quantized GEMV (decode) ===
         sources.append(generateQuantizedGEMV_Q4G64(name: "gemv_q4_g64", bufferPrecision: decode))
@@ -1393,8 +1395,6 @@ public struct MetalSourceGenerator: Sendable {
             float maxScore = -HUGE_VALF;
             float sumExp = 0.0f;
 
-            threadgroup float sharedMaxScore[1];
-            threadgroup float sharedSumExp[1];
             threadgroup float sharedOutput[4096]; // max headDim
 
             for (uint d = tid; d < headDim; d += threadgroupSize) {
@@ -1448,6 +1448,162 @@ public struct MetalSourceGenerator: Sendable {
             }
 
             // --- Step 3: Write output ---
+            float invSum = (sumExp > 0.0f) ? (1.0f / sumExp) : 0.0f;
+            for (uint d = tid; d < headDim; d += threadgroupSize) {
+                output[queryOffset + d] = \(castOut("sharedOutput[d] * invSum"));
+            }
+        }
+        """
+    }
+
+    /// Generate KV cache fill kernel for prefill (1D flat dispatch).
+    public static func generateKVCacheFillSeq(
+        name: String,
+        bufferPrecision: BufferPrecision
+    ) -> String {
+        let bt = bufferPrecision.metalType
+        return """
+        kernel void \(name)(
+            device const \(bt)* newKeys            [[buffer(0)]],
+            device const \(bt)* newValues          [[buffer(1)]],
+            device uchar* keyCache                 [[buffer(2)]],
+            device uchar* valueCache               [[buffer(3)]],
+            constant uint& kvHeadCount             [[buffer(4)]],
+            constant uint& headDimension           [[buffer(5)]],
+            constant uint& maxSequenceLength       [[buffer(6)]],
+            constant uint& sequenceLength          [[buffer(7)]],
+            constant uint& layoutMode              [[buffer(8)]],
+            constant uint& kHeadSlotBytes          [[buffer(9)]],
+            constant uint& vHeadSlotBytes          [[buffer(10)]],
+            uint groupId                            [[threadgroup_position_in_grid]],
+            uint tid                               [[thread_index_in_threadgroup]]
+        ) {
+            uint d = tid;
+            uint pos = groupId;
+            if (d >= headDimension || pos >= sequenceLength) return;
+
+            for (uint kvHead = 0; kvHead < kvHeadCount; kvHead++) {
+                uint inputIdx = pos * kvHeadCount * headDimension + kvHead * headDimension + d;
+                float kVal = float(newKeys[inputIdx]);
+                float vVal = float(newValues[inputIdx]);
+
+                uint kByteOffset;
+                uint vByteOffset;
+                if (layoutMode == 0) {
+                    kByteOffset = kvHead * maxSequenceLength * kHeadSlotBytes + pos * kHeadSlotBytes;
+                    vByteOffset = kvHead * maxSequenceLength * vHeadSlotBytes + pos * vHeadSlotBytes;
+                } else {
+                    kByteOffset = pos * kvHeadCount * kHeadSlotBytes + kvHead * kHeadSlotBytes;
+                    vByteOffset = pos * kvHeadCount * vHeadSlotBytes + kvHead * vHeadSlotBytes;
+                }
+                write_kv_element_fp16(keyCache + kByteOffset, d, kVal);
+                write_kv_element_fp16(valueCache + vByteOffset, d, vVal);
+            }
+        }
+        """
+    }
+
+    /// Generate batch causal flash attention kernel for prefill.
+    ///
+    /// Unlike the per-position decode kernel, this processes ALL positions
+    /// in a SINGLE dispatch with grid (headCount, seqLen, 1).
+    /// Each threadgroup handles one (head, position) pair with causal masking.
+    /// KV cache must be pre-filled by a separate kv_cache_fill dispatch.
+    public static func generateBatchFlashAttention(
+        name: String,
+        bufferPrecision: BufferPrecision
+    ) -> String {
+        let bt = bufferPrecision.metalType
+        let castOut: (String) -> String = { expr in
+            bufferPrecision == .float32 ? "(\(expr))" : "\(bt)(\(expr))"
+        }
+
+        return """
+        kernel void \(name)(
+            device const \(bt)* query             [[buffer(0)]],
+            device const uchar* keyCache          [[buffer(1)]],
+            device const uchar* valueCache        [[buffer(2)]],
+            device \(bt)* output                  [[buffer(3)]],
+            constant uint& headCount              [[buffer(4)]],
+            constant uint& kvHeadCount            [[buffer(5)]],
+            constant uint& headDimension          [[buffer(6)]],
+            constant float& scale                 [[buffer(7)]],
+            constant uint& layoutMode             [[buffer(8)]],
+            constant uint& maxSequenceLength      [[buffer(9)]],
+            constant uint& sequenceLength         [[buffer(10)]],
+            constant uint& kQuantScheme           [[buffer(11)]],
+            constant uint& vQuantScheme           [[buffer(12)]],
+            constant uint& kHeadSlotBytes         [[buffer(13)]],
+            constant uint& vHeadSlotBytes         [[buffer(14)]],
+            uint flatGroupId                      [[threadgroup_position_in_grid]],
+            uint tid                              [[thread_index_in_threadgroup]],
+            uint tiisg                            [[thread_index_in_simdgroup]],
+            uint sgitg                            [[simdgroup_index_in_threadgroup]],
+            uint threadgroupSize                  [[threads_per_threadgroup]]
+        ) {
+            const uint headIndex = flatGroupId % headCount;
+            const uint posId = flatGroupId / headCount;
+            if (headIndex >= headCount || posId >= sequenceLength) return;
+
+            const uint headDim = headDimension;
+            const uint kvHeadIndex = headIndex * kvHeadCount / headCount;
+            const uint queryOffset = posId * headCount * headDim + headIndex * headDim;
+
+            // Online softmax over positions [0..posId] (causal)
+            float maxScore = -HUGE_VALF;
+            float sumExp = 0.0f;
+
+            threadgroup float sharedOutput[4096];
+            for (uint d = tid; d < headDim; d += threadgroupSize) {
+                sharedOutput[d] = 0.0f;
+            }
+
+            for (uint t = 0; t <= posId; t++) {
+                uint kByteOffset;
+                if (layoutMode == 0) {
+                    kByteOffset = kvHeadIndex * maxSequenceLength * kHeadSlotBytes + t * kHeadSlotBytes;
+                } else {
+                    kByteOffset = t * kvHeadCount * kHeadSlotBytes + kvHeadIndex * kHeadSlotBytes;
+                }
+
+                float score = 0.0f;
+                for (uint d = tid; d < headDim; d += threadgroupSize) {
+                    float q = float(query[queryOffset + d]);
+                    float k = read_kv_element(keyCache + kByteOffset, d, kQuantScheme, kHeadSlotBytes, headDim);
+                    score += q * k;
+                }
+                score = simd_sum(score);
+                threadgroup float sharedScore[32];
+                if (tiisg == 0) sharedScore[sgitg] = score;
+                threadgroup_barrier(mem_flags::mem_threadgroup);
+                if (tid == 0) {
+                    float total = 0.0f;
+                    uint sgCount = (threadgroupSize + SIMD_WIDTH - 1) / SIMD_WIDTH;
+                    for (uint s = 0; s < sgCount; s++) total += sharedScore[s];
+                    sharedScore[0] = total * scale;
+                }
+                threadgroup_barrier(mem_flags::mem_threadgroup);
+                score = sharedScore[0];
+
+                float oldMax = maxScore;
+                maxScore = max(maxScore, score);
+                float correction = exp(oldMax - maxScore);
+                sumExp = sumExp * correction + exp(score - maxScore);
+
+                uint vByteOffset;
+                if (layoutMode == 0) {
+                    vByteOffset = kvHeadIndex * maxSequenceLength * vHeadSlotBytes + t * vHeadSlotBytes;
+                } else {
+                    vByteOffset = t * kvHeadCount * vHeadSlotBytes + kvHeadIndex * vHeadSlotBytes;
+                }
+
+                float weight = exp(score - maxScore);
+                for (uint d = tid; d < headDim; d += threadgroupSize) {
+                    float v = read_kv_element(valueCache + vByteOffset, d, vQuantScheme, vHeadSlotBytes, headDim);
+                    sharedOutput[d] = sharedOutput[d] * correction + weight * v;
+                }
+            }
+
             float invSum = (sumExp > 0.0f) ? (1.0f / sumExp) : 0.0f;
             for (uint d = tid; d < headDim; d += threadgroupSize) {
                 output[queryOffset + d] = \(castOut("sharedOutput[d] * invSum"));

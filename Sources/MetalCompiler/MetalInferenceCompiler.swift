@@ -1844,6 +1844,18 @@ public struct MetalInferenceCompiler: Sendable {
                         sources.append(MetalSourceGenerator.generateExtractConvState(name: extractName, bufferPrecision: bufferPrecision))
                     }
                 }
+                // Prefill attention: batch KV fill + batch causal attention
+                if frag.cacheSlots.contains(where: { $0.kind == .kv }) && bufferPrecision == .float32 {
+                    for name in ["kv_cache_fill_seq_f32", "flash_attn_batch_f32"] {
+                        if generatedNames.insert(name).inserted {
+                            if name.contains("kv_cache_fill") {
+                                sources.append(MetalSourceGenerator.generateKVCacheFillSeq(name: name, bufferPrecision: bufferPrecision))
+                            } else {
+                                sources.append(MetalSourceGenerator.generateBatchFlashAttention(name: name, bufferPrecision: bufferPrecision))
+                            }
+                        }
+                    }
+                }
 
             case .fusedCopyNorm(_):
                 let weightFormat = resolveWeightFormat(role: "scale", entry: entry, stafWeightStore: stafWeightStore)
