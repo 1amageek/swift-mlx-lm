@@ -69,7 +69,9 @@ public struct ModelBundleLoader: Sendable {
         let resolvedGraph = ParameterResolver().resolve(graph: graph, convention: convention)
 
         // 4. Compile IR → MetalDispatchPlan (includes Metal pipeline compilation)
-        let compiler = MetalInferenceCompiler()
+        // The current decode-specialized kernels benchmark best with the
+        // aggressive optimizer once fused SwiGLU uses the input=2048 family.
+        let compiler = MetalInferenceCompiler(optimizer: AggressiveOptimizer())
         let plan = try compiler.compile(
             graph: resolvedGraph,
             hiddenSize: config.hiddenSize,

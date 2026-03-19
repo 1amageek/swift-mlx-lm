@@ -82,20 +82,18 @@ public struct Conv1dFragment: PrimitiveMetalKernelFragment {
             threadgroupMemoryLength: 0,
             sync: .bufferBarrier,
             mode: .batch,
-            sequenceLengthBindingIndex: 6,
+            sequenceLengthPolicy: .bindAndAdjustGridHeight(index: 6),
             positionBufferIndex: nil,
             perPositionStrides: [:]
         ))
 
         // Step 2: Extract conv_state from in_proj output (last kernelSize positions)
-        // conv_state is always F16 — use F16 element size for offset calculation
-        let f16ElementSize = MemoryLayout<Float16>.size
         if let convState = context.buffers.convState {
             let extractPipeline = try context.getPipeline("extract_conv_state_f32")
             let extractTgSize = min(256, extractPipeline.maxTotalThreadsPerThreadgroup)
             let extractGridX = (dimension + extractTgSize - 1) / extractTgSize
             let convLayerOffset = context.convLayerIndex
-                * context.buffers.convStateKernelSize * context.buffers.convStateDimension * f16ElementSize
+                * context.buffers.convStateKernelSize * context.buffers.convStateDimension * MemoryLayout<Float16>.size
             steps.append(MetalPrefillStep(
                 pipeline: extractPipeline,
                 gridSize: MTLSize(width: extractGridX, height: kernelSize, depth: 1),
@@ -113,7 +111,7 @@ public struct Conv1dFragment: PrimitiveMetalKernelFragment {
                 threadgroupMemoryLength: 0,
                 sync: .bufferBarrier,
                 mode: .batch,
-                sequenceLengthBindingIndex: 5,
+                sequenceLengthPolicy: .bind(index: 5),
                 positionBufferIndex: nil,
                 perPositionStrides: [:]
             ))

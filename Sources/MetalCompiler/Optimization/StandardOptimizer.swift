@@ -1,18 +1,36 @@
-/// Standard optimizer — norm fusion only (matches previous fusionPass behavior).
+/// Standard optimizer — norm fusion plus exact-shape MLP front-half fusion.
 ///
-/// Fragment-level: no optimization (all primitives emitted individually).
+/// Fragment-level:
+/// - Rule 1: Fuse gate_proj + up_proj + SwiGLU into one dispatch
+///
+/// Graph-level:
 /// Graph-level: fuses structuralAdd/Copy + Reduction patterns into single dispatches.
 ///
 /// Patterns:
-/// 1. structuralAdd + structuralCopy + Reduction → fusedResidualAddCopyNorm (3→1)
-/// 2. structuralCopy + Reduction → fusedCopyNorm (2→1)
+/// 1. gate_proj + up_proj + SwiGLU → fusedSwiGLUProjection (3→1)
+/// 2. structuralAdd + structuralCopy + Reduction → fusedResidualAddCopyNorm (3→1)
+/// 3. structuralCopy + Reduction → fusedCopyNorm (2→1)
 public struct StandardOptimizer: DispatchOptimizer {
     public let name = "standard"
 
     public init() {}
 
     public func optimizeFragment(_ primitives: [CollectedPrimitive]) -> [OptimizedEntry] {
-        primitives.map { .single($0) }
+        var result: [OptimizedEntry] = []
+        var index = 0
+
+        while index < primitives.count {
+            if let fused = FusedSwiGLUProjectionRule.match(at: index, primitives: primitives) {
+                result.append(fused)
+                index += 3
+                continue
+            }
+
+            result.append(.single(primitives[index]))
+            index += 1
+        }
+
+        return result
     }
 
     public func optimizeGraph(_ entries: [DispatchEntry]) -> [DispatchEntry] {

@@ -53,7 +53,7 @@ public struct ArgmaxFragment: PrimitiveMetalKernelFragment {
                 threadgroupMemoryLength: 0,
                 sync: .bufferBarrier,
                 mode: .lastToken,
-                sequenceLengthBindingIndex: nil,
+                sequenceLengthPolicy: .none,
                 positionBufferIndex: nil,
                 perPositionStrides: [:]
             )],

@@ -16,6 +16,13 @@ struct ReferenceComparisonTests {
 
     private static let referencePath = "/Users/1amageek/Desktop/swift-lm/TestData/lfm2_reference.safetensors"
     private static let stafPath = "/Users/1amageek/Desktop/swift-lm/TestData/LFM2.5-1.2B-Thinking/model.staf"
+    private static let cachedEnvironmentResult: Result<TestEnvironment, Error> = {
+        do {
+            return .success(try buildEnvironment())
+        } catch {
+            return .failure(error)
+        }
+    }()
 
     // MARK: - Prefill Tests
 
@@ -82,21 +89,10 @@ struct ReferenceComparisonTests {
               let enc = cb.makeComputeCommandEncoder() else { return }
 
         enc.setComputePipelineState(step.pipeline)
-        for (index, buffer, offset) in step.bufferBindings {
-            enc.setBuffer(buffer, offset: offset, index: index)
-        }
-        if let seqLenIdx = step.sequenceLengthBindingIndex {
-            var sl = UInt32(seqLen)
-            withUnsafeBytes(of: &sl) { enc.setBytes($0.baseAddress!, length: $0.count, index: seqLenIdx) }
-        }
-        for (index, value) in step.bytesBindings {
-            value.withUnsafeBufferPointer { enc.setBytes($0.baseAddress!, length: $0.count, index: index) }
-        }
-        var grid = step.gridSize
-        if step.sequenceLengthBindingIndex != nil && grid.height > 1 {
-            grid = MTLSize(width: grid.width, height: seqLen, depth: grid.depth)
-        }
-        enc.dispatchThreadgroups(grid, threadsPerThreadgroup: step.threadgroupSize)
+        step.bindStaticArguments(encoder: enc)
+        step.bindRuntimeArguments(encoder: enc, sequenceLength: UInt32(seqLen))
+        let grid = step.resolvedGridSize(sequenceLength: seqLen)
+        step.descriptor.encode(on: enc, gridSize: grid)
         enc.endEncoding()
         cb.commit()
         cb.waitUntilCompleted()
@@ -146,9 +142,8 @@ struct ReferenceComparisonTests {
         for convIdx in 0..<10 {
             let refData = try readRefTensorAsFloats(env.ref, name: "ref.prefill.conv_state.\(convIdx)")
             let layerOffset = convIdx * kernelSize * convDim * elementSize
-            let metalPtr = (convState.contents() + layerOffset)
-                .bindMemory(to: Float16.self, capacity: kernelSize * convDim)
-            let metalVals = (0..<kernelSize * convDim).map { Float(metalPtr[$0]) }
+            let fullConvState = readDecodeBuffer(convState, precision: .float16)
+            let metalVals = Array(fullConvState[(layerOffset / elementSize)..<((layerOffset / elementSize) + kernelSize * convDim)])
 
             var maxErr: Float = 0
             var maxErrIdx = 0
@@ -178,6 +173,17 @@ struct ReferenceComparisonTests {
         let seqLen = 5
         let tokens: [Int32] = [1, 1, 6, 6423, 708]
         let hiddenSize = 2048
+        let lastTokenOffset = (seqLen - 1) * hiddenSize
+
+        let refFinalAll = try readRefTensorAsFloats(env.ref, name: "ref.prefill.final_hidden")
+        let refLastToken = Array(refFinalAll[lastTokenOffset..<lastTokenOffset + hiddenSize])
+        let refLogits = try readRefTensorAsFloats(env.ref, name: "ref.prefill.logits_last")
+        var refLayers: [[Float]] = []
+        refLayers.reserveCapacity(16)
+        for layerIdx in 0..<16 {
+            let refLayerAll = try readRefTensorAsFloats(env.ref, name: "ref.prefill.layer_\(layerIdx).after_mlp")
+            refLayers.append(Array(refLayerAll[lastTokenOffset..<lastTokenOffset + hiddenSize]))
+        }
 
         // Fill token IDs and positions
         let tokenPtr = prefillPlan.buffers.tokenIDs.contents()
@@ -195,59 +201,37 @@ struct ReferenceComparisonTests {
               let enc = cb.makeComputeCommandEncoder() else { return }
 
         for step in prefillPlan.steps {
-            if step.sync == .bufferBarrier { enc.memoryBarrier(scope: .buffers) }
             enc.setComputePipelineState(step.pipeline)
-            for (index, buffer, offset) in step.bufferBindings {
-                enc.setBuffer(buffer, offset: offset, index: index)
-            }
-            for (index, value) in step.bytesBindings {
-                value.withUnsafeBufferPointer { enc.setBytes($0.baseAddress!, length: $0.count, index: index) }
-            }
-            if let seqLenIdx = step.sequenceLengthBindingIndex {
-                var sl = UInt32(seqLen)
-                withUnsafeBytes(of: &sl) { enc.setBytes($0.baseAddress!, length: $0.count, index: seqLenIdx) }
-            }
             switch step.mode {
             case .batch:
-                var grid = step.gridSize
-                if step.sequenceLengthBindingIndex != nil && grid.height > 1 {
-                    grid = MTLSize(width: grid.width, height: seqLen, depth: grid.depth)
-                }
-                enc.dispatchThreadgroups(grid, threadsPerThreadgroup: step.threadgroupSize)
+                step.bindStaticArguments(encoder: enc)
+                step.bindRuntimeArguments(encoder: enc, sequenceLength: UInt32(seqLen))
+                let grid = step.resolvedGridSize(sequenceLength: seqLen)
+                step.descriptor.encode(on: enc, gridSize: grid)
             case .perPosition:
                 for pos in 0..<seqLen {
                     enc.setComputePipelineState(step.pipeline)
-                    for (index, buffer, baseOffset) in step.bufferBindings {
-                        let stride = step.perPositionStrides[index] ?? 0
-                        enc.setBuffer(buffer, offset: baseOffset + pos * stride, index: index)
-                    }
+                    step.bindStaticArguments(encoder: enc, position: pos)
                     if let posIdx = step.positionBufferIndex {
                         var posValue = UInt32(pos)
                         withUnsafeBytes(of: &posValue) {
                             enc.setBytes($0.baseAddress!, length: $0.count, index: posIdx)
                         }
                     }
-                    for (index, value) in step.bytesBindings {
-                        value.withUnsafeBufferPointer { enc.setBytes($0.baseAddress!, length: $0.count, index: index) }
-                    }
-                    enc.dispatchThreadgroups(step.gridSize, threadsPerThreadgroup: step.threadgroupSize)
+                    step.bindRuntimeArguments(encoder: enc, sequenceLength: UInt32(seqLen))
+                    step.descriptor.encode(on: enc)
                 }
             case .lastToken:
                 enc.setComputePipelineState(step.pipeline)
-                for (index, buffer, baseOffset) in step.bufferBindings {
-                    let stride = step.perPositionStrides[index] ?? 0
-                    enc.setBuffer(buffer, offset: baseOffset + (seqLen - 1) * stride, index: index)
-                }
+                step.bindStaticArguments(encoder: enc, position: seqLen - 1)
                 if let posIdx = step.positionBufferIndex {
                     var posValue = UInt32(seqLen - 1)
                     withUnsafeBytes(of: &posValue) {
                         enc.setBytes($0.baseAddress!, length: $0.count, index: posIdx)
                     }
                 }
-                for (index, value) in step.bytesBindings {
-                    value.withUnsafeBufferPointer { enc.setBytes($0.baseAddress!, length: $0.count, index: index) }
-                }
-                enc.dispatchThreadgroups(step.gridSize, threadsPerThreadgroup: step.threadgroupSize)
+                step.bindRuntimeArguments(encoder: enc, sequenceLength: UInt32(seqLen))
+                step.descriptor.encode(on: enc)
             }
         }
         enc.endEncoding()
@@ -255,14 +239,9 @@ struct ReferenceComparisonTests {
         cb.waitUntilCompleted()
 
         // Compare final hidden (last token)
-        let elementSize = MemoryLayout<Float16>.size
-        let lastTokenOffset = (seqLen - 1) * hiddenSize
         let hiddenPtr = prefillPlan.buffers.hidden.contents()
             .bindMemory(to: Float32.self, capacity: seqLen * hiddenSize)
         let metalFinalHidden = (0..<hiddenSize).map { hiddenPtr[lastTokenOffset + $0] }
-
-        let refFinalAll = try readRefTensorAsFloats(env.ref, name: "ref.prefill.final_hidden")
-        let refLastToken = Array(refFinalAll[lastTokenOffset..<lastTokenOffset + hiddenSize])
 
         let finalErr = maxAbsoluteError(metalFinalHidden, refLastToken)
         let metalNorm = sqrtf(metalFinalHidden.reduce(0) { $0 + $1 * $1 })
@@ -277,7 +256,6 @@ struct ReferenceComparisonTests {
 
         // Compare prefill logits (F32 buffer)
         let prefillLogits = readF32Buffer(prefillPlan.buffers.logits)
-        let refLogits = try readRefTensorAsFloats(env.ref, name: "ref.prefill.logits_last")
         let logitsErr = maxAbsoluteError(prefillLogits, refLogits)
         let metalArgmax = argmax(prefillLogits)
         let refArgmax = argmax(refLogits)
@@ -285,8 +263,7 @@ struct ReferenceComparisonTests {
 
         // Compare per-layer after_mlp for last token
         for layerIdx in 0..<16 {
-            let refLayerAll = try readRefTensorAsFloats(env.ref, name: "ref.prefill.layer_\(layerIdx).after_mlp")
-            let refLayer = Array(refLayerAll[lastTokenOffset..<lastTokenOffset + hiddenSize])
+            let refLayer = refLayers[layerIdx]
             let refLayerNorm = sqrtf(refLayer.reduce(0) { $0 + $1 * $1 })
             let refLayerSample = (0..<2).map { String(format: "%.3f", refLayer[$0]) }
             if layerIdx < 3 || layerIdx >= 14 {
@@ -373,6 +350,45 @@ struct ReferenceComparisonTests {
         print(dump)
     }
 
+    @Test("Dump compiled decode plan for LFM2")
+    func dumpCompiledDecodePlan() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else { throw SetupError.noDevice }
+        let stafURL = URL(fileURLWithPath: Self.stafPath)
+        guard FileManager.default.fileExists(atPath: stafURL.path) else {
+            throw SetupError.noSTAF
+        }
+
+        let store = try STAFLoader().load(at: stafURL, device: device)
+        let config = ModelConfig(
+            hiddenSize: 2048, layerCount: 16, intermediateSize: 8192,
+            vocabSize: 65536, attentionHeads: 32, kvHeads: 8, headDim: 64,
+            attentionBias: false, mlpBias: false, normEps: 1e-5,
+            normKind: .rmsNorm, ropeTheta: 1000000.0, ropeDimension: 64,
+            ropeScaling: nil, tiedEmbeddings: true,
+            expertCount: nil, expertsPerToken: nil, qkNorm: true,
+            fullAttentionInterval: nil, ssmNumHeads: nil, ssmKeyHeadDim: nil,
+            ssmValueHeadDim: nil, convKernelSize: nil, convLCache: 3,
+            partialRotaryFactor: nil, slidingWindow: nil,
+            layerTypes: ["conv", "conv", "full_attention", "conv", "conv", "full_attention",
+                         "conv", "conv", "full_attention", "conv", "full_attention", "conv",
+                         "full_attention", "conv", "full_attention", "conv"]
+        )
+        let graph = try LFM2(config: config).makeModelGraph()
+        let resolved = ParameterResolver().resolve(graph: graph, convention: .lfm2Family)
+        let compiler = MetalInferenceCompiler()
+        let dump = try compiler.dumpCompiledDecodePlan(
+            graph: resolved,
+            hiddenSize: 2048,
+            intermediateSize: 8192,
+            vocabSize: 65536,
+            stafWeightStore: store,
+            device: device)
+
+        print("=== COMPILED DECODE PLAN ===")
+        print(dump)
+        #expect(dump.contains("kernel="))
+    }
+
     // MARK: - Decode Tests
 
     @Test("Decode step 0 logits match Python reference")
@@ -390,6 +406,162 @@ struct ReferenceComparisonTests {
         try verifyDecodeStep(step: 2)
     }
 
+    @Test("Decode step 1 output head matches Python when fed Python final_hidden")
+    func decodeStep1OutputHeadMatchesPythonHidden() throws {
+        let env = try setupOrSkip()
+        let refHidden = try readRefTensorAsFloats(env.ref, name: "ref.decode_1.final_hidden")
+        let refLogits = try readRefTensorAsFloats(env.ref, name: "ref.decode_1.logits")
+
+        let finalHiddenBuffer = finalHiddenInputBuffer(for: env.model.plan)
+        writeDecodeBuffer(refHidden, to: finalHiddenBuffer, precision: env.model.plan.buffers.bufferPrecision)
+
+        guard let cb = env.model.commandQueue.makeCommandBuffer(),
+              let enc = cb.makeComputeCommandEncoder() else {
+            Issue.record("Failed to create command buffer for output-head diagnostic")
+            return
+        }
+
+        for step in env.model.plan.steps.suffix(2) {
+            enc.setComputePipelineState(step.pipeline)
+            step.bindings.bind(to: enc)
+            step.descriptor.encode(on: enc)
+        }
+
+        enc.endEncoding()
+        cb.commit()
+        cb.waitUntilCompleted()
+
+        let metalLogits = readDecodeBuffer(env.model.plan.buffers.logits, precision: env.model.plan.buffers.bufferPrecision)
+        let metalTop = argmax(metalLogits)
+        let refTop = argmax(refLogits)
+        let maxErr = maxAbsoluteError(metalLogits, refLogits)
+
+        print("[RefComp] Output-head diagnostic (step 1, Python hidden input):")
+        print("  Python argmax: \(refTop.index) (val=\(String(format: "%.2f", refTop.value)))")
+        print("  Metal  argmax: \(metalTop.index) (val=\(String(format: "%.2f", metalTop.value)))")
+        print("  Max absolute error: \(String(format: "%.4f", maxErr))")
+
+        #expect(metalTop.index == refTop.index,
+                "Output head argmax mismatch from Python hidden: Metal=\(metalTop.index) Python=\(refTop.index)")
+    }
+
+    @Test("Decode step 1 layerwise diagnostic")
+    func decodeStep1LayerwiseDiagnostic() throws {
+        let env = try setupOrSkip()
+        let compiler = MetalInferenceCompiler()
+        let dispatchDump = try makeDispatchDump(compiler: compiler)
+        let entries = parseDispatchEntries(from: dispatchDump)
+        var model = env.model
+
+        let tokens: [Int32] = [1, 1, 6, 6423, 708]
+        var currentToken = model.prefill(tokens: tokens)
+        currentToken = model.decodeSync(tokenID: currentToken)
+
+        model.plan.buffers.position.contents().bindMemory(to: UInt32.self, capacity: 1).pointee = UInt32(model.position)
+        model.plan.buffers.tokenIn.contents().bindMemory(to: Int32.self, capacity: 1).pointee = currentToken
+
+        var currentLayer = 0
+        var waitingForOperatorResidual = false
+
+        for (stepIndex, step) in model.plan.steps.enumerated() {
+            guard stepIndex < entries.count else { break }
+
+            let cb = model.commandQueue.makeCommandBuffer()!
+            let enc = cb.makeComputeCommandEncoder()!
+            enc.setComputePipelineState(step.pipeline)
+            step.bindings.bind(to: enc)
+            step.descriptor.encode(on: enc)
+            enc.endEncoding()
+            cb.commit()
+            cb.waitUntilCompleted()
+
+            let entry = entries[stepIndex]
+            if entry.kind.contains("projection(o_proj") || entry.kind.contains("projection(out_proj") {
+                let metal = readDecodeBuffer(model.plan.buffers.hidden, precision: model.plan.buffers.bufferPrecision)
+                let ref = try readRefTensorAsFloats(env.ref, name: "ref.decode_1.layer_\(currentLayer).after_op")
+                let err = maxAbsoluteError(metal, ref)
+                print("[RefComp] Layer \(currentLayer) after_op maxErr=\(String(format: "%.4f", err)) kind=\(entry.kind)")
+                waitingForOperatorResidual = true
+            }
+
+            if entry.kind.contains("projection(down_proj") {
+                let metal = readDecodeBuffer(model.plan.buffers.hidden, precision: model.plan.buffers.bufferPrecision)
+                let ref = try readRefTensorAsFloats(env.ref, name: "ref.decode_1.layer_\(currentLayer).mlp_out")
+                let err = maxAbsoluteError(metal, ref)
+                print("[RefComp] Layer \(currentLayer) mlp_out maxErr=\(String(format: "%.4f", err)) kind=\(entry.kind)")
+            }
+
+            if entry.kind.contains("fusedResidualAddCopyNorm") || entry.kind.contains("structuralAdd") {
+                if waitingForOperatorResidual {
+                    waitingForOperatorResidual = false
+                } else {
+                    let metal = readDecodeBuffer(model.plan.buffers.hidden, precision: model.plan.buffers.bufferPrecision)
+                    let ref = try readRefTensorAsFloats(env.ref, name: "ref.decode_1.layer_\(currentLayer).after_mlp")
+                    let err = maxAbsoluteError(metal, ref)
+                    print("[RefComp] Layer \(currentLayer) after_mlp maxErr=\(String(format: "%.4f", err)) kind=\(entry.kind)")
+                    currentLayer += 1
+                }
+            }
+        }
+    }
+
+    @Test("Decode step 1 final norm kernel matches Python reference")
+    func decodeStep1FinalNormKernelMatchesPython() throws {
+        let env = try setupOrSkip()
+        let input = try readRefTensorAsFloats(env.ref, name: "ref.decode_1.layer_15.after_mlp")
+        let expected = try readRefTensorAsFloats(env.ref, name: "ref.decode_1.final_hidden")
+        let normStep = env.model.plan.steps[env.model.plan.steps.count - 3]
+
+        writeDecodeBuffer(input, to: env.model.plan.buffers.hidden, precision: env.model.plan.buffers.bufferPrecision)
+
+        guard let cb = env.model.commandQueue.makeCommandBuffer(),
+              let enc = cb.makeComputeCommandEncoder() else {
+            Issue.record("Failed to create command buffer for final norm kernel diagnostic")
+            return
+        }
+
+        enc.setComputePipelineState(normStep.pipeline)
+        normStep.bindings.bind(to: enc)
+        normStep.descriptor.encode(on: enc)
+        enc.endEncoding()
+        cb.commit()
+        cb.waitUntilCompleted()
+
+        let actual = readDecodeBuffer(env.model.plan.buffers.hidden, precision: env.model.plan.buffers.bufferPrecision)
+        let maxErr = maxAbsoluteError(actual, expected)
+        print("[RefComp] Final norm kernel maxErr vs Python final_hidden: \(String(format: "%.4f", maxErr))")
+        #expect(maxErr < 0.125, "Final norm kernel drifted: maxErr=\(maxErr)")
+    }
+
+    @Test("Decode step 1 final norm CPU diagnostic")
+    func decodeStep1FinalNormCPUDiagnostic() throws {
+        let env = try setupOrSkip()
+        let input = try readRefTensorAsFloats(env.ref, name: "ref.decode_1.layer_15.after_mlp")
+        let expected = try readRefTensorAsFloats(env.ref, name: "ref.decode_1.final_hidden")
+        let normStep = env.model.plan.steps[env.model.plan.steps.count - 3]
+        let weightBinding = normStep.bufferBindings.first { $0.index == 1 }
+        guard let weightBinding else {
+            Issue.record("Final norm weight binding not found")
+            return
+        }
+
+        let weightPtr = (weightBinding.buffer.contents() + weightBinding.offset)
+            .bindMemory(to: BFloat16.self, capacity: input.count)
+        let weights = (0..<input.count).map { Float(weightPtr[$0]) }
+
+        let sumSq = input.reduce(Float.zero) { $0 + $1 * $1 }
+        let invRMS = 1.0 / sqrtf(sumSq / Float(input.count) + 1e-5)
+        let cpu = zip(input, weights).map { $0 * invRMS * $1 }
+        let cpuErr = maxAbsoluteError(cpu, expected)
+        let cpuTop = argmax(cpu)
+        let refTop = argmax(expected)
+
+        print("[RefComp] Final norm CPU diagnostic:")
+        print("  CPU maxErr vs Python final_hidden: \(String(format: "%.4f", cpuErr))")
+        print("  CPU argmax-like max entry index: \(cpuTop.index) val=\(String(format: "%.4f", cpuTop.value))")
+        print("  Python max entry index: \(refTop.index) val=\(String(format: "%.4f", refTop.value))")
+    }
+
     // MARK: - Decode Step Helper
 
     private func verifyDecodeStep(step: Int) throws {
@@ -404,7 +576,7 @@ struct ReferenceComparisonTests {
             if s < step { continue }
 
             // Read from DECODE plan's logits buffer (F16)
-            let metalLogits = readF16Buffer(model.plan.buffers.logits)
+            let metalLogits = readDecodeBuffer(model.plan.buffers.logits, precision: model.plan.buffers.bufferPrecision)
             let refLogits = try readRefTensorAsFloats(env.ref, name: "ref.decode_\(step).logits")
 
             let refTop = argmax(refLogits)
@@ -420,6 +592,18 @@ struct ReferenceComparisonTests {
             print("  Python top-5: \(refTop5.map { "(\($0.index),\(String(format: "%.2f", $0.value)))" })")
             print("  Max absolute error: \(String(format: "%.4f", maxErr))")
 
+            let finalHiddenBuffer = finalHiddenInputBuffer(for: model.plan)
+            let hiddenSize = finalHiddenBuffer.length / model.plan.buffers.bufferPrecision.byteSize
+            let metalFinalHidden = Array(readDecodeBuffer(finalHiddenBuffer, precision: model.plan.buffers.bufferPrecision).prefix(hiddenSize))
+            if let refFinalHidden = try? readRefTensorAsFloats(env.ref, name: "ref.decode_\(step).final_hidden") {
+                let finalHiddenErr = maxAbsoluteError(metalFinalHidden, refFinalHidden)
+                let metalHiddenSample = (0..<4).map { String(format: "%.4f", metalFinalHidden[$0]) }
+                let refHiddenSample = (0..<4).map { String(format: "%.4f", refFinalHidden[$0]) }
+                print("  Final hidden maxErr: \(String(format: "%.4f", finalHiddenErr))")
+                print("  Metal  hidden[0..3]: \(metalHiddenSample)")
+                print("  Python hidden[0..3]: \(refHiddenSample)")
+            }
+
             // Compare conv_state after this decode step
             if let convState = model.plan.buffers.convState {
                 let convDim = model.plan.buffers.convStateDimension
@@ -428,9 +612,9 @@ struct ReferenceComparisonTests {
                 for convIdx in 0..<10 {
                     if let refData = try? readRefTensorAsFloats(env.ref, name: "ref.decode_\(step).conv_state.\(convIdx)") {
                         let layerOffset = convIdx * kSize * convDim * elemSize
-                        let metalPtr = (convState.contents() + layerOffset)
-                            .bindMemory(to: Float16.self, capacity: kSize * convDim)
-                        let metalVals = (0..<kSize * convDim).map { Float(metalPtr[$0]) }
+                        let fullConvState = readDecodeBuffer(convState, precision: .float16)
+                        let base = layerOffset / elemSize
+                        let metalVals = Array(fullConvState[base..<(base + kSize * convDim)])
                         let err = maxAbsoluteError(metalVals, refData)
                         if convIdx < 3 || err > 1.0 {
                             print("  conv_state[\(convIdx)] after decode \(step): maxErr=\(String(format: "%.4f", err))")
@@ -457,7 +641,23 @@ struct ReferenceComparisonTests {
         let ref: MetalWeightFile
     }
 
+    private struct ParsedDispatchEntry {
+        let layer: Int?
+        let kind: String
+    }
+
     private func setupOrSkip() throws -> TestEnvironment {
+        switch Self.cachedEnvironmentResult {
+        case .success(let cached):
+            var environment = cached
+            environment.model.resetCaches()
+            return environment
+        case .failure(let error):
+            throw error
+        }
+    }
+
+    private static func buildEnvironment() throws -> TestEnvironment {
         guard let device = MTLCreateSystemDefaultDevice() else {
             throw SetupError.noDevice
         }
@@ -518,23 +718,66 @@ struct ReferenceComparisonTests {
         return TestEnvironment(model: model, ref: ref)
     }
 
+    private func makeDispatchDump(compiler: MetalInferenceCompiler) throws -> String {
+        let config = ModelConfig(
+            hiddenSize: 2048, layerCount: 16, intermediateSize: 8192,
+            vocabSize: 65536, attentionHeads: 32, kvHeads: 8, headDim: 64,
+            attentionBias: false, mlpBias: false, normEps: 1e-5,
+            normKind: .rmsNorm, ropeTheta: 1000000.0, ropeDimension: 64,
+            ropeScaling: nil, tiedEmbeddings: true,
+            expertCount: nil, expertsPerToken: nil, qkNorm: true,
+            fullAttentionInterval: nil, ssmNumHeads: nil, ssmKeyHeadDim: nil,
+            ssmValueHeadDim: nil, convKernelSize: nil, convLCache: 3,
+            partialRotaryFactor: nil, slidingWindow: nil,
+            layerTypes: ["conv", "conv", "full_attention", "conv", "conv", "full_attention",
+                         "conv", "conv", "full_attention", "conv", "full_attention", "conv",
+                         "full_attention", "conv", "full_attention", "conv"])
+        let graph = try LFM2(config: config).makeModelGraph()
+        let resolved = ParameterResolver().resolve(graph: graph, convention: .lfm2Family)
+        return compiler.dumpDispatchEntries(graph: resolved, hiddenSize: 2048)
+    }
+
+    private func parseDispatchEntries(from dump: String) -> [ParsedDispatchEntry] {
+        dump.split(separator: "\n").compactMap { line in
+            guard let bracketEnd = line.firstIndex(of: "]") else { return nil }
+            let tail = line[line.index(after: bracketEnd)...].trimmingCharacters(in: .whitespaces)
+            if tail.hasPrefix("-- ") {
+                return ParsedDispatchEntry(layer: nil, kind: String(tail.dropFirst(3)))
+            }
+            guard tail.first == "L" else { return nil }
+            let pieces = tail.split(separator: " ", maxSplits: 1).map(String.init)
+            guard pieces.count == 2, let layer = Int(pieces[0].dropFirst()) else { return nil }
+            return ParsedDispatchEntry(layer: layer, kind: pieces[1])
+        }
+    }
+
+    private func finalHiddenInputBuffer(for plan: MetalDispatchPlan) -> MTLBuffer {
+        let projectionStepIndex = plan.steps.count - 2
+        let projectionStep = plan.steps[projectionStepIndex]
+        guard let binding = projectionStep.bufferBindings.first(where: { $0.index == 0 }) else {
+            fatalError("Output head projection missing input buffer binding")
+        }
+        return binding.buffer
+    }
+
     // MARK: - Reference Tensor Access
 
     private func readFloat16Tensor(
         _ file: MetalWeightFile, name: String
-    ) throws -> UnsafeBufferPointer<Float16> {
+    ) throws -> [Float16] {
         guard let info = file.tensors[name] else {
             throw SetupError.tensorNotFound(name)
         }
         let count = info.shape.reduce(1, *)
         let ptr = (file.buffer.contents() + file.dataSectionOffset + info.dataOffset)
             .bindMemory(to: Float16.self, capacity: count)
-        return UnsafeBufferPointer(start: ptr, count: count)
+        let buffer = UnsafeBufferPointer(start: ptr, count: count)
+        return Array(buffer)
     }
 
     // MARK: - Buffer Reading (converts any buffer to [Float])
 
-    private func readF16Buffer(_ buffer: MTLBuffer) -> [Float] {
+    private func readDecodeBuffer(_ buffer: MTLBuffer, precision: BufferPrecision) -> [Float] {
         if buffer.storageMode == .private {
             // Private buffers require GPU blit to a shared staging buffer
             let device = buffer.device
@@ -546,13 +789,9 @@ struct ReferenceComparisonTests {
             blit.endEncoding()
             cb.commit()
             cb.waitUntilCompleted()
-            let count = staging.length / MemoryLayout<Float16>.size
-            let ptr = staging.contents().bindMemory(to: Float16.self, capacity: count)
-            return (0..<count).map { Float(ptr[$0]) }
+            return readSharedDecodeBuffer(staging, precision: precision)
         }
-        let count = buffer.length / MemoryLayout<Float16>.size
-        let ptr = buffer.contents().bindMemory(to: Float16.self, capacity: count)
-        return (0..<count).map { Float(ptr[$0]) }
+        return readSharedDecodeBuffer(buffer, precision: precision)
     }
 
     private func readF32Buffer(_ buffer: MTLBuffer) -> [Float] {
@@ -560,6 +799,66 @@ struct ReferenceComparisonTests {
         let ptr = buffer.contents().bindMemory(to: Float32.self, capacity: count)
         return (0..<count).map { ptr[$0] }
     }
+
+    private func writeDecodeBuffer(_ values: [Float], to buffer: MTLBuffer, precision: BufferPrecision) {
+        if buffer.storageMode == .private {
+            let device = buffer.device
+            guard let staging = device.makeBuffer(length: buffer.length, options: .storageModeShared),
+                  let queue = device.makeCommandQueue(),
+                  let cb = queue.makeCommandBuffer(),
+                  let blit = cb.makeBlitCommandEncoder() else { return }
+
+            let count = min(values.count, staging.length / precision.byteSize)
+            writeSharedDecodeBuffer(values, to: staging, precision: precision, count: count)
+
+            blit.copy(from: staging, sourceOffset: 0, to: buffer, destinationOffset: 0, size: count * precision.byteSize)
+            blit.endEncoding()
+            cb.commit()
+            cb.waitUntilCompleted()
+            return
+        }
+
+        let count = min(values.count, buffer.length / precision.byteSize)
+        writeSharedDecodeBuffer(values, to: buffer, precision: precision, count: count)
+    }
+
+    private func readSharedDecodeBuffer(_ buffer: MTLBuffer, precision: BufferPrecision) -> [Float] {
+        switch precision {
+        case .float16:
+            let count = buffer.length / MemoryLayout<Float16>.size
+            let ptr = buffer.contents().bindMemory(to: Float16.self, capacity: count)
+            return (0..<count).map { Float(ptr[$0]) }
+        case .bfloat16:
+            let count = buffer.length / MemoryLayout<BFloat16>.size
+            let ptr = buffer.contents().bindMemory(to: BFloat16.self, capacity: count)
+            return (0..<count).map { Float(ptr[$0]) }
+        case .float32:
+            let count = buffer.length / MemoryLayout<Float32>.size
+            let ptr = buffer.contents().bindMemory(to: Float32.self, capacity: count)
+            return (0..<count).map { ptr[$0] }
+        }
+    }
+
+    private func writeSharedDecodeBuffer(_ values: [Float], to buffer: MTLBuffer, precision: BufferPrecision, count: Int) {
+        switch precision {
+        case .float16:
+            let ptr = buffer.contents().bindMemory(to: Float16.self, capacity: count)
+            for i in 0..<count {
+                ptr[i] = Float16(values[i])
+            }
+        case .bfloat16:
+            let ptr = buffer.contents().bindMemory(to: BFloat16.self, capacity: count)
+            for i in 0..<count {
+                ptr[i] = BFloat16(values[i])
+            }
+        case .float32:
+            let ptr = buffer.contents().bindMemory(to: Float32.self, capacity: count)
+            for i in 0..<count {
+                ptr[i] = values[i]
+            }
+        }
+    }
+
 
     private func readRefTensorAsFloats(
         _ file: MetalWeightFile, name: String
@@ -593,6 +892,9 @@ struct ReferenceComparisonTests {
         let count = min(a.count, b.count)
         var maxErr: Float = 0
         for i in 0..<count {
+            if !a[i].isFinite || !b[i].isFinite {
+                return .infinity
+            }
             maxErr = max(maxErr, abs(a[i] - b[i]))
         }
         return maxErr

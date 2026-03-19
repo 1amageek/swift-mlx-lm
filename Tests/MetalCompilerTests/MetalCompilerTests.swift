@@ -61,6 +61,24 @@ struct DispatchPlanCompilationTests {
     }
 
     @Test
+    func standardOptimizerDoesNotFuseMlpFrontHalf() throws {
+        let graph = try TinyTransformer(hiddenSize: 64, layers: 1, vocabSize: 100).makeModelGraph()
+        let compiler = MetalInferenceCompiler()
+        let dump = compiler.dumpDispatchEntries(graph: graph, hiddenSize: 64)
+
+        #expect(!dump.contains("fusedSwiGLUProjection("), "Standard optimizer should keep MLP front half unfused:\n\(dump)")
+    }
+
+    @Test
+    func aggressiveOptimizerFusesMlpFrontHalfInDispatchDump() throws {
+        let graph = try TinyTransformer(hiddenSize: 64, layers: 1, vocabSize: 100).makeModelGraph()
+        let compiler = MetalInferenceCompiler(optimizer: AggressiveOptimizer())
+        let dump = compiler.dumpDispatchEntries(graph: graph, hiddenSize: 64)
+
+        #expect(dump.contains("fusedSwiGLUProjection("), "Aggressive optimizer should fuse MLP front half:\n\(dump)")
+    }
+
+    @Test
     func threadgroupSizesRespectPipelineLimits() throws {
         guard let device = MTLCreateSystemDefaultDevice() else { return }
         let graph = try TinyTestModel(hiddenSize: 64, vocabSize: 100).makeModelGraph()

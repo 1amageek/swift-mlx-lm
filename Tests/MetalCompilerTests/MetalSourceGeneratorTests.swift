@@ -47,6 +47,29 @@ struct MetalSourceGeneratorTests {
         }
     }
 
+    @Test("Generated fused SwiGLU projection compiles for both weight formats")
+    func fusedSwiGLUProjectionCompiles() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+
+        let formats: [(MetalSourceGenerator.WeightFormat, String)] = [
+            (.float16, "fp16"), (.bfloat16, "bf16")
+        ]
+
+        for (format, label) in formats {
+            let name = "fused_swiglu_projection_\(label)"
+            let source = MetalSourceGenerator.commonHeader + "\n\n"
+                + MetalSourceGenerator.generateFusedSwiGLUProjection(
+                    name: name,
+                    bufferPrecision: .float16,
+                    weightFormat: format)
+
+            let options = MTLCompileOptions()
+            options.languageVersion = .version4_0
+            let library = try device.makeLibrary(source: source, options: options)
+            #expect(library.makeFunction(name: name) != nil, "Failed to compile \(name)")
+        }
+    }
+
     @Test("Generated GEMM compiles for all weight formats")
     func gemmCompiles() throws {
         guard let device = MTLCreateSystemDefaultDevice() else { return }

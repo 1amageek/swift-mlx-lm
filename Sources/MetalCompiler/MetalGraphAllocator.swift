@@ -195,15 +195,16 @@ public struct MetalKVCache: @unchecked Sendable {
     /// Current number of tokens in cache.
     public var length: Int
 
-    public init(device: MTLDevice, specification: KVCacheSpecification) throws {
+    public init(
+        device: MTLDevice,
+        specification: KVCacheSpecification,
+        resourceOptions: MTLResourceOptions = [.storageModePrivate, .hazardTrackingModeUntracked]
+    ) throws {
         let keySize = specification.totalBufferSize(scheme: specification.keyQuantizationScheme)
         let valueSize = specification.totalBufferSize(scheme: specification.valueQuantizationScheme)
 
-        // KV cache uses storageModeShared — GPU writes (quantize kernel) and reads (attention).
-        // Shared mode on Apple Silicon unified memory has no copy overhead.
-        let options: MTLResourceOptions = [.storageModeShared]
-        guard let k = device.makeBuffer(length: keySize, options: options),
-              let v = device.makeBuffer(length: valueSize, options: options)
+        guard let k = device.makeBuffer(length: keySize, options: resourceOptions),
+              let v = device.makeBuffer(length: valueSize, options: resourceOptions)
         else {
             throw MetalCompilerError.bufferAllocationFailed("Cannot allocate KV cache")
         }

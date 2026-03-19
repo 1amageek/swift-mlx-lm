@@ -75,7 +75,7 @@ public struct QKNormFragment: PrimitiveMetalKernelFragment {
                 threadgroupMemoryLength: 0,
                 sync: .bufferBarrier,
                 mode: .batch,
-                sequenceLengthBindingIndex: 5,
+                sequenceLengthPolicy: .bindAndAdjustGridHeight(index: 5),
                 positionBufferIndex: nil,
                 perPositionStrides: [:]
             )],

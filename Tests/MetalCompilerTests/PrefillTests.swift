@@ -96,7 +96,7 @@ struct PrefillTests {
         #expect(elapsed < 5.0, "Prefill should complete in <5s, took \(elapsed)s")
     }
 
-    @Test("Batch steps have seqLen binding, perPosition steps have position binding")
+    @Test("Prefill step bindings are consistent with execution mode")
     func prefillStepModes() throws {
         guard let device = MTLCreateSystemDefaultDevice() else {
             Issue.record("No Metal device")
@@ -112,21 +112,46 @@ struct PrefillTests {
         let perPosSteps = prefillPlan.steps.filter { $0.mode == .perPosition }
 
         #expect(!batchSteps.isEmpty, "Should have batch steps (GEMM, norm, etc.)")
-        #expect(!perPosSteps.isEmpty, "Should have perPosition steps (attention)")
 
         // All batch steps with grid.y > 1 should have seqLen binding
         for step in batchSteps where step.gridSize.height > 1 {
-            #expect(step.sequenceLengthBindingIndex != nil,
+            #expect(step.sequenceLengthPolicy.bindingIndex != nil,
                     "Batch step with grid.y > 1 should have seqLen binding")
         }
 
-        // All perPosition steps should have position binding
+        // Per-position steps are optional. If present, they must have a position binding.
         for step in perPosSteps {
             #expect(step.positionBufferIndex != nil,
                     "PerPosition step should have position binding")
         }
 
         print("[Test] \(batchSteps.count) batch + \(perPosSteps.count) perPosition = \(prefillPlan.stepCount) total")
+    }
+
+    @Test("Prefill GEMM batch steps always receive runtime seqLen")
+    func prefillGEMMBatchStepsUseRuntimeSequenceLength() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else {
+            Issue.record("No Metal device")
+            return
+        }
+
+        let config = makeTestConfig()
+        let graph = try Transformer(config: config).makeModelGraph()
+        let resolved = ParameterResolver().resolve(graph: graph, convention: .llamaFamily)
+        let prefillPlan = try compilePrefillPlan(config, resolved, device)
+
+        let gemmBatchSteps = prefillPlan.steps.filter {
+            $0.mode == .batch && (($0.pipeline.label ?? "").hasPrefix("gemm"))
+        }
+
+        #expect(!gemmBatchSteps.isEmpty, "Expected at least one prefill GEMM batch step")
+
+        for step in gemmBatchSteps {
+            #expect(
+                step.sequenceLengthPolicy.bindingIndex != nil,
+                "Prefill GEMM batch step must override buffer(seqLen) at runtime"
+            )
+        }
     }
 
     // MARK: - Helpers

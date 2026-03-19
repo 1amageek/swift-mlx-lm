@@ -34,11 +34,10 @@ public struct Reduction: PrimitiveMetalKernelFragment {
             buffers: [
                 (0, context.bufferSet.hidden, 0),
                 (1, weightBuffer, weightOffset),
-                (2, context.bufferSet.hidden, 0),
             ],
             bytes: [
-                uint32Binding(3, UInt32(dimension)),
-                floatBinding(4, epsilon),
+                uint32Binding(2, UInt32(dimension)),
+                floatBinding(3, epsilon),
             ],
             outputIsHidden: true,
             resetsProjectionIndex: true
@@ -71,7 +70,7 @@ public struct Reduction: PrimitiveMetalKernelFragment {
                 threadgroupMemoryLength: 0,
                 sync: .bufferBarrier,
                 mode: .batch,
-                sequenceLengthBindingIndex: 5,
+                sequenceLengthPolicy: .bind(index: 5),
                 positionBufferIndex: nil,
                 perPositionStrides: [:]
             )],

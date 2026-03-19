@@ -75,6 +75,8 @@ public struct CollectedPrimitive: Sendable {
 public enum OptimizedEntry: Sendable {
     /// Single dispatch — no optimization applied.
     case single(CollectedPrimitive)
+    /// Fused MLP front half — gate_proj + up_proj + SwiGLU.
+    case fusedSwiGLUProjection(FusedSwiGLUProjection, parameterBindings: [ParameterBinding], layerIndex: Int?)
     /// Batched projections — N non-output GEMV in one dispatch.
     case batchedProjection(BatchedProjection, parameterBindings: [ParameterBinding], layerIndex: Int?)
     /// Batched same-dimension fragments — N in-place operations in one dispatch.

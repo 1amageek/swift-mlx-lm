@@ -63,7 +63,7 @@ public struct GatherFragment: PrimitiveMetalKernelFragment {
                 threadgroupMemoryLength: 0,
                 sync: .bufferBarrier,
                 mode: .batch,
-                sequenceLengthBindingIndex: 4,
+                sequenceLengthPolicy: .bindAndAdjustGridHeight(index: 4),
                 positionBufferIndex: nil,
                 perPositionStrides: [:]
             )],

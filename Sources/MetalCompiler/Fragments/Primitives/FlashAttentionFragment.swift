@@ -118,13 +118,15 @@ public struct FlashAttentionFragment: PrimitiveMetalKernelFragment {
                 uint32Binding(6, UInt32(cache.specification.maximumSequenceLength)),
                 uint32Binding(7, UInt32(context.maximumSequenceLength)),
                 uint32Binding(8, UInt32(cache.specification.layoutMode.rawValue)),
-                uint32Binding(9, UInt32(kHeadSlotBytes)),
-                uint32Binding(10, UInt32(vHeadSlotBytes)),
+                uint32Binding(9, UInt32(cache.specification.keyQuantizationScheme.rawValue)),
+                uint32Binding(10, UInt32(cache.specification.valueQuantizationScheme.rawValue)),
+                uint32Binding(11, UInt32(kHeadSlotBytes)),
+                uint32Binding(12, UInt32(vHeadSlotBytes)),
             ],
             threadgroupMemoryLength: 0,
             sync: .bufferBarrier,
             mode: .batch,
-            sequenceLengthBindingIndex: 7,
+            sequenceLengthPolicy: .bind(index: 7),
             positionBufferIndex: nil,
             perPositionStrides: [:]
         ))
@@ -161,7 +163,7 @@ public struct FlashAttentionFragment: PrimitiveMetalKernelFragment {
             threadgroupMemoryLength: 0,
             sync: .bufferBarrier,
             mode: .batch,
-            sequenceLengthBindingIndex: 10,
+            sequenceLengthPolicy: .bind(index: 10),
             positionBufferIndex: nil,
             perPositionStrides: [:]
         ))

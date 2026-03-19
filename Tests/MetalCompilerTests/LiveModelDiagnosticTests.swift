@@ -65,9 +65,8 @@ struct LiveModelDiagnosticTests {
                 enc.setComputePipelineState(step.pipeline)
                 for (index, buffer, offset) in step.bufferBindings { enc.setBuffer(buffer, offset: offset, index: index) }
                 for (index, value) in step.bytesBindings { value.withUnsafeBufferPointer { enc.setBytes($0.baseAddress!, length: $0.count, index: index) } }
-                if let si = step.sequenceLengthBindingIndex { var sl = UInt32(seqLen); withUnsafeBytes(of: &sl) { enc.setBytes($0.baseAddress!, length: $0.count, index: si) } }
-                var grid = step.gridSize
-                if step.sequenceLengthBindingIndex != nil && grid.height > 1 { grid = MTLSize(width: grid.width, height: seqLen, depth: grid.depth) }
+                step.bindRuntimeArguments(encoder: enc, sequenceLength: UInt32(seqLen))
+                let grid = step.resolvedGridSize(sequenceLength: seqLen)
                 enc.dispatchThreadgroups(grid, threadsPerThreadgroup: step.threadgroupSize)
 
             case .perPosition:
@@ -181,9 +180,8 @@ struct LiveModelDiagnosticTests {
                 enc.setComputePipelineState(step.pipeline)
                 for (i, buf, off) in step.bufferBindings { enc.setBuffer(buf, offset: off, index: i) }
                 for (i, val) in step.bytesBindings { val.withUnsafeBufferPointer { enc.setBytes($0.baseAddress!, length: $0.count, index: i) } }
-                if let si = step.sequenceLengthBindingIndex { var sl = UInt32(seqLen); withUnsafeBytes(of: &sl) { enc.setBytes($0.baseAddress!, length: $0.count, index: si) } }
-                var g = step.gridSize
-                if step.sequenceLengthBindingIndex != nil && g.height > 1 { g = MTLSize(width: g.width, height: seqLen, depth: g.depth) }
+                step.bindRuntimeArguments(encoder: enc, sequenceLength: UInt32(seqLen))
+                let g = step.resolvedGridSize(sequenceLength: seqLen)
                 enc.dispatchThreadgroups(g, threadsPerThreadgroup: step.threadgroupSize)
             case .perPosition:
                 for pos in 0..<seqLen {
@@ -410,14 +408,8 @@ struct LiveModelDiagnosticTests {
                         enc.setBytes(ptr.baseAddress!, length: ptr.count, index: index)
                     }
                 }
-                if let si = step.sequenceLengthBindingIndex {
-                    var sl = UInt32(seqLen)
-                    withUnsafeBytes(of: &sl) { enc.setBytes($0.baseAddress!, length: $0.count, index: si) }
-                }
-                var grid = step.gridSize
-                if step.sequenceLengthBindingIndex != nil && grid.height > 1 {
-                    grid = MTLSize(width: grid.width, height: seqLen, depth: grid.depth)
-                }
+                step.bindRuntimeArguments(encoder: enc, sequenceLength: UInt32(seqLen))
+                let grid = step.resolvedGridSize(sequenceLength: seqLen)
                 enc.dispatchThreadgroups(grid, threadsPerThreadgroup: step.threadgroupSize)
 
             case .perPosition:

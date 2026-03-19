@@ -1,6 +1,8 @@
 import Testing
 import Metal
 @testable import MetalCompiler
+import LMIR
+import ModelDeclarations
 
 @Suite("Generated Kernel Library")
 struct GeneratedLibraryTests {
@@ -16,9 +18,10 @@ struct GeneratedLibraryTests {
         let library = try device.makeLibrary(source: source, options: options)
 
         // Verify critical decode kernels
-        for name in ["gemv_bf16", "rms_norm_bf16", "swiglu", "argmax",
+        for name in ["gemv_bf16", "rms_norm_bf16", "rms_norm_bf16_argbuf", "swiglu", "argmax", "argmax_argbuf",
                       "fused_copy_rms_norm_bf16", "fused_residual_add_copy_rms_norm_bf16",
-                      "qk_rms_norm_bf16", "rope", "conv_state_update",
+                      "fused_swiglu_projection_bf16",
+                      "qk_rms_norm_bf16", "qk_rms_norm_bf16_argbuf", "rope", "conv_state_update_bf16",
                       "flash_attn_decode", "gemv_q4_g64", "sigmoid_gate"] {
             #expect(library.makeFunction(name: name) != nil, "Missing: \(name)")
         }
@@ -33,5 +36,217 @@ struct GeneratedLibraryTests {
         }
 
         print("[GenLib] Library: \(library.functionNames.count) functions, \(source.count) chars")
+    }
+
+    @Test("Dump generated decode kernel library for LFM2")
+    func dumpGeneratedDecodeKernelLibraryForLFM2() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+
+        let stafURL = URL(fileURLWithPath: "/Users/1amageek/Desktop/swift-lm/TestData/LFM2.5-1.2B-Thinking/model.staf")
+        guard FileManager.default.fileExists(atPath: stafURL.path) else { return }
+
+        let store = try STAFLoader().load(at: stafURL, device: device)
+        let config = ModelConfig(
+            hiddenSize: 2048, layerCount: 16, intermediateSize: 8192,
+            vocabSize: 65536, attentionHeads: 32, kvHeads: 8, headDim: 64,
+            attentionBias: false, mlpBias: false, normEps: 1e-5,
+            normKind: .rmsNorm, ropeTheta: 1000000.0, ropeDimension: 64,
+            ropeScaling: nil, tiedEmbeddings: true,
+            expertCount: nil, expertsPerToken: nil, qkNorm: true,
+            fullAttentionInterval: nil, ssmNumHeads: nil, ssmKeyHeadDim: nil,
+            ssmValueHeadDim: nil, convKernelSize: nil, convLCache: 3,
+            partialRotaryFactor: nil, slidingWindow: nil,
+            layerTypes: ["conv", "conv", "full_attention", "conv", "conv", "full_attention",
+                         "conv", "conv", "full_attention", "conv", "full_attention", "conv",
+                         "full_attention", "conv", "full_attention", "conv"])
+        let graph = try LFM2(config: config).makeModelGraph()
+        let resolved = ParameterResolver().resolve(graph: graph, convention: .lfm2Family)
+        let compiler = MetalInferenceCompiler()
+        let dump = compiler.dumpGeneratedDecodeKernelLibrary(
+            graph: resolved,
+            hiddenSize: 2048,
+            stafWeightStore: store)
+
+        print("=== GENERATED DECODE LIBRARY ===")
+        print(String(dump.prefix(30000)))
+        #expect(dump.contains("kernel void flash_attn_decode"))
+    }
+
+    @Test("Compiled decode plan marks argument-table and resident-constant steps")
+    func compiledDecodePlanRecordsBindingBackends() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+
+        let stafURL = URL(fileURLWithPath: "/Users/1amageek/Desktop/swift-lm/TestData/LFM2.5-1.2B-Thinking/model.staf")
+        guard FileManager.default.fileExists(atPath: stafURL.path) else { return }
+
+        let store = try STAFLoader().load(at: stafURL, device: device)
+        let config = ModelConfig(
+            hiddenSize: 2048, layerCount: 16, intermediateSize: 8192,
+            vocabSize: 65536, attentionHeads: 32, kvHeads: 8, headDim: 64,
+            attentionBias: false, mlpBias: false, normEps: 1e-5,
+            normKind: .rmsNorm, ropeTheta: 1000000.0, ropeDimension: 64,
+            ropeScaling: nil, tiedEmbeddings: true,
+            expertCount: nil, expertsPerToken: nil, qkNorm: true,
+            fullAttentionInterval: nil, ssmNumHeads: nil, ssmKeyHeadDim: nil,
+            ssmValueHeadDim: nil, convKernelSize: nil, convLCache: 3,
+            partialRotaryFactor: nil, slidingWindow: nil,
+            layerTypes: ["conv", "conv", "full_attention", "conv", "conv", "full_attention",
+                         "conv", "conv", "full_attention", "conv", "full_attention", "conv",
+                         "full_attention", "conv", "full_attention", "conv"])
+        let graph = try LFM2(config: config).makeModelGraph()
+        let resolved = ParameterResolver().resolve(graph: graph, convention: .lfm2Family)
+        let compiler = MetalInferenceCompiler()
+        let plan = try compiler.compile(
+            graph: resolved,
+            hiddenSize: 2048,
+            intermediateSize: 8192,
+            vocabSize: 65536,
+            stafWeightStore: store,
+            device: device)
+
+        let argumentTableSteps = plan.steps.filter { $0.bindings.argumentPolicy == .argumentTable }.count
+        let preparedArgumentSteps = plan.steps.filter { step in
+            guard case .argumentTable(let table) = step.bindings.bufferBindings else { return false }
+            if case .prepared = table.encodingState { return true }
+            return false
+        }.count
+        let encodedArgumentSteps = plan.steps.filter { step in
+            guard case .argumentTable(let table) = step.bindings.bufferBindings else { return false }
+            if case .encoded = table.encodingState { return true }
+            return false
+        }.count
+        let preparedKernels = plan.steps.compactMap { step -> String? in
+            guard case .argumentTable(let table) = step.bindings.bufferBindings else { return nil }
+            if case .prepared = table.encodingState {
+                return step.pipeline.label ?? "(unlabeled)"
+            }
+            return nil
+        }
+        let residentConstantSteps = plan.steps.filter { $0.bindings.constantPolicy == .residentConstantBuffer }.count
+        let argumentTableLayouts = Set(plan.steps.compactMap { step -> Int? in
+            guard case .argumentTable(let table) = step.bindings.bufferBindings else { return nil }
+            return table.layout.id
+        })
+
+        print("[BindingPlan] decode steps=\(plan.steps.count) argTable=\(argumentTableSteps) argPrepared=\(preparedArgumentSteps) argEncoded=\(encodedArgumentSteps) residentConst=\(residentConstantSteps) layouts=\(argumentTableLayouts.count)")
+        if !preparedKernels.isEmpty {
+            print("[BindingPlan.PreparedKernels] \(preparedKernels.joined(separator: " | "))")
+        }
+
+        #expect(argumentTableSteps == plan.steps.count)
+        #expect(preparedArgumentSteps == 0)
+        #expect(encodedArgumentSteps == plan.steps.count)
+        #expect(residentConstantSteps > 0)
+        #expect(argumentTableLayouts.count < argumentTableSteps)
+    }
+
+    @Test("Compiled decode plan reports dominant argument-table layouts")
+    func compiledDecodePlanReportsDominantArgumentTableLayouts() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+
+        let stafURL = URL(fileURLWithPath: "/Users/1amageek/Desktop/swift-lm/TestData/LFM2.5-1.2B-Thinking/model.staf")
+        guard FileManager.default.fileExists(atPath: stafURL.path) else { return }
+
+        let store = try STAFLoader().load(at: stafURL, device: device)
+        let config = ModelConfig(
+            hiddenSize: 2048, layerCount: 16, intermediateSize: 8192,
+            vocabSize: 65536, attentionHeads: 32, kvHeads: 8, headDim: 64,
+            attentionBias: false, mlpBias: false, normEps: 1e-5,
+            normKind: .rmsNorm, ropeTheta: 1000000.0, ropeDimension: 64,
+            ropeScaling: nil, tiedEmbeddings: true,
+            expertCount: nil, expertsPerToken: nil, qkNorm: true,
+            fullAttentionInterval: nil, ssmNumHeads: nil, ssmKeyHeadDim: nil,
+            ssmValueHeadDim: nil, convKernelSize: nil, convLCache: 3,
+            partialRotaryFactor: nil, slidingWindow: nil,
+            layerTypes: ["conv", "conv", "full_attention", "conv", "conv", "full_attention",
+                         "conv", "conv", "full_attention", "conv", "full_attention", "conv",
+                         "full_attention", "conv", "full_attention", "conv"])
+        let graph = try LFM2(config: config).makeModelGraph()
+        let resolved = ParameterResolver().resolve(graph: graph, convention: .lfm2Family)
+        let compiler = MetalInferenceCompiler()
+        let plan = try compiler.compile(
+            graph: resolved,
+            hiddenSize: 2048,
+            intermediateSize: 8192,
+            vocabSize: 65536,
+            stafWeightStore: store,
+            device: device)
+
+        let layoutUsage = MetalArgumentBindingAllocator().summarizeUsage(
+            in: plan.steps.map(\.bindings))
+        let topLayout = try #require(layoutUsage.first)
+        let topLayouts = layoutUsage.prefix(5).map { usage in
+            "#\(usage.layout.id)x\(usage.useCount) indices=\(usage.layout.indices)"
+        }.joined(separator: " | ")
+
+        print("[BindingPlan.TopLayouts] \(topLayouts)")
+
+        #expect(layoutUsage.count > 0)
+        #expect(topLayout.useCount > 1)
+        #expect(topLayout.layout.indices.count >= 3)
+    }
+
+    @Test("Compiled decode plan reports dominant layout kernel families")
+    func compiledDecodePlanReportsDominantLayoutKernelFamilies() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+
+        let stafURL = URL(fileURLWithPath: "/Users/1amageek/Desktop/swift-lm/TestData/LFM2.5-1.2B-Thinking/model.staf")
+        guard FileManager.default.fileExists(atPath: stafURL.path) else { return }
+
+        let store = try STAFLoader().load(at: stafURL, device: device)
+        let config = ModelConfig(
+            hiddenSize: 2048, layerCount: 16, intermediateSize: 8192,
+            vocabSize: 65536, attentionHeads: 32, kvHeads: 8, headDim: 64,
+            attentionBias: false, mlpBias: false, normEps: 1e-5,
+            normKind: .rmsNorm, ropeTheta: 1000000.0, ropeDimension: 64,
+            ropeScaling: nil, tiedEmbeddings: true,
+            expertCount: nil, expertsPerToken: nil, qkNorm: true,
+            fullAttentionInterval: nil, ssmNumHeads: nil, ssmKeyHeadDim: nil,
+            ssmValueHeadDim: nil, convKernelSize: nil, convLCache: 3,
+            partialRotaryFactor: nil, slidingWindow: nil,
+            layerTypes: ["conv", "conv", "full_attention", "conv", "conv", "full_attention",
+                         "conv", "conv", "full_attention", "conv", "full_attention", "conv",
+                         "full_attention", "conv", "full_attention", "conv"])
+        let graph = try LFM2(config: config).makeModelGraph()
+        let resolved = ParameterResolver().resolve(graph: graph, convention: .lfm2Family)
+        let compiler = MetalInferenceCompiler()
+        let plan = try compiler.compile(
+            graph: resolved,
+            hiddenSize: 2048,
+            intermediateSize: 8192,
+            vocabSize: 65536,
+            stafWeightStore: store,
+            device: device)
+
+        let layoutUsage = MetalArgumentBindingAllocator().summarizeUsage(
+            in: plan.steps.map(\.bindings))
+        let topLayout = try #require(layoutUsage.first)
+
+        var kernelCounts: [String: Int] = [:]
+        for step in plan.steps {
+            guard case .argumentTable(let table) = step.bindings.bufferBindings,
+                  table.layout.id == topLayout.layout.id else {
+                continue
+            }
+            let kernel = step.pipeline.label ?? "(unlabeled)"
+            kernelCounts[kernel, default: 0] += 1
+        }
+
+        let topKernelFamilies = kernelCounts
+            .sorted { lhs, rhs in
+                if lhs.value != rhs.value {
+                    return lhs.value > rhs.value
+                }
+                return lhs.key < rhs.key
+            }
+        let summary = topKernelFamilies.prefix(5)
+            .map { "\($0.key)x\($0.value)" }
+            .joined(separator: " | ")
+
+        print("[BindingPlan.LayoutKernels] layout#\(topLayout.layout.id) indices=\(topLayout.layout.indices) \(summary)")
+
+        let dominantKernel = try #require(topKernelFamilies.first)
+        #expect(!kernelCounts.isEmpty)
+        #expect(dominantKernel.value > 1)
     }
 }

@@ -78,7 +78,7 @@ public struct RoPEFragment: PrimitiveMetalKernelFragment {
                 threadgroupMemoryLength: 0,
                 sync: .bufferBarrier,
                 mode: .batch,
-                sequenceLengthBindingIndex: 8,
+                sequenceLengthPolicy: .bindAndAdjustGridHeight(index: 8),
                 positionBufferIndex: nil,
                 perPositionStrides: [:]
             )],

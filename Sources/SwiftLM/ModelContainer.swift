@@ -98,10 +98,103 @@ public final class ModelContainer: @unchecked Sendable {
         return messages.map { "\($0.role.rawValue): \($0.content)" }.joined(separator: "\n")
     }
 
+    private func streamGeneration(
+        firstToken: Int32,
+        promptTokenCount: Int,
+        preparationTime: Double,
+        requestStartTime: Double,
+        parameters: GenerateParameters,
+        continuation: AsyncStream<Generation>.Continuation
+    ) {
+        var tokenCount = 0
+        let maxTokens = parameters.maxTokens ?? 1024
+        let chunkTokenCount = max(1, parameters.streamChunkTokenCount)
+        var bufferedTokenIDs: [Int] = []
+
+        func emitBufferedChunkIfNeeded(force: Bool = false) {
+            guard !bufferedTokenIDs.isEmpty else { return }
+            guard force || bufferedTokenIDs.count >= chunkTokenCount else { return }
+            let text = self.modelTokenizer.decode(tokens: bufferedTokenIDs)
+            bufferedTokenIDs.removeAll(keepingCapacity: true)
+            continuation.yield(.chunk(text))
+        }
+
+        guard firstToken >= 0 else {
+            continuation.finish()
+            return
+        }
+        if self.modelConfiguration.eosTokenIds.contains(Int(firstToken)) {
+            continuation.finish()
+            return
+        }
+
+        bufferedTokenIDs.append(Int(firstToken))
+        tokenCount += 1
+
+        if tokenCount < maxTokens {
+            _ = self.inferenceModel.decode(tokenID: firstToken)
+        }
+
+        emitBufferedChunkIfNeeded()
+
+        while tokenCount < maxTokens {
+            let outputToken = self.inferenceModel.flush()
+
+            if outputToken < 0 { break }
+
+            let isEOS = self.modelConfiguration.eosTokenIds.contains(Int(outputToken))
+            if !isEOS, tokenCount + 1 < maxTokens {
+                _ = self.inferenceModel.decode(tokenID: outputToken)
+            }
+            if isEOS {
+                emitBufferedChunkIfNeeded(force: true)
+                break
+            }
+
+            bufferedTokenIDs.append(Int(outputToken))
+            tokenCount += 1
+            emitBufferedChunkIfNeeded()
+        }
+
+        emitBufferedChunkIfNeeded(force: true)
+
+        let totalTime = CFAbsoluteTimeGetCurrent() - requestStartTime
+        let tokensPerSecond = totalTime > 0 ? Double(tokenCount) / totalTime : 0
+        let preparationTokPerSec = preparationTime > 0 ? Double(promptTokenCount) / preparationTime : 0
+        print("[ModelContainer] \(tokenCount) tokens (\(String(format: "%.0f", preparationTokPerSec)) prefill, \(String(format: "%.1f", tokensPerSecond)) decode tok/s) [\(String(format: "%.1f", totalTime))s]")
+        continuation.yield(.info(CompletionInfo(
+            tokenCount: tokenCount,
+            tokensPerSecond: tokensPerSecond,
+            totalTime: totalTime
+        )))
+        continuation.finish()
+    }
+
+    /// Build a reusable prompt state from tokenized input.
+    ///
+    /// This runs prefill once, snapshots the decode state, and stores the
+    /// first predicted token so the same prompt prefix can be reused later.
+    public func makePromptState(input: LMInput) throws -> PromptState {
+        inferenceModel.resetCaches()
+        let promptTokens = input.text.tokens.map { Int32($0) }
+        let firstToken = inferenceModel.prefill(tokens: promptTokens)
+        guard firstToken >= 0 else {
+            throw ModelContainerError.invalidPrefillResult
+        }
+        let metalState = try inferenceModel.makePromptState(firstToken: firstToken)
+        return PromptState(metalState: metalState, promptTokenCount: input.text.tokens.count)
+    }
+
+    /// Build a reusable prompt state from user input.
+    public func makePromptState(input: UserInput) throws -> PromptState {
+        let prepared = try prepare(input: input)
+        return try makePromptState(input: prepared)
+    }
+
     /// Generate text from tokenized input.
     ///
     /// Returns an AsyncStream of Generation values (text chunks + completion info).
-    /// Each `.chunk` contains one decoded token's text.
+    /// Each `.chunk` may contain one or more decoded tokens.
     public func generate(
         input: LMInput,
         parameters: GenerateParameters = GenerateParameters()
@@ -109,55 +202,47 @@ public final class ModelContainer: @unchecked Sendable {
         AsyncStream { continuation in
             Task {
                 let startTime = CFAbsoluteTimeGetCurrent()
-                var tokenCount = 0
-                let maxTokens = parameters.maxTokens ?? 1024
-
-                // Prefill: batch all prompt tokens with minimal GPU sync
                 let prefillStart = CFAbsoluteTimeGetCurrent()
                 let promptTokens = input.text.tokens.map { Int32($0) }
                 let firstToken = self.inferenceModel.prefill(tokens: promptTokens)
                 let prefillTime = CFAbsoluteTimeGetCurrent() - prefillStart
+                self.streamGeneration(
+                    firstToken: firstToken,
+                    promptTokenCount: input.text.tokens.count,
+                    preparationTime: prefillTime,
+                    requestStartTime: startTime,
+                    parameters: parameters,
+                    continuation: continuation
+                )
+            }
+        }
+    }
 
-                // First generated token comes from prefill argmax
-                guard firstToken >= 0 else {
+    /// Generate text by restoring a reusable prompt state instead of re-running prefill.
+    public func generate(
+        from promptState: PromptState,
+        parameters: GenerateParameters = GenerateParameters()
+    ) -> AsyncStream<Generation> {
+        AsyncStream { continuation in
+            Task {
+                let startTime = CFAbsoluteTimeGetCurrent()
+                let restoreStart = CFAbsoluteTimeGetCurrent()
+                do {
+                    try self.inferenceModel.restore(promptState: promptState.metalState)
+                } catch {
+                    print("[ModelContainer] Failed to restore prompt state: \(error)")
                     continuation.finish()
                     return
                 }
-                if self.modelConfiguration.eosTokenIds.contains(Int(firstToken)) {
-                    continuation.finish()
-                    return
-                }
-
-                // Yield the first token (from prefill)
-                let firstText = self.modelTokenizer.decode(tokens: [Int(firstToken)])
-                continuation.yield(.chunk(firstText))
-                tokenCount += 1
-
-                // Decode subsequent tokens
-                var previousToken = firstToken
-                while tokenCount < maxTokens {
-                    let outputToken = self.inferenceModel.decodeSync(tokenID: previousToken)
-
-                    if outputToken < 0 { break }
-                    if self.modelConfiguration.eosTokenIds.contains(Int(outputToken)) { break }
-
-                    let text = self.modelTokenizer.decode(tokens: [Int(outputToken)])
-                    continuation.yield(.chunk(text))
-
-                    previousToken = outputToken
-                    tokenCount += 1
-                }
-
-                let totalTime = CFAbsoluteTimeGetCurrent() - startTime
-                let tokensPerSecond = totalTime > 0 ? Double(tokenCount) / totalTime : 0
-                let prefillTokPerSec = prefillTime > 0 ? Double(input.text.tokens.count) / prefillTime : 0
-                print("[ModelContainer] \(tokenCount) tokens (\(String(format: "%.0f", prefillTokPerSec)) prefill, \(String(format: "%.1f", tokensPerSecond)) decode tok/s) [\(String(format: "%.1f", totalTime))s]")
-                continuation.yield(.info(CompletionInfo(
-                    tokenCount: tokenCount,
-                    tokensPerSecond: tokensPerSecond,
-                    totalTime: totalTime
-                )))
-                continuation.finish()
+                let restoreTime = CFAbsoluteTimeGetCurrent() - restoreStart
+                self.streamGeneration(
+                    firstToken: promptState.metalState.firstToken,
+                    promptTokenCount: promptState.promptTokenCount,
+                    preparationTime: restoreTime,
+                    requestStartTime: startTime,
+                    parameters: parameters,
+                    continuation: continuation
+                )
             }
         }
     }

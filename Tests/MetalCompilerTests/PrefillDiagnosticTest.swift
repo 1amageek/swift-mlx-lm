@@ -112,16 +112,8 @@ struct PrefillDiagnosticTest {
 
             switch step.mode {
             case .batch:
-                if let seqLenIdx = step.sequenceLengthBindingIndex {
-                    var sl = UInt32(seqLen)
-                    withUnsafeBytes(of: &sl) {
-                        enc.setBytes($0.baseAddress!, length: $0.count, index: seqLenIdx)
-                    }
-                }
-                var grid = step.gridSize
-                if step.sequenceLengthBindingIndex != nil && grid.height > 1 {
-                    grid = MTLSize(width: grid.width, height: seqLen, depth: grid.depth)
-                }
+                step.bindRuntimeArguments(encoder: enc, sequenceLength: UInt32(seqLen))
+                let grid = step.resolvedGridSize(sequenceLength: seqLen)
                 enc.dispatchThreadgroups(grid, threadsPerThreadgroup: step.threadgroupSize)
 
             case .perPosition:

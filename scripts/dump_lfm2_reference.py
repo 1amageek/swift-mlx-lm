@@ -80,6 +80,11 @@ def run_prefill_with_hooks(model, config, input_tokens):
                 captures[f"ref.prefill.layer_{idx}.after_op"] = attn_out.detach().half().cpu()
             handles.append(layer.self_attn.register_forward_hook(attn_hook))
 
+        def mlp_hook(module, input, output, idx=i):
+            mlp_out = output[0] if isinstance(output, tuple) else output
+            captures[f"ref.prefill.layer_{idx}.mlp_out"] = mlp_out.detach().half().cpu()
+        handles.append(layer.feed_forward.register_forward_hook(mlp_hook))
+
     # Hook: final norm
     def norm_hook(module, input, output):
         captures["ref.prefill.final_hidden"] = output.detach().half().cpu()
@@ -135,6 +140,31 @@ def run_decode_steps(model, config, past_key_values, first_token, num_steps):
 
     for step in range(num_steps):
         handles = []
+
+        # Hook: each decoder layer (captures after_mlp = full layer output)
+        for i in range(config.num_hidden_layers):
+            def layer_hook(module, input, output, idx=i, s=step):
+                hidden = output[0] if isinstance(output, tuple) else output
+                captures[f"ref.decode_{s}.layer_{idx}.after_mlp"] = hidden[0, 0].detach().half().cpu()
+            handles.append(model.model.layers[i].register_forward_hook(layer_hook))
+
+        # Hook: conv/attention sub-modules (captures after_op = before MLP residual)
+        for i in range(config.num_hidden_layers):
+            layer = model.model.layers[i]
+            if i in conv_layer_indices:
+                def conv_hook(module, input, output, idx=i, s=step):
+                    captures[f"ref.decode_{s}.layer_{idx}.after_op"] = output[0, 0].detach().half().cpu()
+                handles.append(layer.conv.register_forward_hook(conv_hook))
+            else:
+                def attn_hook(module, input, output, idx=i, s=step):
+                    attn_out = output[0] if isinstance(output, tuple) else output
+                    captures[f"ref.decode_{s}.layer_{idx}.after_op"] = attn_out[0, 0].detach().half().cpu()
+                handles.append(layer.self_attn.register_forward_hook(attn_hook))
+
+            def mlp_hook(module, input, output, idx=i, s=step):
+                mlp_out = output[0] if isinstance(output, tuple) else output
+                captures[f"ref.decode_{s}.layer_{idx}.mlp_out"] = mlp_out[0, 0].detach().half().cpu()
+            handles.append(layer.feed_forward.register_forward_hook(mlp_hook))
 
         # Hook: final norm
         def norm_hook(module, input, output, s=step):

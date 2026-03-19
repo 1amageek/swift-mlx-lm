@@ -12,12 +12,15 @@ import Metal
 public enum BufferPrecision: Sendable {
     /// Float16 — used in decode (single token, no accumulation).
     case float16
+    /// BFloat16 — used in decode for BF16-native models.
+    case bfloat16
     /// Float32 — used in prefill (multi-token, prevents accumulation error).
     case float32
 
     public var metalType: String {
         switch self {
         case .float16: return "half"
+        case .bfloat16: return "bfloat"
         case .float32: return "float"
         }
     }
@@ -25,6 +28,7 @@ public enum BufferPrecision: Sendable {
     public var byteSize: Int {
         switch self {
         case .float16: return 2
+        case .bfloat16: return 2
         case .float32: return 4
         }
     }
@@ -246,6 +250,30 @@ public struct FusedResidualAddNorm: Sendable {
     public init(dimension: Int, epsilon: Float) {
         self.dimension = dimension
         self.epsilon = epsilon
+    }
+}
+
+/// Fused operation: gate_proj + up_proj + SwiGLU → single decode dispatch.
+///
+/// This avoids materializing the two MLP branch projections into separate
+/// scratch buffers before activation, which reduces both launch overhead and
+/// activation rounding on the decode hot path.
+public struct FusedSwiGLUProjection: Sendable {
+    public let inputDimension: Int
+    public let outputDimension: Int
+    public let gateField: String
+    public let upField: String
+
+    public init(
+        inputDimension: Int,
+        outputDimension: Int,
+        gateField: String,
+        upField: String
+    ) {
+        self.inputDimension = inputDimension
+        self.outputDimension = outputDimension
+        self.gateField = gateField
+        self.upField = upField
     }
 }
 

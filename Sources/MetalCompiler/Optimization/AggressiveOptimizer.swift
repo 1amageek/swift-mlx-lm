@@ -22,6 +22,12 @@ public struct AggressiveOptimizer: DispatchOptimizer {
         var i = 0
 
         while i < primitives.count {
+            if let fused = FusedSwiGLUProjectionRule.match(at: i, primitives: primitives) {
+                result.append(fused)
+                i += 3
+                continue
+            }
+
             // Rule 1: Batch consecutive projections (.gemv dispatch dimension)
             // Only batch non-output projections. The last projection in the
             // composite is likely the output projection (o_proj, down_proj) and
@@ -174,7 +180,6 @@ public struct AggressiveOptimizer: DispatchOptimizer {
 
         return result
     }
-
     // MARK: - Helpers
 
     /// Check if two dispatch dimensions are the same KIND (ignoring values).
