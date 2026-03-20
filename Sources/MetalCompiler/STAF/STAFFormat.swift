@@ -12,11 +12,26 @@ public enum STAF {
     /// Magic bytes: "STAF" (0x53544146)
     public static let magic: UInt32 = 0x46415453  // little-endian "STAF"
 
+    /// Current STAF header format version.
+    public static let currentFormatVersion: UInt32 = 1
+
+    /// Legacy STAF files written before file-level metadata support.
+    public static let legacyFormatVersion: UInt32 = 0
+
+    /// Current file-level metadata schema version.
+    public static let currentMetadataSchemaVersion: UInt32 = 1
+
+    /// Current STAF converter metadata version.
+    public static let currentConverterVersion: UInt32 = 1
+
     /// File header size in bytes (packed, no alignment padding).
     public static let headerSize: Int = 64
 
     /// Section table entry size in bytes (packed, no alignment padding).
     public static let sectionEntrySize: Int = 128
+
+    /// Metadata table entry size in bytes (packed, no alignment padding).
+    public static let metadataEntrySize: Int = 32
 
     /// Payload alignment (must match page size for bytesNoCopy).
     public static let payloadAlignment: Int = 4096
@@ -26,6 +41,17 @@ public enum STAF {
 
     /// Maximum number of shape dimensions.
     public static let maximumDimensions: Int = 8
+
+    // MARK: Header Offsets
+
+    static let headerMagicOffset = 0
+    static let headerFormatVersionOffset = 4
+    static let headerMetadataEntryCountOffset = 8
+    static let headerMetadataTableOffset = 12
+    static let headerSectionCountOffset = 40
+    static let headerSectionTableOffset = 44
+    static let headerStringTableOffset = 48
+    static let headerStringTableSizeOffset = 52
 }
 
 // MARK: - File Header (64 bytes)
@@ -37,11 +63,14 @@ public enum STAF {
 public struct STAFHeader: Sendable {
     /// Magic: "STAF" (0x53544146 little-endian)
     public var magic: UInt32
+    /// Header format version. `0` is legacy, `1` adds the metadata table.
+    public var formatVersion: UInt32
+    /// Total number of metadata entries in the metadata table.
+    public var metadataEntryCount: UInt32
+    /// Byte offset of the metadata table, or `0` when absent.
+    public var metadataTableOffset: UInt32
     /// Reserved for future use (zero).
     public var reserved0: (
-        UInt8, UInt8, UInt8, UInt8,
-        UInt8, UInt8, UInt8, UInt8,
-        UInt8, UInt8, UInt8, UInt8,
         UInt8, UInt8, UInt8, UInt8,
         UInt8, UInt8, UInt8, UInt8,
         UInt8, UInt8, UInt8, UInt8,
@@ -59,6 +88,14 @@ public struct STAFHeader: Sendable {
     public var stringTableSize: UInt32
     /// Reserved for future use (zero).
     public var reserved1: (UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8)
+}
+
+extension STAFHeader {
+    var supportsMetadataTable: Bool {
+        formatVersion >= STAF.currentFormatVersion &&
+        metadataEntryCount > 0 &&
+        metadataTableOffset > 0
+    }
 }
 
 // MARK: - Section Table Entry (128 bytes)
@@ -181,4 +218,69 @@ public enum OriginalDType: UInt8, Sendable {
     case int8     = 0x05
     case int4     = 0x06
     case unknown  = 0xFF
+}
+
+// MARK: - Header Parsing
+
+extension STAF {
+    static func parseHeader(at basePointer: UnsafeRawPointer) -> STAFHeader {
+        STAFHeader(
+            magic: (basePointer + headerMagicOffset).loadUnaligned(as: UInt32.self),
+            formatVersion: (basePointer + headerFormatVersionOffset).loadUnaligned(as: UInt32.self),
+            metadataEntryCount: (basePointer + headerMetadataEntryCountOffset).loadUnaligned(as: UInt32.self),
+            metadataTableOffset: (basePointer + headerMetadataTableOffset).loadUnaligned(as: UInt32.self),
+            reserved0: (
+                (basePointer + 16).load(as: UInt8.self),
+                (basePointer + 17).load(as: UInt8.self),
+                (basePointer + 18).load(as: UInt8.self),
+                (basePointer + 19).load(as: UInt8.self),
+                (basePointer + 20).load(as: UInt8.self),
+                (basePointer + 21).load(as: UInt8.self),
+                (basePointer + 22).load(as: UInt8.self),
+                (basePointer + 23).load(as: UInt8.self),
+                (basePointer + 24).load(as: UInt8.self),
+                (basePointer + 25).load(as: UInt8.self),
+                (basePointer + 26).load(as: UInt8.self),
+                (basePointer + 27).load(as: UInt8.self),
+                (basePointer + 28).load(as: UInt8.self),
+                (basePointer + 29).load(as: UInt8.self),
+                (basePointer + 30).load(as: UInt8.self),
+                (basePointer + 31).load(as: UInt8.self),
+                (basePointer + 32).load(as: UInt8.self),
+                (basePointer + 33).load(as: UInt8.self),
+                (basePointer + 34).load(as: UInt8.self),
+                (basePointer + 35).load(as: UInt8.self),
+                (basePointer + 36).load(as: UInt8.self),
+                (basePointer + 37).load(as: UInt8.self),
+                (basePointer + 38).load(as: UInt8.self),
+                (basePointer + 39).load(as: UInt8.self)
+            ),
+            sectionCount: (basePointer + headerSectionCountOffset).loadUnaligned(as: UInt32.self),
+            sectionTableOffset: (basePointer + headerSectionTableOffset).loadUnaligned(as: UInt32.self),
+            stringTableOffset: (basePointer + headerStringTableOffset).loadUnaligned(as: UInt32.self),
+            stringTableSize: (basePointer + headerStringTableSizeOffset).loadUnaligned(as: UInt32.self),
+            reserved1: (
+                (basePointer + 56).load(as: UInt8.self),
+                (basePointer + 57).load(as: UInt8.self),
+                (basePointer + 58).load(as: UInt8.self),
+                (basePointer + 59).load(as: UInt8.self),
+                (basePointer + 60).load(as: UInt8.self),
+                (basePointer + 61).load(as: UInt8.self),
+                (basePointer + 62).load(as: UInt8.self),
+                (basePointer + 63).load(as: UInt8.self)
+            )
+        )
+    }
+
+    static func parseHeader(from data: Data) -> STAFHeader? {
+        guard data.count >= headerSize else {
+            return nil
+        }
+        return data.withUnsafeBytes { rawBuffer in
+            guard let baseAddress = rawBuffer.baseAddress else {
+                return nil
+            }
+            return parseHeader(at: baseAddress)
+        }
+    }
 }

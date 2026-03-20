@@ -33,10 +33,14 @@ struct LoadTests {
     func convertToSTAF() throws {
         let directory = try findModelDirectory()
         let safetensorsURLs = try findSafetensorsFiles(in: directory)
-        let stafURL = directory.appendingPathComponent("model_test.staf")
-
-        // Clean up any previous test STAF
-        try? FileManager.default.removeItem(at: stafURL)
+        let stafURL = try makeTemporarySTAFURL(testName: "convert")
+        defer {
+            do {
+                try removeIfExists(stafURL)
+            } catch {
+                Issue.record("Failed to clean up temporary STAF: \(error)")
+            }
+        }
 
         let converter = STAFConverter()
         try converter.convert(safetensorsURLs: safetensorsURLs, outputURL: stafURL)
@@ -84,8 +88,6 @@ struct LoadTests {
             }
         }
 
-        // Clean up
-        try? FileManager.default.removeItem(at: stafURL)
     }
 
     // MARK: - Step 3: STAF Load
@@ -99,8 +101,14 @@ struct LoadTests {
 
         let directory = try findModelDirectory()
         let safetensorsURLs = try findSafetensorsFiles(in: directory)
-        let stafURL = directory.appendingPathComponent("model_test.staf")
-        try? FileManager.default.removeItem(at: stafURL)
+        let stafURL = try makeTemporarySTAFURL(testName: "load")
+        defer {
+            do {
+                try removeIfExists(stafURL)
+            } catch {
+                Issue.record("Failed to clean up temporary STAF: \(error)")
+            }
+        }
 
         let converter = STAFConverter()
         try converter.convert(safetensorsURLs: safetensorsURLs, outputURL: stafURL)
@@ -112,8 +120,6 @@ struct LoadTests {
         for (name, entry) in store.entries.prefix(5) {
             print("  \(name): offset=\(entry.bufferOffset) size=\(entry.payloadSize) scheme=\(entry.schemeIdentifier)")
         }
-
-        try? FileManager.default.removeItem(at: stafURL)
     }
 
     // MARK: - Step 4: Config Parse
@@ -275,6 +281,21 @@ struct LoadTests {
             case .parallel(_, let branches): for b in branches { checkBindings(b, count: &count) }
             case .primitive: break
             }
+        }
+    }
+
+    private func makeTemporarySTAFURL(testName: String) throws -> URL {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("swift-lm-load-tests", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        return directory
+            .appendingPathComponent("\(testName)-\(UUID().uuidString)")
+            .appendingPathExtension("staf")
+    }
+
+    private func removeIfExists(_ url: URL) throws {
+        if FileManager.default.fileExists(atPath: url.path) {
+            try FileManager.default.removeItem(at: url)
         }
     }
 }

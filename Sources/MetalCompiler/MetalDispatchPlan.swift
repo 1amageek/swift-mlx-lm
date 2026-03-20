@@ -298,6 +298,7 @@ public struct MetalDispatchDescriptor: @unchecked Sendable {
 public struct MetalDispatchStep: @unchecked Sendable {
     public let descriptor: MetalDispatchDescriptor
     public let bindings: MetalBindingTable
+    public let bufferAccesses: MetalBufferAccesses
 
     public var pipeline: MTLComputePipelineState { descriptor.pipeline }
     public var gridSize: MTLSize { descriptor.gridSize }
@@ -319,8 +320,10 @@ public struct MetalDispatchStep: @unchecked Sendable {
         bufferBindings: [(index: Int, buffer: MTLBuffer, offset: Int)],
         bytesBindings: [(index: Int, value: [UInt8])],
         threadgroupMemoryLength: Int,
-        sync: SynchronizationKind
+        sync: SynchronizationKind,
+        bufferAccesses: MetalBufferAccesses? = nil
     ) {
+        let mappedBindings = bufferBindings.map { MetalBufferBinding(index: $0.index, buffer: $0.buffer, offset: $0.offset) }
         self.descriptor = MetalDispatchDescriptor(
             pipeline: pipeline,
             gridSize: gridSize,
@@ -330,14 +333,17 @@ public struct MetalDispatchStep: @unchecked Sendable {
         self.bindings = MetalBindingTable(
             bufferBindings: bufferBindings,
             bytesBindings: bytesBindings)
+        self.bufferAccesses = bufferAccesses ?? MetalBufferAccesses.conservative(mappedBindings)
     }
 
     public init(
         descriptor: MetalDispatchDescriptor,
-        bindings: MetalBindingTable
+        bindings: MetalBindingTable,
+        bufferAccesses: MetalBufferAccesses? = nil
     ) {
         self.descriptor = descriptor
         self.bindings = bindings
+        self.bufferAccesses = bufferAccesses ?? MetalBufferAccesses.conservative(bindings.buffers)
     }
 }
 

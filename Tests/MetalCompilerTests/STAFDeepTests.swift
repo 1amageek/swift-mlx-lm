@@ -1047,6 +1047,51 @@ struct STAFDeepTests {
         #expect(!isValid, "STAF should be invalid when source is newer")
     }
 
+    @Test("isValid returns false when expected metadata mismatches")
+    func isValidDetectsMetadataMismatch() throws {
+        let tempDirectory = makeTempDirectory()
+        defer { cleanup(tempDirectory) }
+
+        var values: [Float16] = [Float16(1.0)]
+        let safetensorsURL = tempDirectory.appendingPathComponent("model.safetensors")
+        try writeSafetensors(
+            tensors: [
+                TestTensor(name: "t", dtype: "F16", shape: [1],
+                           data: Data(bytes: &values, count: 2))
+            ],
+            to: safetensorsURL)
+
+        let expectedMetadata = STAFFileMetadata(values: [
+            STAFMetadataKey.modelArchitectureFamily: .string("transformer"),
+            STAFMetadataKey.modelHiddenSize: .uint64(2048)
+        ])
+        let mismatchedMetadata = STAFFileMetadata(values: [
+            STAFMetadataKey.modelArchitectureFamily: .string("transformer"),
+            STAFMetadataKey.modelHiddenSize: .uint64(4096)
+        ])
+
+        let stafURL = tempDirectory.appendingPathComponent("model.staf")
+        try STAFConverter().convert(
+            safetensorsURLs: [safetensorsURL],
+            outputURL: stafURL,
+            metadata: expectedMetadata
+        )
+
+        let stillValid = try STAFConverter().isValid(
+            stafURL: stafURL,
+            safetensorsURLs: [safetensorsURL],
+            expectedMetadata: expectedMetadata
+        )
+        #expect(stillValid, "STAF should remain valid when expected metadata matches")
+
+        let invalid = try STAFConverter().isValid(
+            stafURL: stafURL,
+            safetensorsURLs: [safetensorsURL],
+            expectedMetadata: mismatchedMetadata
+        )
+        #expect(!invalid, "STAF should become invalid when expected metadata differs")
+    }
+
     // MARK: - Helpers
 
     private func makeTempDirectory() -> URL {

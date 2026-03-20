@@ -26,6 +26,445 @@ It does not treat higher-level runtime features such as stream chunking or promp
 - Is the compiler still leaving obvious backend-side throughput on the table?
 - Where should the next compiler optimization effort go?
 
+## Current Status
+
+The most reliable current baseline is the accepted row-major exact-shape BF16 argbuf path after repeated revalidation:
+
+- optimizer comparison:
+  - `none`: about `128 tok/s`
+  - `standard`: low `130 tok/s`
+  - `aggressive`: mid `136 tok/s`
+- hot exact-shape GEMV microbench:
+  - total: roughly `2.5-2.7 ms`
+  - dominant families remain split close to `52/48` between:
+    - `gemv_2048_6144_bf16_argbuf`
+    - `gemv_2048_sq_bf16_argbuf`
+- decode backend state:
+  - `147/147` decode steps use encoded argument buffers
+  - prepared tail is `0`
+  - resident constants are pruned down to `115` steps
+
+Acceptance rule:
+
+- because repeated benchmark runs show a few percent of thermal/noise variation, a kernel change is only accepted if:
+  - the target hot-family microbench improves materially, and
+  - aggregate optimizer comparison does not regress outside that noise band
+
+This means the compiler is no longer primarily limited by:
+
+- dispatch-count reduction alone
+- decode binding overhead
+- the remaining argument-buffer migration work
+
+The dominant cost is now inside the hottest exact-shape decode kernels themselves.
+
+Latest accepted kernel-body change:
+
+- `gemv_2048_6144_bf16_argbuf` now uses a row-major `ushort4` contiguous read path with a fixed-iteration loop (`packed4FixedPointerInput`)
+- this keeps the generic compiler/store contract unchanged
+- it does not introduce a model-specific layout
+- parity remains unchanged, including the known decode drift fingerprint (`step 1: Python 2944 / Metal 859`)
+
+## Backend Contract Update
+
+The compiler/backend contract is now clearer:
+
+- decode may request specialized STAF layouts
+- prefill must remain on canonical row-major layout
+
+This is now enforced as an execution-phase decision in the weight-access path, instead of being an implicit side effect of whichever specialized buffers happen to exist in the store.
+
+Implication:
+
+- STAF can evolve toward optimized execution layouts without leaking decode-only assumptions into prefill
+- specialized layout experiments can be evaluated as backend capabilities, not as model-specific hacks
+
+## Bottleneck Hierarchy
+
+At the current accepted baseline, decode time is concentrated in a very small kernel set:
+
+1. `gemv_2048_6144_bf16_argbuf`
+2. `gemv_2048_sq_bf16_argbuf`
+3. `fused_swiglu_projection_2048_bf16_argbuf`
+4. everything else
+
+The first two kernels are the real bottleneck. They jointly account for most steady-state decode time, while the rest of the backend is already in the noise floor by comparison.
+
+The clearest structural reading from the accepted profiles is:
+
+- exact-shape BF16 GEMV dominates decode
+- fused SwiGLU front-half is the only meaningful secondary hot family
+- attention, norm, conv-state update, argmax, and output-head kernels are no longer first-order bottlenecks
+- planner/backend work has mostly been amortized away by full argbuf coverage
+
+In other words, the compiler frontier has moved from:
+
+- dispatch planning
+- buffer binding
+- launch-family separation
+
+to:
+
+- weight read path quality
+- BF16 conversion cost
+- threadgroup-memory pressure
+- exact-shape kernel-body design
+
+## Projection Cost Model
+
+To stop treating kernel tuning as blind micro-experimentation, the compiler now has a decode projection cost report that aggregates logical weight bytes, input/output bytes, and estimated FLOPs from the compiled decode entry set itself.
+
+Current report for the accepted row-major BF16 baseline:
+
+- projection steps: `61`
+- top projection families by estimated total bytes:
+  - `gemv_8192_tiled_bf16`: `16` steps, `8192 -> 2048`, `32.0 MB/step`, `512.3 MB total`, arithmetic intensity `1.00`
+  - `gemv_vocab_bf16`: `1` step, `2048 -> 65536`, `256.0 MB/step`, `256.1 MB total`, arithmetic intensity `1.00`
+  - `gemv_2048_6144_bf16`: `10` steps, `2048 -> 6144`, `24.0 MB/step`, `240.2 MB total`, arithmetic intensity `1.00`
+  - `gemv_2048_sq_bf16`: `22` steps, `2048 -> 2048`, `8.0 MB/step`, `176.2 MB total`, arithmetic intensity `1.00`
+  - `gemv_bf16`: `12` steps, `2048 -> 512`, `2.0 MB/step`, `24.1 MB total`, arithmetic intensity `1.00`
+
+Interpretation:
+
+- all dense decode projection families are effectively at `~1 flop/byte`
+- this is a memory-traffic regime, not a compute-heavy regime
+- `gemv_vocab_bf16` has huge per-step traffic, but only one occurrence per decode step
+- the measured steady-state bottleneck remains `gemv_2048_6144_bf16_argbuf` plus `gemv_2048_sq_bf16_argbuf` because they combine large logical traffic with high step multiplicity
+- `gemv_8192_tiled_bf16` has even higher total logical traffic, but its tiled structure is currently efficient enough that it is not the primary measured hotspot
+
+This cost model does not replace profiling. It explains why the exact-shape BF16 decode projections are still the right target:
+
+- their arithmetic intensity is already too low for arithmetic micro-tuning to matter much
+- the plausible next wins are weight-read structure, address-generation quality, and layout-aware memory behavior
+- launch sweeps and small expression rewrites are now structurally lower-yield
+
+## DecodeSync Host-Overhead Diagnosis
+
+To test whether the remaining BF16 gap versus `llama.cpp` was mainly host orchestration rather than kernel quality, the benchmark suite now includes a `decodeSync` breakdown and a direct `decodeSync` vs `decode/flush` throughput comparison.
+
+Current aggressive decode breakdown:
+
+- total wall time: about `8.4 ms/token`
+- command-buffer GPU time: about `8.1 ms/token`
+- host overhead: about `0.29-0.30 ms/token` (`~3.5%`)
+  - CPU token/position writes: negligible (`~0.4 us/token`)
+  - encode + submit: about `122 us/token`
+  - readback: negligible (`~2 us/token`)
+
+Interpretation:
+
+- the host-side residual is real, but small
+- the user-visible public generation path cannot currently recover that residual through the existing `decode` / `flush` pipeline
+- a direct aggressive comparison showed `decode/flush` slightly *slower* than `decodeSync` (within noise, but not better)
+
+Implication:
+
+- host orchestration is not the current highest-yield optimization frontier
+- the remaining BF16 gap is still better explained by the exact-shape decode kernels themselves than by the command-buffer wrapper
+- the next wins should continue to target:
+  - `gemv_2048_6144_bf16_argbuf`
+  - `gemv_2048_sq_bf16_argbuf`
+
+## Bottleneck Analysis
+
+### 1. The decode path is projection-bound, not attention-bound
+
+Repeated per-step profiles show that `flash_attn_decode_argbuf` is below `1%` of decode time, while exact-shape GEMV families dominate. This removes attention from the critical path for the current model and hardware.
+
+Implication:
+
+- more flash-attention tuning is not the highest-yield next step
+- wins must come from projection-heavy decode kernels
+
+### 2. The main bottleneck is now kernel-body quality inside exact-shape BF16 argbuf GEMV
+
+The accepted argbuf migration and resident-constant pruning proved that backend overhead was real, but they also showed a hard limit: after full encoded coverage, the hottest kernels remained:
+
+- `gemv_2048_6144_bf16_argbuf`
+- `gemv_2048_sq_bf16_argbuf`
+
+That means the remaining time is spent mostly on:
+
+- weight reads
+- BF16-to-float conversion
+- inner-loop address generation
+- threadgroup-local staging tradeoffs
+
+The latest accepted `2048 -> 6144` change fits this model exactly:
+
+- it does not change launch
+- it does not change layout
+- it does not change fusion
+- it only changes the row-major weight-read structure from `ushort2` pair reads to a contiguous `ushort4` read per lane
+
+This is consistent with the cost model: at `~1.00 flop/byte`, wins are more likely to come from reducing read-path overhead than from arithmetic expression rewrites.
+
+Implication:
+
+- the next useful work is family-specific weight/read-path tuning
+- generic launch sweeps are now low-yield
+
+### 2a. The hot `2048 -> 6144` family is semantically narrow
+
+A dedicated decode-binding diagnostic showed that the real `gemv_2048_6144_bf16_argbuf` hot family is not an arbitrary collection of `6144 x 2048` tensors.
+
+It maps specifically to the ten short-convolution input projections:
+
+- `model.layers.0.conv.in_proj.weight`
+- `model.layers.1.conv.in_proj.weight`
+- `model.layers.3.conv.in_proj.weight`
+- `model.layers.4.conv.in_proj.weight`
+- `model.layers.6.conv.in_proj.weight`
+- `model.layers.7.conv.in_proj.weight`
+- `model.layers.9.conv.in_proj.weight`
+- `model.layers.11.conv.in_proj.weight`
+- `model.layers.13.conv.in_proj.weight`
+- `model.layers.15.conv.in_proj.weight`
+
+Implication:
+
+- future layout/read-path experiments for `2048 -> 6144` should be targeted at `conv.in_proj.weight`
+- picking an arbitrary `6144 x 2048` tensor is not a valid proxy for the hot family
+
+### 2b. The blocked-layout problem is in the real BF16 read path, not in tensor selection
+
+The blocked `8-row x 128-element` layout was revalidated in three stages:
+
+- synthetic CPU pack order
+- synthetic GPU blocked-vs-row-major equivalence
+- real-model raw byte packing for `6144 x 2048` BF16 tensors
+
+All three passed.
+
+However, when the same blocked BF16 kernel path was exercised against the actual hot `conv.in_proj.weight` tensors, the blocked path still diverged from the row-major path and produced zeroed outputs.
+
+Implication:
+
+- the remaining blocked-layout issue is not explained by choosing the wrong tensor family
+- it is also not explained by the CPU-side pack order alone
+- the unresolved part is the real-model BF16 blocked read path itself, or its integration with the generated kernel path
+
+### 3. Threadgroup-memory pressure matters as much as raw reuse
+
+The accepted `6144` buffer-precision staging win and the rejected `square` / `8192` copies of the same idea show that "more float staging" is not a universally good rule on Apple GPU.
+
+What the accepted results suggest:
+
+- reducing threadgroup-local footprint can help more than increasing local reuse
+- occupancy and residency effects are visible across neighboring hot kernels
+- the right staging policy is family-specific, not global
+
+Implication:
+
+- exact-shape families need explicit staging policy
+- future tuning should preserve that policy boundary instead of collapsing back to one generic GEMV path
+
+### 4. Dispatch count still matters, but only after kernel quality is good enough
+
+The optimizer comparison moved over time:
+
+- early on, fewer dispatches were the main visible win
+- later, `standard` could outperform `aggressive`
+- after full argbuf coverage and exact-shape BF16 improvements, `aggressive` recovered and became best again
+
+Interpretation:
+
+- dispatch reduction is necessary but not sufficient
+- once the dominant kernels are under-tuned, more fusion can hide or amplify the wrong costs
+- once kernel-body quality improves enough, the lower-dispatch plan wins again
+
+Implication:
+
+- optimizer strategy should be evaluated after kernel-family changes, not in isolation
+- the next frontier is still kernel quality first, optimizer policy second
+
+### 5. The output head is no longer a top-tier bottleneck
+
+Earlier in the report, `gemv_vocab_bf16` was a major hot step. After shape-family specialization and argbuf migration, it dropped behind the exact-shape `2048` projection families by a large margin.
+
+Implication:
+
+- `lm_head` is no longer the best next target
+- time spent there is less likely to beat work on `2048 -> 6144` and `2048 -> 2048`
+
+## Where The Next Wins Are Likely
+
+The highest-probability next compiler work is:
+
+1. family-specific weight/read-path tuning for `gemv_2048_6144_bf16_argbuf`
+2. the same for `gemv_2048_sq_bf16_argbuf`
+3. only then, a revisit of `fused_swiglu_projection_2048_bf16_argbuf`
+
+The report so far argues against spending the next round on:
+
+- flash attention
+- broader launch-width sweeps
+- more argument-buffer migration
+- global staging-policy changes
+- generic exact-shape clones for already-small families
+
+The data points instead to a narrow conclusion:
+
+- the backend is structurally in the right shape
+- the remaining performance problem is concentrated in two BF16 exact-shape GEMV kernels
+- the likely path forward is weight-layout and weight-read-path work, not more planner work
+
+## Why These Kernels Dominate
+
+The current bottleneck is not accidental. The dominant exact-shape families combine all of the expensive properties at once:
+
+- they run many times per token
+- they are dense BF16 projections
+- they sit on the decode hot path
+- they still pay BF16 weight-conversion cost in the inner loop
+- they are large enough to stress bandwidth and local-memory policy, but small enough that occupancy mistakes still matter
+
+In practice that means:
+
+- `gemv_2048_sq_bf16_argbuf`
+  - is frequent enough that even modest per-call overhead compounds
+- `gemv_2048_6144_bf16_argbuf`
+  - has enough output work that each invocation is expensive on its own
+- together
+  - they dominate both by frequency and by cost per invocation
+
+This is why work on:
+
+- argument-buffer coverage
+- launch-family cleanup
+- residual/norm cleanup
+
+still left the decode profile dominated by these two kernels. Those earlier changes removed surrounding overhead; they did not change the underlying BF16 projection cost.
+
+## What The Rejected Experiments Mean
+
+The rejected experiments are useful because they narrow the problem.
+
+### 1. The bottleneck is not "just widen launch"
+
+Rejected launch sweeps showed that:
+
+- wider threadgroups can make the hottest kernels slower
+- narrower launches can help one kernel but hurt the aggregate
+- once exact-shape specialization is in place, launch is already near a local optimum
+
+Meaning:
+
+- the remaining problem is inside the kernel body and memory path, not the gross launch shape
+
+### 2. The bottleneck is not "just use more threadgroup float staging"
+
+The accepted and rejected staging experiments showed a mixed pattern:
+
+- `2048 -> 6144` improved with buffer-precision staging
+- `2048 -> 2048` regressed with the same change
+- `2048 -> 8192` regressed with the same change
+- `8192 -> 2048` preferred the existing tiled float-staged path over broader local staging
+
+Meaning:
+
+- Apple GPU performance here is constrained by occupancy and threadgroup-local footprint as much as by raw reuse
+- there is no single global staging rule for decode GEMV
+- staging must remain explicit at the exact-shape family level
+
+### 3. The bottleneck is not arithmetic-expression choice alone
+
+Multiple narrow rewrites failed to produce stable aggregate gains:
+
+- `dot(...)` vs scalar multiply-add
+- `fma(...)` substitutions
+- pointer-increment accumulation
+- fixed-iteration loop rewrites
+- more aggressive inner-loop unroll on already-hot families
+
+Meaning:
+
+- the cost center is not just ALU instruction selection
+- the dominant issue is likely the weight-read / conversion path and the pressure it creates on the memory subsystem
+
+### 4. The bottleneck is no longer binding infrastructure
+
+The argbuf migration was successful:
+
+- decode is fully `argEncoded`
+- prepared tail is `0`
+- resident constants were pruned from the hottest encoded steps
+
+Meaning:
+
+- binding/backend work produced real gains
+- but it has now hit diminishing returns
+- the next large win is unlikely to come from more dispatch-plan or binding-table refactoring
+
+## Root-Cause Hypothesis
+
+The current evidence supports a narrow root-cause hypothesis:
+
+- decode throughput is now limited primarily by BF16 dense weight access in the exact-shape `input=2048` families
+- the cost is not only reading bytes from memory
+- it is the combination of:
+  - row-wise BF16 fetch
+  - BF16-to-float decode
+  - address generation
+  - threadgroup-local staging policy
+  - occupancy sensitivity on Apple GPU
+
+That hypothesis explains all of the observed behavior:
+
+- exact-shape specialization helps
+- argbuf helps
+- family-specific staging helps in some shapes and hurts in others
+- launch sweeps do not create consistent wins
+- arithmetic micro-tuning does not move the aggregate enough
+
+## Next Compiler-Only Experiments
+
+The next experiments should be ordered by how directly they attack the current root cause.
+
+### 1. `gemv_2048_6144_bf16_argbuf` family-specific weight-read mode
+
+Goal:
+
+- keep the same logical tensor layout
+- change only how that family reads BF16 weights in the inner loop
+
+Reason:
+
+- this is the hottest single family
+- it already proved sensitive to staging policy
+- it is the best candidate for a narrow, measurable read-path specialization
+
+### 2. `gemv_2048_sq_bf16_argbuf` family-specific weight-read mode
+
+Goal:
+
+- repeat the same style of experiment for the square family only after `6144` has a clear result
+
+Reason:
+
+- it is the second largest cost center
+- but the earlier staging experiments showed it responds differently from `6144`
+- it should not inherit the `6144` policy by default
+
+### 3. Family-specific BF16 weight layout, if read-path tuning stalls
+
+Goal:
+
+- test whether the current row-major BF16 STAF layout is itself the limiting factor for the hottest exact-shape decode families
+
+Reason:
+
+- repeated micro-tuning failures suggest the compiler may be near the limit of what it can get from the current layout
+- if so, the next real gain must come from how weights are stored, not only how they are read
+
+### 4. Only after that, revisit `fused_swiglu_projection_2048_bf16_argbuf`
+
+Reason:
+
+- it is the largest secondary hot family
+- but it is still clearly below the combined cost of the two exact-shape GEMV kernels
+- it should not displace work on the true bottleneck
+
 ## Architecture Under Test
 
 Compiler path:
@@ -600,6 +1039,9 @@ Rejected changes:
 - switching exact `gemv_2048_6144(_bf16)` to non-float staged input tiles
 - forcing pointer-increment accumulation only for exact `gemv_2048_6144(_bf16)`
 - pointer-increment tile staging for `vocabDense`
+- replacing the exact `gemv_2048_6144_bf16_argbuf` input-side scalar pair reads with `half2` loads
+- prepacking exact `gemv_2048_6144_bf16_argbuf` weights into an 8-row/128-element blocked layout
+- repeating that `8-row/128-element` blocked layout through the formal STAF/store-side specialized access path
 
 Observed result:
 
@@ -608,6 +1050,9 @@ Observed result:
   - `gemv_2048_8192_bf16`
   - `gemv_8192_tiled_bf16`
   - `gemv_vocab_bf16`
+- the formal store-side blocked-layout path also failed correctness immediately:
+  - decode step `0` argmax flipped from Python `521` to Metal `2`
+  - conv-state drift spiked in the first decode step
 
 Interpretation:
 
@@ -2003,6 +2448,222 @@ Interpretation:
 - for this shape, the existing `gemv_8192_tiled_bf16_argbuf` family is better than a narrower exact-shape clone
 - exact-shape splitting is therefore not a universal rule; it must be justified per family by measured wins, not by symmetry with other shapes
 
+## Accepted Tuning: `gemv_2048_6144_bf16_argbuf` Pointer-Input Pairwise Read
+
+Hypothesis:
+
+- after the exact-shape BF16 argbuf family moved to `ushort2` weight reads, `gemv_2048_6144_bf16_argbuf` was still the single largest decode bottleneck
+- this family stages input in buffer precision rather than `float`
+- if the pairwise BF16 path reads staged input through a moving pointer instead of repeated `inputTile[j + offset]` indexing, it should reduce address-generation overhead without changing layout, launch, or accumulation semantics
+
+Compiler change:
+
+- add `Input2048BF16ArgumentReadPolicy.pairwisePointerInput`
+- enable it only for the `2048 -> 6144` BF16 exact-shape family
+- in the argbuf kernel variant, keep:
+  - row-major weights
+  - pairwise `ushort2` BF16 weight reads
+  - existing accumulation order
+- only replace indexed staged-input reads with `threadgroup const <bt>* inputLane` pointer advancement
+
+Observed result:
+
+- reference comparison still passed unchanged:
+  - prefill parity unchanged
+  - decode drift signature unchanged
+  - step 1 remained `Python 2944 / Metal 859`
+- optimizer comparison improved over the previous accepted baseline:
+  - `none 116.2`
+  - `standard 123.2`
+  - `aggressive 125.8`
+- per-step decode total moved to:
+  - `3774 us`
+
+Per-step result:
+
+- the decode bottleneck remained the same family:
+  - `gemv_2048_6144_bf16_argbuf: 43.1%`
+  - `gemv_2048_sq_bf16_argbuf: 35.6%`
+- the change was still worth keeping because aggregate decode throughput improved while preserving parity
+
+Interpretation:
+
+- for the `6144` exact-shape BF16 family, reducing input-side address generation helps even when the weight layout stays row-major
+- this is a narrow family-specific win, not evidence that pointer-style accumulation should be generalized everywhere
+
+## Accepted Tuning: `gemv_2048_sq_bf16_argbuf` Float-Pointer Pairwise Read
+
+Hypothesis:
+
+- after the `6144` family win, the next largest decode bottleneck was `gemv_2048_sq_bf16_argbuf`
+- unlike `6144`, the square family stages input as `float`
+- if its pairwise BF16 path reads staged input through a moving `float*` rather than repeated indexed accesses, it should cut address-generation cost while preserving the more accurate float-staged activation path
+
+Compiler change:
+
+- add `Input2048BF16ArgumentReadPolicy.pairwisePointerFloatInput`
+- enable it only for the BF16 square exact-shape family
+- in the argbuf kernel variant:
+  - keep row-major weights
+  - keep pairwise `ushort2` BF16 weight reads
+  - keep float staging
+  - replace indexed `inputTile[j + offset]` reads with `threadgroup const float* inputLane`
+
+Observed result:
+
+- reference comparison still passed unchanged:
+  - prefill parity unchanged
+  - decode drift signature unchanged
+  - step 1 remained `Python 2944 / Metal 859`
+- focused decode benchmark:
+  - `standard 124.5 tok/s`
+  - `aggressive 127.9 tok/s`
+- optimizer comparison:
+  - `none 111.3`
+  - `standard 124.7`
+  - `aggressive 127.4`
+
+Per-step result:
+
+- total decode time improved again:
+  - `3774 us -> 3717 us`
+- family-level effects:
+  - `gemv_2048_6144_bf16_argbuf: 1603 us`
+  - `gemv_2048_sq_bf16_argbuf: 1339 us`
+  - `fused_swiglu_projection_2048_bf16_argbuf: 249 us`
+
+Interpretation:
+
+- the square family benefits from the same general idea as `6144`, but it needs a different staging-aware read mode
+- this reinforces the main compiler conclusion of the current phase:
+  - the remaining decode frontier is exact-shape family policy and kernel-body quality, not generic GEMV tuning
+
+## Rejected Tuning: Rows-8 Row-Major Pairwise Weight Addressing
+
+Hypothesis:
+
+- the exact-shape `rowsPerThreadgroup = 8` families already fix row scheduling at compile time
+- if the row-major pairwise BF16 path computes weight addresses as `gid * 8192 + sgitg * 1024 + tiisg * pairCount` instead of `(row * 2048) + ...`, it may reduce address-generation cost further for both:
+  - `gemv_2048_sq_bf16_argbuf`
+  - `gemv_2048_6144_bf16_argbuf`
+
+Compiler change:
+
+- keep row-major layout and pairwise BF16 weight reads unchanged
+- change only the initial `weightLane` address calculation for fixed `rowsPerThreadgroup = 8` exact-shape families
+
+Observed result:
+
+- reference comparison still passed unchanged:
+  - prefill parity unchanged
+  - decode drift signature unchanged
+  - step 1 remained `Python 2944 / Metal 859`
+- but aggregate performance regressed:
+  - `none 116.9`
+  - `standard 120.8`
+  - `aggressive 122.9`
+- per-step decode total worsened to:
+  - `3828 us`
+
+Per-step result:
+
+- `gemv_2048_6144_bf16_argbuf` improved slightly in isolation:
+  - `1603 us -> 1577 us`
+- but `gemv_2048_sq_bf16_argbuf` and the rest of the decode path worsened enough that the aggregate lost:
+  - `1339 us -> 1411 us` for the square family
+
+Interpretation:
+
+- even when the algebra is equivalent, a more explicit rows-8 row-major address formula is not automatically a win on Apple GPU
+- this is another example of why exact-shape compiler work has to stay empirical:
+  - address expressions that look simpler on paper can still hurt aggregate throughput
+
+## Rejected Tuning: `gemv_2048_sq_bf16_argbuf` BF16 Unroll Reduction
+
+Hypothesis:
+
+- the hot-family microbench showed that `gemv_2048_sq_bf16_argbuf` was still more expensive per output element than `gemv_2048_6144_bf16_argbuf`
+- the square family differs mainly by:
+  - float-staged input
+  - a larger `unrollFactor`
+- if BF16 square reduced `unrollFactor` from `8` to `4`, register pressure might fall enough to improve the square family without changing layout or parity
+
+Compiler change:
+
+- keep:
+  - row-major layout
+  - float staging
+  - pairwise pointer-float input reads
+- change only the BF16 square exact-shape family:
+  - `unrollFactor: 8 -> 4`
+
+Observed result:
+
+- reference comparison still passed unchanged:
+  - prefill parity unchanged
+  - decode drift signature unchanged
+  - step 1 remained `Python 2944 / Metal 859`
+- but the hot-family microbench regressed clearly:
+  - target-family total:
+    - `2783 us -> 3192 us`
+  - family split:
+    - `gemv_2048_6144_bf16_argbuf: 1504 us -> 1616 us`
+    - `gemv_2048_sq_bf16_argbuf: 1279 us -> 1576 us`
+- aggregate optimizer comparison also failed to justify the change:
+  - `none 117.0`
+  - `standard 120.6`
+  - `aggressive 123.8`
+
+Interpretation:
+
+- the square family’s higher normalized cost is not explained by excess unroll alone
+- reducing unroll weakened both the square family and the broader exact-shape frontier
+- this is exactly the type of hypothesis the new hot-family microbench is meant to reject early
+
+## Rejected Tuning: `input20486144Dense` Packed-UInt BF16 Read
+
+Hypothesis:
+
+- `gemv_2048_6144_bf16_argbuf` is the dominant exact-shape family
+- it is memory-bound and still uses row-major BF16 weights
+- replacing `ushort2` pairwise reads with 32-bit packed BF16 loads should keep the same bytes and layout while reducing the weight-read instruction shape
+
+Change:
+
+- add a packed 32-bit BF16 decode helper in the generated source
+- switch only the `2048 -> 6144` BF16 exact-shape argbuf family to the packed-uint read policy
+- keep:
+  - row-major layout
+  - the accepted buffer-precision input staging
+  - the existing launch shape and rows-per-threadgroup
+
+Result:
+
+- correctness was preserved:
+  - `ReferenceComparisonTests` passed
+  - decode drift fingerprint remained the same:
+    - `step 1: Python 2944 / Metal 859`
+- performance regressed:
+  - optimizer comparison:
+    - `none 109.8 tok/s`
+    - `standard 114.3 tok/s`
+    - `aggressive 115.9 tok/s`
+  - per-step decode total:
+    - `4184 us`
+  - hot exact-shape GEMV microbench:
+    - total: `3207 us`
+    - `gemv_2048_6144_bf16_argbuf: 1746 us`
+    - `gemv_2048_sq_bf16_argbuf: 1462 us`
+
+Interpretation:
+
+- for the hot `2048 -> 6144` decode family, changing the read instruction from `ushort2` to packed `uint` does not help even when the layout and bytes are unchanged
+- the dominant cost is therefore not just "load two BF16 values with fewer source-level objects"
+- the next useful hypotheses should target:
+  - family-specific weight-read path structure
+  - weight layout at the store/contract level
+  - or higher-level memory-system effects, not just scalar-vs-packed read syntax
+
 ## Recommended Next Compiler Work
 
 1. Prioritize the shape-specialized decode GEMV families.
@@ -2027,6 +2688,231 @@ Interpretation:
    - Generic tuning is unlikely to beat focused GEMV/GEMM improvements now.
    - Concrete next targets are deeper fixed-shape kernel-body specialization and better `vocabDense` treatment.
 
+## Measurement Discipline Going Forward
+
+The current decode work reached a point where whole-request throughput is noticeably noisier than the hottest kernel families themselves. That changes how compiler experiments should be judged.
+
+Current measurement stack:
+
+- correctness gate:
+  - `ReferenceComparisonTests`
+- decode-family gate:
+  - per-step decode profiling
+  - hot exact-shape GEMV family microbench
+- aggregate confirmation:
+  - optimizer comparison benchmark
+
+Current hot-family microbench result:
+
+- total hot exact-shape GEMV time:
+  - `2680 us`
+- split:
+  - `gemv_2048_6144_bf16_argbuf: 1475 us (55.0%)`
+  - `gemv_2048_sq_bf16_argbuf: 1205 us (45.0%)`
+
+Interpretation:
+
+- the dominant frontier is now narrow enough that family-level microbenchmarks are more informative than aggregate request-level throughput alone
+- from this point on, compiler tuning should be accepted only when it:
+  - preserves reference parity
+  - improves the relevant hot-family microbench
+  - does not regress aggregate optimizer comparison in a clearly material way
+
+## Latest Failure Boundary
+
+The most important recent result is not a speedup but a narrowing of the failure boundary for specialized decode layouts.
+
+Established facts:
+
+- the blocked `8x128` BF16 pack order is correct
+- direct GPU reads of the packed blocked buffer are correct
+- the standalone blocked `2048 -> 6144` BF16 GEMV matches row-major on all real hot tensors
+- the immediate conv consumer chain also matches row-major
+- the full isolated conv operator chain (`in_proj -> conv_state_update -> out_proj`) still matches row-major
+- a derived `STAFWeightStore` that registers many specialized blocked accesses still preserves that isolated operator-chain behavior
+
+New compiler-level result:
+
+- after adding a generic `ProjectionWeightAccessPolicyOverride`, forcing only a single hot decode tensor to use blocked layout still changes the first decode token from the baseline (`521 -> 2`)
+
+Interpretation:
+
+- the failure is no longer attributable to:
+  - blocked pack order
+  - BF16 blocked GEMV math in isolation
+  - a single specialized tensor buffer being unreadable
+  - the isolated conv operator chain
+- the remaining problem lies in full compiled decode orchestration or full-plan specialization interaction
+- this is exactly why layout choice must remain a generic compiler/store contract rather than product-specific ad hoc code: the bug boundary is now at the contract level, not at one kernel body
+
+Implication for next work:
+
+- do not continue blind micro-tuning on blocked layout
+- use the new generic override path to isolate full-plan specialization interactions
+- prioritize row-major hot-family read-path work until the full-plan blocked-layout contract is proven safe
+
+## Latest Contract Fix
+
+The full-plan specialization failure boundary is now narrower again.
+
+Root cause:
+
+- specialized weight access and emitted kernel contract were not using the same effective layout source
+- a decode step could request a blocked specialized buffer while still resolving to a row-major exact-shape kernel family name in the encoded argument-buffer path
+
+Fix:
+
+- exact-shape `input2048` source policy is now resolved from the same access-policy resolver used by the `STAFWeightStore`
+- the effective layout comes from resolved buffer access, not just the requested preference
+- blocked exact-shape kernel names now propagate through argument-buffer variant selection, so `prepared` fallback no longer silently routes them back through the row-major encoded path
+
+Validation:
+
+- `single decode tensor override preserves first decode tokens` now passes
+- `GeneratedLibraryTests` reports:
+  - `decode steps=147`
+  - `argTable=147`
+  - `argPrepared=0`
+  - `argEncoded=147`
+  - `residentConst=115`
+- `ReferenceComparisonTests` still preserve the known decode drift fingerprint:
+  - `step 1: Python 2944 / Metal 859`
+
+Interpretation:
+
+- the blocked-layout idea itself was not disproven
+- the failing component was the generic compiler/store contract that decided which kernel family matched a resolved specialized buffer
+- this is an architectural result, not a product-specific workaround: layout selection must remain a backend contract shared by store access, kernel naming, source generation, and argument-buffer encoding
+
+Current performance snapshot after the accepted `2048 -> 6144` row-major contiguous-read change:
+
+- optimizer comparison:
+  - `none: 125.0 tok/s`
+  - `standard: 130.5 tok/s`
+  - `aggressive: 133.0 tok/s`
+- per-step decode profile:
+  - total `3320 us`
+  - `gemv_2048_6144_bf16_argbuf: 1465 us (44.1%)`
+  - `gemv_2048_sq_bf16_argbuf: 1215 us (36.6%)`
+
+Latest rejected follow-up:
+
+- applying the same idea to the square family via `packed8PointerFloatInput` preserved parity but regressed both hot-family microbench and aggregate throughput
+- rejected result:
+  - optimizer comparison:
+    - `none: 122.6 tok/s`
+    - `standard: 127.6 tok/s`
+    - `aggressive: 126.3 tok/s`
+  - hot exact-shape GEMV microbench:
+    - total `2980 us`
+    - `gemv_2048_6144_bf16_argbuf: 1630 us`
+    - `gemv_2048_sq_bf16_argbuf: 1350 us`
+- interpretation:
+  - the contiguous `ushort4` row-major read is a real win for `2048 -> 6144`
+  - the square family has a different staging/read balance and should not inherit the same read mode blindly
+- a narrower follow-up, `packed4PointerFloatInput`, also failed:
+  - parity remained intact
+  - but hot exact-shape GEMV microbench regressed to `3112 us`
+  - split:
+    - `gemv_2048_6144_bf16_argbuf: 1590 us`
+    - `gemv_2048_sq_bf16_argbuf: 1522 us`
+  - per-step decode total worsened to `3831 us`
+  - optimizer comparison became unstable and failed acceptance, so the change was reverted
+- a square-only occupancy follow-up, lowering `rowsPerThreadgroup` and `preferredSimdgroups` from `8` to `4`, also failed:
+  - parity remained intact
+  - but per-step decode total worsened to `3644 us`
+  - hot exact-shape GEMV microbench regressed to `2922 us`
+  - split:
+    - `gemv_2048_6144_bf16_argbuf: 1578 us`
+    - `gemv_2048_sq_bf16_argbuf: 1344 us`
+  - optimizer comparison collapsed to `none 124.7 / standard 123.0 / aggressive 49.4 tok/s`
+  - interpretation:
+    - the square family is not limited by insufficient row parallelism at the current launch shape
+    - reducing square occupancy hurts aggregate decode even when correctness is preserved
+- a formal store-side blocked-layout override for all decode `2048 -> 6144` BF16 projections also failed:
+  - in the dedicated diagnostic benchmark, baseline tokens were `[2, 2, 2, 0]`
+  - the blocked override diverged immediately as `[2, 521, 521, 1198]`
+  - `gemv_2048_6144_bf16_argbuf` hot-family microbench worsened from `2871 us` to `4145 us`
+  - delta: `+1274 us` (`+44.4%`)
+  - interpretation:
+    - the current `blockedRows8Tiles128` layout does not satisfy the full compiled decode contract for these projections
+    - even as a pure performance experiment, it is materially slower than row-major on the current kernel family
+- a row-major `6144`-only input-tile pointer-increment load also failed:
+  - hypothesis:
+    - `gemv_2048_6144_bf16_argbuf` is memory-bound, so reducing input-side tile-load address generation might lower integer overhead without changing launch shape or layout
+  - implementation:
+    - keep the accepted `packed4PointerInput` weight-read path
+    - change only the input tile staging loop to a pointer-increment load for the `2048 -> 6144` exact-shape family
+  - result:
+    - optimizer comparison regressed to `none 107.7 / standard 121.8 / aggressive 119.2 tok/s`
+    - per-step decode total regressed to `3842 us`
+    - hot exact-shape GEMV microbench regressed to `3020 us`
+    - split:
+      - `gemv_2048_6144_bf16_argbuf: 1645 us`
+      - `gemv_2048_sq_bf16_argbuf: 1375 us`
+  - interpretation:
+    - for the accepted row-major `6144` family, the remaining cost is not improved by changing input tile staging
+    - the next read-path work should stay on the weight side, not the input-side staging loop
+- a square-only fixed-iteration pairwise float-input loop also failed:
+  - hypothesis:
+    - `gemv_2048_sq_bf16_argbuf` might benefit from the same loop-control reduction that helped the `6144` family, while keeping the accepted row-major pairwise float-input read structure unchanged
+  - implementation:
+    - keep `pairwisePointerFloatInput` semantics
+    - change only the square-family BF16 pairwise loop to a fixed-iteration form
+  - result:
+    - optimizer comparison moved to `none 126.4 / standard 133.3 / aggressive 136.8 tok/s`
+    - hot exact-shape GEMV microbench regressed from `2477 us` to `2739 us`
+    - split:
+      - `gemv_2048_sq_bf16_argbuf: 1374 us`
+      - `gemv_2048_6144_bf16_argbuf: 1365 us`
+  - interpretation:
+    - the square family is not limited by pairwise-loop control overhead in the same way as the `6144` family
+    - the accepted `6144` fixed-iteration win does not generalize across exact-shape families
+- a `6144`-only split-accumulator variant was tested and rejected:
+  - hypothesis:
+    - after the accepted fixed-iteration `ushort4` path, the next remaining cost in `gemv_2048_6144_bf16_argbuf` might be the serial add dependency chain
+  - implementation:
+    - keep the same row-major `ushort4` read path and loop shape
+    - split the four MACs per iteration across two accumulators, then merge before `simd_sum`
+  - result:
+    - single runs sometimes improved slightly, but repeated validation was not stable
+    - the hot-family microbench drifted back into the same noise band as the baseline
+  - interpretation:
+    - the effect is too small and unstable to justify keeping the extra kernel complexity
+    - this confirms that the accepted `packed4FixedPointerInput` path is the right stopping point for this branch
+- a square-family split-accumulator variant also failed:
+  - hypothesis:
+    - `gemv_2048_sq_bf16_argbuf` might benefit from the same dependency-chain reduction, while keeping its accepted pairwise float-input read path
+  - implementation:
+    - keep the same `ushort2` pairwise read path and loop shape
+    - split accumulation across two partial sums
+  - result:
+    - correctness was preserved
+    - but the hot exact-shape GEMV microbench regressed from the accepted band into a slower `~2.52 ms` run, with square-family time increasing
+  - interpretation:
+    - the square family is not bottlenecked by the accumulation dependency chain in the same way
+    - further square-family work should focus on read structure, not accumulator count
+- a generic vectorized BF16 conversion helper also failed acceptance:
+  - hypothesis:
+    - if the remaining exact-shape BF16 cost includes per-element BF16-to-F32 conversion overhead, replacing the scalar helper expansion in `bf16x2_to_float2` and `bf16x4_to_float4` with vector bitcast conversion should help the hot row-major decode families without introducing family-specific logic
+  - implementation:
+    - keep all kernel families, launch shapes, and read policies unchanged
+    - change only the shared conversion helpers to use `uint2/uint4 << 16` plus `as_type<float2/float4>`
+  - result:
+    - correctness was preserved
+    - but repeat benchmark runs stayed within noise and did not produce a stable gain over the accepted baseline
+    - one repeat measured `Hot Exact-Shape GEMV` at `2699 us`, which is worse than the accepted band
+    - aggregate decode throughput also failed to improve materially enough to justify a global helper change
+  - interpretation:
+    - the current hotspot is not limited by scalar BF16 helper expansion alone
+    - the next useful work should stay on family-specific read structure, not generic helper rewriting
+
+Implication for next work:
+
+- the dominant problem remains exact-shape BF16 GEMV kernel-body quality
+- optimizer choice is no longer the first-order issue in the current state
+- next experiments should stay focused on family-specific row-major read paths for `2048 -> 6144` and `2048 -> 2048`
+
 ## Non-Goals For This Report
 
 These topics were explored during the same work session, but they are runtime/API concerns rather than compiler optimizations:
@@ -2040,9 +2926,697 @@ They may matter more for end-user latency, but they are intentionally excluded f
 ## Summary
 
 - The compiler currently helps most on decode, not prefill.
-- `AggressiveOptimizer` is the best current default for the compiled decode path.
+- Optimizer policy is no longer the first-order issue; current runs put `standard` and `aggressive` close enough that kernel quality matters more than fusion policy.
 - The newest decode GEMV tile/staging adjustment improved throughput while preserving reference behavior.
 - The next compiler gains are most likely to come from projection kernels, not attention kernels.
-- `AggressiveOptimizer` reduces decode dispatches from `179` to `128` and improves focused steady-state decode throughput.
+- The full decode plan now runs with `147/147` argument-buffer-encoded steps and no prepared tail.
 - The generated decode path is dominated by shape-specialized decode GEMV families, not attention.
 - The next compiler optimization target should be projection-kernel quality and projection-oriented lowering, not tokenizer, streaming, or attention micro-tuning.
+
+## Post-Metadata Validation Reruns
+
+After the STAF metadata/provenance work landed, `BenchmarkTests` was rerun three times to check whether the lower decode throughput numbers were a real hot-path regression or just benchmark noise.
+
+Observed reruns:
+
+- run 1:
+  - optimizer comparison: `none 125.5 / standard 130.1 / aggressive 131.2 tok/s`
+  - per-step total: `3175 us`
+  - hot exact-shape GEMV: `2518 us`
+  - split:
+    - `gemv_2048_6144_bf16_argbuf: 1306 us`
+    - `gemv_2048_sq_bf16_argbuf: 1212 us`
+- run 2:
+  - optimizer comparison: `none 122.1 / standard 128.2 / aggressive 125.6 tok/s`
+  - per-step total: `3329 us`
+  - hot exact-shape GEMV: `2687 us`
+  - split:
+    - `gemv_2048_6144_bf16_argbuf: 1387 us`
+    - `gemv_2048_sq_bf16_argbuf: 1300 us`
+- run 3:
+  - optimizer comparison: `none 119.9 / standard 120.8 / aggressive 132.4 tok/s`
+  - per-step total: `3419 us`
+  - hot exact-shape GEMV: `2556 us`
+  - split:
+    - `gemv_2048_6144_bf16_argbuf: 1306 us`
+    - `gemv_2048_sq_bf16_argbuf: 1250 us`
+
+Median view:
+
+- optimizer comparison: `none 122.1 / standard 128.2 / aggressive 131.2 tok/s`
+- per-step total: `3329 us`
+- hot exact-shape GEMV total: `2556 us`
+
+Interpretation:
+
+- end-to-end decode throughput is currently below the earlier accepted `~133 / ~136 tok/s` band
+- but the hot exact-shape GEMV microbench and per-step totals are not worse in the same proportion, and are in some reruns slightly better than the older accepted totals
+- this suggests the STAF metadata/provenance work did not create a clear decode-kernel regression
+- the throughput drop is real at the suite-output level, but the current evidence points to run-to-run variance or benchmark-state effects outside the exact-shape GEMV hot loop
+
+Working conclusion:
+
+- do not attribute the lower throughput numbers to the metadata implementation without a stronger A/B
+- keep the accepted kernel baseline
+- continue compiler work on `gemv_2048_6144_bf16_argbuf` and `gemv_2048_sq_bf16_argbuf`
+- if throughput acceptance tightens further, add a repeated-run benchmark harness and compare medians rather than single suite outputs
+
+## Follow-Up Row-Stream Rejections
+
+Two additional row-stream hypotheses were tested after the benchmark harness cleanup. Both were rejected and reverted immediately.
+
+- square family `2048 -> 2048`
+  - hypothesis:
+    - increase `rowsPerThreadgroup` / `preferredSimdgroups` from `8` to `16`
+    - amortize float-staged input over more rows
+  - result:
+    - per-step decode profile: `gemv_2048_sq_bf16_argbuf 1657 us`
+    - hot exact-shape GEMV total: `3075 us`
+    - optimizer comparison: `none 119.5 / standard 123.5 / aggressive 130.4 tok/s`
+    - aggressive single decode: `127.5 tok/s`
+  - interpretation:
+    - square-family kernel time improved locally, but aggregate decode throughput regressed
+    - the larger row group hurt the surrounding decode balance enough to fail acceptance
+
+- expanded family `2048 -> 6144`
+  - hypothesis:
+    - reduce `rowsPerThreadgroup` / `preferredSimdgroups` from `4` to `2`
+    - further lower simultaneous weight-row streams in the memory-bound hot family
+  - result:
+    - per-step decode profile: `gemv_2048_6144_bf16_argbuf 1874 us`
+    - hot exact-shape GEMV total: `3618 us`
+    - optimizer comparison: `none 112.4 / standard 121.0 / aggressive 126.2 tok/s`
+    - aggressive single decode: `125.0 tok/s`
+  - interpretation:
+    - `4` rows/threadgroup was already near the local optimum for the current row-major `packed4FixedPointerInput` path
+    - dropping to `2` doubled grid pressure and clearly regressed the dominant hot family
+
+Current accepted row-stream policy therefore remains:
+
+- `2048 -> 2048`: `rowsPerThreadgroup = 8`
+- `2048 -> 6144`: `rowsPerThreadgroup = 4`
+
+Implication:
+
+- the next useful compiler work should stay on family-specific weight-side read structure
+- row-stream count sweeps are now largely exhausted for the two dominant exact-shape BF16 argbuf families
+
+## Square Blocked Boundary
+
+The current `blockedRows8Tiles128` story for the square `2048 -> 2048` family is now localized more precisely.
+
+- isolated hot-family benchmark:
+  - overriding all square decode tensors to `blockedRows8Tiles128` still cuts the square-family microbench roughly in half
+  - latest clean rerun:
+    - baseline: `1318 us`
+    - specialized: `630 us`
+    - delta: `-52.2%`
+- but decode correctness still breaks immediately:
+  - baseline tokens: `[2, 521, 859, 1595]`
+  - specialized tokens: `[2, 7, 521, 521]`
+
+The important new boundary is that this is not a blanket square-family failure.
+
+- single-tensor override results:
+  - a single square `q_proj` override to `blockedRows8Tiles128` preserved the next decode token
+  - but the same single square `q_proj` override changed a later decode token within three decode steps
+  - a single square `self_attn.out_proj` override changed the next decode token
+  - a single square `conv.out_proj` override also changed the next decode token
+- grouped override results:
+  - overriding all square `q_proj` tensors together also changed the next decode token
+  - prefix boundary for square `q_proj` tensors:
+    - prefix 1: preserved second token `521`
+    - prefix 2: preserved second token `521`
+    - prefix 3: preserved second token `521`
+    - prefix 4: changed second token to `63436`
+    - prefix 5: changed second token to `3421`
+    - prefix 6: changed second token to `730`
+  - but even grouped prefixes below that boundary were not rollout-safe:
+    - prefix 2 changed a later decode token within three decode steps
+    - prefix 3 changed a later decode token within three decode steps
+
+Interpretation:
+
+- the unsafe subset is on the square output-projection side, not on `q_proj` alone
+- but "safe q_proj" is only true if the acceptance criterion is only the next decode token
+- once multi-token decode is required, even a single blocked square `q_proj` override is not stable enough for mainline rollout
+- more precisely, the current blocked square contract remains stable for the first three `q_proj` tensors only at the second-token boundary, then breaks either immediately at prefix 4 or later within three decode steps at prefixes 1-3
+- this sharply narrows the next investigation:
+  - do not treat `blockedRows8Tiles128` as "square-family on/off"
+  - split square-family experiments by projection role
+  - split further by tensor grouping, not just role
+  - but do not promote any blocked square subset into mainline until later-token decode parity is demonstrated, not just second-token parity
+
+Working conclusion:
+
+- `blockedRows8Tiles128` still looks like a real performance opportunity for square decode
+- but the contract failure is role-specific
+- the currently unsafe subset appears to be square `out_proj`
+- and grouped `q_proj` overrides are not rollout-safe
+- more importantly, even the single-`q_proj` case is not stable enough over multiple decode steps
+- so `blockedRows8Tiles128` is not a decode-mainline candidate today; the mainline path stays row-major exact-shape GEMV until a stronger correctness contract exists
+
+## Accepted: 6144 Threadgroup-Row Base Read Path
+
+The next accepted improvement stayed entirely on the row-major mainline path.
+
+- change:
+  - add a dedicated BF16 read mode for the exact-shape `2048 -> 6144` argbuf family
+  - instead of deriving the row pointer from `row * 2048`, compute the row-major packed4 base as:
+    - `gid * 2048 + sgitg * 512 + tiisg`
+  - keep the current fixed-iteration packed4 loop and current launch policy
+- scope:
+  - only `gemv_2048_6144_bf16_argbuf`
+  - no square-family change
+  - no layout change
+  - no optimizer policy change
+
+Validation:
+
+- `xcodebuild build -scheme swift-lm-Package -destination 'platform=macOS'`
+- `xcodebuild test -scheme swift-lm-Package -destination 'platform=macOS' -only-testing:MetalCompilerTests/ReferenceComparisonTests`
+- `xcodebuild test -scheme swift-lm-Package -destination 'platform=macOS' -only-testing:MetalCompilerTests/BenchmarkTests`
+- `xcodebuild test -scheme swift-lm-Package -destination 'platform=macOS' -only-testing:MetalCompilerTests/BenchmarkDiagnosticsTests`
+
+Result:
+
+- correctness:
+  - `ReferenceComparisonTests` full pass
+  - known decode drift unchanged: `step 1 = Python 2944 / Metal 859`
+- clean benchmark acceptance:
+  - optimizer comparison: `none 129.2 / standard 131.8 / aggressive 136.5 tok/s`
+  - standard decode: `134.1 tok/s`
+  - aggressive decode: `137.1 tok/s`
+  - end-to-end decode: `128.7 tok/s`
+- diagnostics:
+  - per-step decode total: `3074 us`
+  - hot exact-shape GEMV total: `2479 us`
+  - `gemv_2048_6144_bf16_argbuf`: `1232 us`, `123.2 us/step`
+  - `gemv_2048_sq_bf16_argbuf`: `1247 us`, `56.7 us/step`
+
+Interpretation:
+
+- this is the strongest accepted evidence so far that `2048 -> 6144` is still leaving performance on the table in row-major address generation, not only in raw bandwidth
+- the gain came without touching square-family behavior, which is important because square blocked remains unsafe for decode rollout
+- the remaining primary bottleneck is now effectively split between:
+  - `gemv_2048_6144_bf16_argbuf`
+  - `gemv_2048_sq_bf16_argbuf`
+
+Next implication:
+
+- keep square blocked out of mainline
+- continue row-major family-specific work
+- next target should be the analogous weight-side address/read structure for `gemv_2048_sq_bf16_argbuf`
+
+## Rejected: Square Threadgroup-Row Base Read Path
+
+The analogous square-family change did not clear acceptance.
+
+- change:
+  - add a square-only BF16 read mode that rewrites the row-major pairwise base to threadgroup-row form
+  - intended form:
+    - `gid * 8192 + sgitg * 1024 + tiisg * pairCount`
+  - scope was limited to `gemv_2048_sq_bf16_argbuf`
+- result:
+  - `ReferenceComparisonTests` stayed green
+  - clean benchmark acceptance regressed slightly on the public path
+    - optimizer comparison: `none 127.6 / standard 132.1 / aggressive 135.5 tok/s`
+    - aggressive single decode: `135.5 tok/s`
+    - end-to-end decode: `128.4 tok/s`
+  - this did not beat the accepted baseline that already had the `2048 -> 6144` threadgroup-row base path
+
+Interpretation:
+
+- unlike `2048 -> 6144`, square-family row-base rewriting does not currently pay for itself
+- the next square-family work should target a different weight-side read structure, not just a different expression for the same row-major base
+
+## Rejected: Square Fixed-Simdgroup Source Policy
+
+The next square-family attempt kept the same runtime launch shape but encoded the current `8`-simdgroup assumption into the generated kernel source.
+
+- change:
+  - set `fixedSimdgroups = 8` for the exact-shape `2048 -> 2048` source policy
+  - keep the accepted square-family BF16 read mode:
+    - `pairwisePointerFloatInput`
+  - keep the accepted runtime planner launch shape unchanged
+- rationale:
+  - the square decode family already prefers `8` simdgroups in the dispatch planner
+  - making the generated kernel use a compile-time `threads_per_threadgroup = 256` should reduce staging-loop control overhead without changing correctness or backend contract
+- result:
+  - `ReferenceComparisonTests` stayed green
+  - known decode drift remained `step 1 = Python 2944 / Metal 859`
+  - but clean benchmark acceptance regressed:
+    - optimizer comparison: `none 127.0 / standard 130.5 / aggressive 132.2 tok/s`
+    - standard decode: `133.4 tok/s`
+    - aggressive decode: `136.7 tok/s`
+    - end-to-end decode: `130.4 tok/s`
+- interpretation:
+  - the square family does not benefit from baking the current planner simdgroup count into the source
+  - the remaining square-family cost is still in the weight-side address/read structure, not in dynamic `threadsPerThreadgroup` usage
+
+## Rejected: Square `packed4PointerFloatInput + unroll=4`
+
+The next square-family attempt combined the two previously promising axes into a single aggressive read-path change.
+
+- change:
+  - square BF16 exact-shape family only
+  - switch from:
+    - `pairwisePointerFloatInput`
+    - `unrollFactor = 8`
+  - to:
+    - `packed4PointerFloatInput`
+    - `unrollFactor = 4`
+- rationale:
+  - the earlier square `packed4` experiment likely paid too much register pressure at `unroll=8`
+  - the earlier square `unroll=4` experiment preserved the old pairwise read structure and did not reduce read instruction count
+  - combining `ushort4 × float4` with `unroll=4` was the natural missing interaction test
+- result:
+  - `ReferenceComparisonTests` full pass
+  - known decode drift unchanged: `step 1 = Python 2944 / Metal 859`
+  - clean benchmark acceptance was mixed but not good enough:
+    - optimizer comparison: `none 129.7 / standard 133.7 / aggressive 137.6 tok/s`
+    - standard decode: `134.5 tok/s`
+    - aggressive decode: `136.7 tok/s`
+    - end-to-end decode: `129.9 tok/s`
+  - diagnostics showed the real cost regression:
+    - per-step decode total: `3210 us`
+    - hot exact-shape GEMV total: `2658 us`
+    - `gemv_2048_sq_bf16_argbuf: 1422 us`
+    - `gemv_2048_6144_bf16_argbuf: 1236 us`
+- interpretation:
+  - the square family does not want the `ushort4` read structure, even after unroll pressure is reduced
+  - this closes the obvious `packed4` branch for square row-major BF16 argbuf kernels
+  - the next square-family work should move away from read-width experiments and back toward a different address/reuse structure
+
+## Rejected: Square Output-Only Source Policy Split
+
+The next square-family attempt split `2048 -> 2048` into two source policies using the existing semantic `isOutput` flag.
+
+- change:
+  - keep the accepted square-family baseline for non-output projections:
+    - `pairwisePointerFloatInput`
+    - `unrollFactor = 8`
+  - generate a second exact-shape square family only for output projections:
+    - `gemv_2048_sq_out(_bf16)(_argbuf)`
+    - `pairwisePointerFloatInput`
+    - `unrollFactor = 4`
+- rationale:
+  - `q_proj`-like square projections and output-side square projections do not have the same downstream interaction pattern
+  - a semantic split on `isOutput` is generic and avoids product-specific logic
+  - if output-side square projections wanted lower unroll pressure, the split would let us keep the accepted non-output path unchanged
+- result:
+  - `ReferenceComparisonTests` full pass
+  - known decode drift unchanged: `step 1 = Python 2944 / Metal 859`
+  - clean benchmark acceptance looked neutral-to-slightly-positive:
+    - optimizer comparison: `none 128.7 / standard 132.0 / aggressive 136.5 tok/s`
+    - standard decode: `133.0 tok/s`
+    - aggressive decode: `134.5 tok/s`
+    - end-to-end decode: `130.3 tok/s`
+  - diagnostics showed the real regression:
+    - per-step decode total: `3302 us`
+    - hot exact-shape GEMV total: `2717 us`
+    - `gemv_2048_6144_bf16_argbuf: 1273 us`
+    - square family total:
+      - `gemv_2048_sq_out_bf16_argbuf: 1103 us`
+      - `gemv_2048_sq_bf16_argbuf: 353 us`
+      - combined square total: `1456 us`
+- interpretation:
+  - splitting square kernels by `isOutput` does not improve the true bottleneck
+  - the throughput headline looked acceptable, but the dominant exact-shape GEMV total got worse than the accepted baseline
+  - square-family residual cost is still in the row-major weight-side address/read structure, not in a simple output-vs-non-output source split
+
+## Rejected: Square `out_proj`-Only Source Policy Split
+
+The next square-family attempt narrowed the previous split further and touched only semantic `out_proj` kernels.
+
+- change:
+  - keep the accepted square-family baseline for:
+    - `q_proj`
+    - `o_proj`
+  - generate a second exact-shape square family only for `out_proj`:
+    - `gemv_2048_sq_outproj(_bf16)(_argbuf)`
+    - `pairwisePointerFloatInput`
+    - `unrollFactor = 4`
+- rationale:
+  - square role breakdown shows:
+    - `out_proj`: 10 steps
+    - `q_proj`: 6 steps
+    - `o_proj`: 6 steps
+  - the previous `isOutput` split likely failed because it also changed `o_proj`
+  - `out_proj` alone was the largest semantic square subset and the cleanest next cut
+- result:
+  - `ReferenceComparisonTests` full pass
+  - known decode drift unchanged: `step 1 = Python 2944 / Metal 859`
+  - benchmark regressed badly:
+    - optimizer comparison: `none 129.1 / standard 133.7 / aggressive 137.4 tok/s`
+    - standard decode: `105.7 tok/s`
+    - aggressive decode: `131.8 tok/s`
+    - end-to-end decode: `101.5 tok/s`
+  - diagnostics showed a broad mainline slowdown:
+    - per-step decode total: `7110 us`
+    - hot exact-shape GEMV total: `2597 us`
+    - `gemv_2048_6144_bf16_argbuf: 1240 us`
+    - square family total:
+      - `gemv_2048_sq_outproj_bf16_argbuf: 1013 us`
+      - `gemv_2048_sq_bf16_argbuf: 1003 us`
+      - combined square total: `2016 us`
+- interpretation:
+  - `out_proj` is not a safe or beneficial semantic split point for square-family source policy
+  - even when correctness holds, this split destabilizes the broader decode mainline
+  - square-family work should stay on a single row-major family and target weight-side address/read structure, not semantic role partitioning
+
+## Rejected: Square `ushort4 x 2` Float-Input Read
+
+The next square-family attempt widened the accepted pairwise BF16 read shape without changing launch, staging, or family boundaries.
+
+- change:
+  - square BF16 exact-shape family only
+  - keep:
+    - row-major layout
+    - `rowsPerThreadgroup = 8`
+    - float-staged input
+    - `unrollFactor = 8`
+  - change only the weight-read shape from:
+    - `ushort2 x 4`
+  - to:
+    - `ushort4 x 2`
+- rationale:
+  - this was the narrowest remaining read-width experiment that preserved the accepted square-family loop structure
+  - if the square family was still instruction-bound on weight reads, collapsing four pairwise reads into two contiguous reads should help
+- result:
+  - `ReferenceComparisonTests` full pass
+  - known decode drift unchanged: `step 1 = Python 2944 / Metal 859`
+  - diagnostics regressed:
+    - hot exact-shape GEMV total: `2537 us`
+    - `gemv_2048_sq_bf16_argbuf: 1280 us`
+    - `gemv_2048_6144_bf16_argbuf: 1257 us`
+- interpretation:
+  - the square family does not want a broader `ushort4` read shape, even when loop form and staging remain fixed
+  - square-family residual cost is still better explained by row-major address/reuse structure than by raw BF16 read width
+
+## Rejected: `2048 -> 6144` `half4 + dot` Input Vectorization
+
+The next `6144`-family attempt kept the accepted packed4 row-major weight path and changed only the staged-input read shape.
+
+- change:
+  - `gemv_2048_6144_bf16_argbuf` only
+  - keep:
+    - accepted `packed4ThreadgroupFixedPointerInput`
+    - row-major layout
+    - `rowsPerThreadgroup = 4`
+    - `fixedSimdgroups = 4`
+  - change only the inner-loop input side from:
+    - four scalar `half` reads and scalar multiply-add
+  - to:
+    - one `half4` read and `dot(float4(weight), float4(input))`
+- rationale:
+  - after the accepted packed4 weight-path win, the remaining local overhead might have been on the threadgroup input-read side rather than the weight side
+- result:
+  - `ReferenceComparisonTests` full pass
+  - known decode drift unchanged: `step 1 = Python 2944 / Metal 859`
+  - diagnostics regressed slightly:
+    - `gemv_2048_6144_bf16_argbuf: 1257 us -> 1268 us`
+    - hot exact-shape GEMV total: `2544 us`
+- interpretation:
+  - the accepted packed4 `6144` path is not limited by scalar staged-input reads in a way that justifies vectorizing the input side
+  - further `6144` work should continue to target weight-side address structure, not `dot`-style input vectorization
+
+## Rejected: `fused_swiglu_projection_2048_bf16_argbuf` Packed4 Weight Read
+
+The next secondary-hotspot attempt targeted the exact-shape fused SwiGLU projection family directly.
+
+- change:
+  - `fused_swiglu_projection_2048_bf16(_argbuf)` only
+  - keep:
+    - exact-shape `2048` family
+    - accepted `unrollFactor = 8`
+    - buffer-precision staging
+    - the same launch policy
+  - change only the inner read structure from:
+    - scalar BF16 weight reads for `gateWeight` and `upWeight`
+  - to:
+    - `ushort4 x 2` packed BF16 reads for both weight streams
+    - `dot(...)` accumulation against two staged-input vectors
+- rationale:
+  - `fused_swiglu_projection_2048_bf16_argbuf` remained the only meaningful secondary hotspot after exact-shape GEMV
+  - because the kernel reads two independent BF16 weight streams (`gate` and `up`) over the same input tile, a wider packed read could reduce weight-read overhead more effectively than in the single-stream GEMV case
+- result:
+  - `ReferenceComparisonTests` full pass
+  - known decode drift unchanged: `step 1 = Python 2944 / Metal 859`
+  - diagnostics improved locally:
+    - per-step decode total: `6702 us`
+    - `fused_swiglu_projection_2048_bf16_argbuf: 1031 us -> 988 us`
+  - but clean throughput regressed:
+    - optimizer comparison: `none 126.5 / standard 130.8 / aggressive 135.0 tok/s`
+    - standard decode: `131.1 tok/s`
+    - aggressive decode: `135.0 tok/s`
+    - end-to-end decode: `126.7 tok/s`
+- interpretation:
+  - lowering the secondary hotspot in isolation was not enough; the packed4 SwiGLU read path interacts poorly with the broader decode mainline
+  - this branch should not be kept
+  - the next useful work should stay on the primary exact-shape GEMV bottlenecks, or revisit secondary hotspots only with stricter throughput acceptance
+
+## Rejected: Square Threadgroup-Fixed Row-Major Pairwise Base
+
+The next square-family attempt copied the accepted `6144` idea more literally: keep the same BF16 pairwise loop, but replace `row * 2048` addressing with a threadgroup-fixed row base.
+
+- change:
+  - `gemv_2048_sq_bf16_argbuf` only
+  - keep:
+    - row-major layout
+    - float staging
+    - `unrollFactor = 8`
+    - pairwise BF16 reads
+  - change only the weight-lane base from:
+    - `(args.weight + row * 2048u) + tiisg * 4`
+  - to:
+    - `gid * 8192u + sgitg * 1024u + tiisg * 4`
+- rationale:
+  - the accepted `2048 -> 6144` win came from removing per-row address formation inside the hot loop while preserving the same read width
+  - the square family looked like the closest remaining place where the same address-generation reduction might apply
+- result:
+  - `ReferenceComparisonTests` full pass
+  - known decode drift unchanged: `step 1 = Python 2944 / Metal 859`
+  - diagnostics regressed:
+    - per-step decode total: `6851 us`
+    - `gemv_2048_sq_bf16_argbuf: 1416 us`
+    - `gemv_2048_6144_bf16_argbuf: 1264 us`
+    - hot exact-shape GEMV total: `2680 us`
+  - clean benchmark after revert returned to the accepted band:
+    - optimizer comparison: `none 127.1 / standard 130.6 / aggressive 136.8 tok/s`
+    - standard decode: `131.0 tok/s`
+    - aggressive decode: `134.5 tok/s`
+    - end-to-end decode: `125.2 tok/s`
+- interpretation:
+  - the square family does not benefit from the same threadgroup-fixed row-major base that helped `2048 -> 6144`
+  - its remaining cost is not the same address-generation shape as the `6144` family
+  - further square-family work should avoid this branch and continue to focus on row-major reuse structure rather than copied `6144` addressing tricks
+
+## Diagnostic: Square Role Timing Is Uniform Enough That Semantic Splits Are Low Value
+
+The next diagnostic pass measured the three semantic roles that share the exact same square-family kernel body: `out_proj`, `q_proj`, and `o_proj`.
+
+- measurement:
+  - `BenchmarkDiagnosticsTests.squareExactShapeGEMVRoleMicrobench`
+  - baseline row-major mainline only
+  - role is derived from the square projection order in `dumpDispatchEntries(...)` and matched against the profiled square-family steps
+- result:
+  - square family total: `1261 us`
+  - `out_proj`: `10 steps`, `576 us`, `57.6 us/step`, `45.7%`
+  - `q_proj`: `6 steps`, `344 us`, `57.4 us/step`, `27.3%`
+  - `o_proj`: `6 steps`, `341 us`, `56.9 us/step`, `27.0%`
+- interpretation:
+  - `out_proj` dominates only because it appears more often
+  - per-step cost is effectively flat across all three semantic roles
+  - this makes the next direction clearer:
+    - semantic square splits are unlikely to pay
+    - the remaining win, if it exists, has to come from a family-wide kernel-body/read-structure change, not a role-specific policy
+
+## Rejected: Square Fixed-Iteration Pairwise Pointer Loop
+
+The next square-family attempt removed the loop induction variable from the accepted BF16 pointer-float pairwise path.
+
+- change:
+  - `gemv_2048_sq_bf16_argbuf` only
+  - keep:
+    - row-major layout
+    - float staging
+    - `unrollFactor = 8`
+    - pairwise BF16 reads
+  - change only the inner loop from:
+    - `for (uint j = tiisg * 8; j < 2048u; j += SIMD_WIDTH * 8)`
+  - to:
+    - a fixed-iteration loop with the same pointer increments
+- rationale:
+  - after ruling out read-width changes and semantic splits, the remaining square-family overhead might have been loop-control / induction overhead inside the pairwise pointer path
+- result:
+  - `ReferenceComparisonTests` full pass
+  - known decode drift unchanged: `step 1 = Python 2944 / Metal 859`
+  - diagnostics regressed heavily:
+    - per-step decode total: `7010 us`
+    - `gemv_2048_sq_bf16_argbuf: 1498 us`
+    - `gemv_2048_6144_bf16_argbuf: 1399 us`
+    - hot exact-shape GEMV total: `2898 us`
+    - square role microbench total: `1416 us`
+- interpretation:
+  - square-family residual cost is not in the `j` induction structure
+  - forcing fixed iteration makes the full decode mainline worse even though the arithmetic is unchanged
+  - this branch should stay reverted
+
+## Rejected: Square Split-Accumulator Pairwise Pointer Loop
+
+The next square-family attempt targeted instruction-level parallelism directly by splitting the accepted pointer-float pairwise accumulation into two partial sums.
+
+- change:
+  - `gemv_2048_sq_bf16_argbuf` only
+  - keep:
+    - row-major layout
+    - float staging
+    - `unrollFactor = 8`
+    - pairwise BF16 reads
+  - change only the accumulation shape from:
+    - one running `sum`
+  - to:
+    - two alternating partial sums `sum0` / `sum1`, merged once per loop iteration
+- rationale:
+  - after ruling out read-width and loop-control hypotheses, the remaining square-family cost might have been memory latency that a second accumulator could hide
+- result:
+  - correctness regressed:
+    - `ReferenceComparisonTests` failed at `Decode step 1 final norm kernel`
+    - `maxErr = 21.625`
+  - diagnostics also regressed badly:
+    - per-step decode total: `7736 us`
+    - `gemv_2048_sq_bf16_argbuf: 1910 us`
+    - hot exact-shape GEMV total: `3451 us`
+- interpretation:
+  - the accepted square-family path is sensitive to accumulator structure
+  - this is not a safe ILP win; it both hurts performance and destabilizes decode
+  - the branch should remain reverted
+
+## Rejected: Square Register-Prefetched Input Lane
+
+The next square-family attempt kept the accepted pairwise BF16 weight path but moved the staged input lane into scalar registers once per loop iteration.
+
+- change:
+  - `gemv_2048_sq_bf16_argbuf` only
+  - keep:
+    - row-major layout
+    - float staging
+    - `unrollFactor = 8`
+    - the same pairwise BF16 weight reads
+  - change only the input-use shape from:
+    - repeated `inputLane[0...7]` reads inside the pairwise accumulation
+  - to:
+    - `const float in0...in7` loaded once per loop iteration before the BF16 conversions
+- rationale:
+  - after rejecting wider reads, split accumulators, and fixed-iteration control, the remaining square-family cost might have been repeated threadgroup address / load pressure on the staged input lane
+- result:
+  - correctness remained acceptable through the early reference passes
+  - diagnostics regressed clearly:
+    - per-step decode total: `~8.0 ms`
+    - `gemv_2048_sq_bf16_argbuf: 1783 us`
+    - hot exact-shape GEMV total: `3285 us`
+    - square role microbench total: `1449 us`
+- interpretation:
+  - square-family residual cost is not improved by scalar register-prefetch of the staged input lane
+  - this branch should remain reverted
+
+## Rejected: Square Weight-Prefetched Pairwise BF16 Read
+
+The next square-family attempt kept the accepted row-major float-staged path, but moved each `ushort2` BF16 weight read into an explicit scalar register before conversion.
+
+- change:
+  - `gemv_2048_sq_bf16_argbuf` only
+  - keep:
+    - row-major layout
+    - float staging
+    - `unrollFactor = 8`
+    - the accepted `pairwisePointerFloatInput` addressing
+  - change only the weight-use shape from:
+    - `float2 w = bf16x2_to_float2(weightLane[pair])`
+  - to:
+    - `ushort2 raw = weightLane[pair]`
+    - `float2 w = bf16x2_to_float2(raw)`
+- rationale:
+  - after ruling out input-side tricks, loop-control changes, and accumulator splits, the remaining square-family residual might have been in the weight-load/use chain itself
+  - explicitly materializing the raw BF16 pair in a register before conversion might let the compiler schedule the load/convert more effectively
+- result:
+  - `ReferenceComparisonTests` full pass
+  - known decode drift unchanged: `step 1 = Python 2944 / Metal 859`
+  - diagnostics still regressed slightly:
+    - per-step decode total: `3106 us`
+    - `gemv_2048_sq_bf16_argbuf: 1287 us`
+    - `gemv_2048_6144_bf16_argbuf: 1255 us`
+    - hot exact-shape GEMV total: `2556 us`
+    - square role microbench total: `1283 us`
+- interpretation:
+  - simply materializing `ushort2` into a temporary register does not improve the square-family BF16 read path
+  - the remaining square-family opportunity is still in the deeper row-major weight-side read/reuse structure, not in this local load/convert reshaping
+  - this branch should remain reverted
+
+## Rejected: Square Weight-Only Software Pipeline
+
+The next square-family attempt kept the accepted row-major float-input pairwise path, but turned the BF16 weight reads into a manual software pipeline.
+
+- change:
+  - `gemv_2048_sq_bf16_argbuf` only
+  - keep:
+    - row-major layout
+    - float staging
+    - `unrollFactor = 8`
+    - `pairwisePointerFloatInput`
+  - change only the weight-side schedule from:
+    - convert directly from `weightLane[pair]` inside each loop iteration
+  - to:
+    - pre-load `ushort2 rawW0...rawW3`
+    - convert from those temporaries
+    - reload the next iteration's raw weights after the pointer increment
+- rationale:
+  - after rejecting address copying from the `6144` family and several input-side transformations, the remaining square-family opportunity might have been in the weight-load/use schedule itself
+  - a manual software pipeline could in principle hide some BF16 load latency without changing read width or arithmetic
+- result:
+  - `ReferenceComparisonTests` full pass
+  - known decode drift unchanged: `step 1 = Python 2944 / Metal 859`
+  - diagnostics regressed clearly:
+    - per-step decode total: `3224 us`
+    - `gemv_2048_sq_bf16_argbuf: 1405 us`
+    - `gemv_2048_6144_bf16_argbuf: 1256 us`
+    - hot exact-shape GEMV total: `2668 us`
+    - square role microbench total: `1405 us`
+- interpretation:
+  - the square-family residual is not improved by manually pipelining the BF16 `ushort2` weight reads
+  - the added control/register pressure is worse than the baseline direct convert/use path
+  - this branch should remain reverted
+
+## Rejected: Square Interleaved Lane-to-Weight Mapping
+
+The next square-family attempt changed the lane mapping itself instead of the local instruction shape.
+
+- change:
+  - `gemv_2048_sq_bf16_argbuf` only
+  - keep:
+    - row-major layout
+    - float staging
+    - `unrollFactor = 8`
+    - BF16 pairwise reads
+  - change the work distribution from:
+    - each lane consuming 8 contiguous input elements and 4 contiguous `ushort2` weight pairs
+  - to:
+    - each lane consuming 4 interleaved `ushort2` weight pairs at `0, 32, 64, 96`
+    - and matching interleaved float-input positions at `0/1`, `64/65`, `128/129`, `192/193`
+- rationale:
+  - after rejecting copied `6144` address tricks, software pipelining, and other input-side changes, the remaining square-family residual might have been in the lane-to-weight mapping itself
+  - an interleaved mapping could have improved simdgroup-local read behavior without changing layout or arithmetic
+- result:
+  - `ReferenceComparisonTests` full pass
+  - known decode drift unchanged: `step 1 = Python 2944 / Metal 859`
+  - diagnostics regressed badly:
+    - per-step decode total: `6942 us`
+    - `gemv_2048_sq_bf16_argbuf: 1966 us`
+    - `gemv_2048_6144_bf16_argbuf: 1564 us`
+    - hot exact-shape GEMV total: `2652 us`
+    - square role microbench total: `2203 us`
+- interpretation:
+  - the square-family bottleneck is not improved by interleaving the lane-to-weight mapping
+  - this reshaping destabilizes the broader decode profile even though early correctness still holds
+  - the branch should remain reverted

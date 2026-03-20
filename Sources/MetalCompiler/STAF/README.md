@@ -59,7 +59,7 @@ STAF generates a GPU-optimized executable cache **alongside** safetensors withou
 - safetensors remains the canonical source. STAF can be deleted and regenerated.
 - Quantized weights are repacked into interleaved blocks.
 - 4KB alignment guarantees `MTLBuffer(bytesNoCopy:)` works without hacks.
-- SHA-256 fingerprint automatically validates consistency with safetensors.
+- File-level typed metadata records cache provenance and compatibility.
 
 ```
 safetensors (source of truth)
@@ -161,7 +161,26 @@ let isValid = try STAFConverter().isValid(
 // false → reconvert
 ```
 
-STAF stores the SHA-256 fingerprint of the source safetensors. When the source changes, the cache automatically becomes invalid. No version management is required. The answer to "should we support old STAF versions?" is always "regenerate."
+STAF validity is now compatibility-aware instead of relying on a single source fingerprint.
+
+- the header format version must match
+- the metadata table must be structurally valid
+- the cache must be newer than the safetensors shards
+- file-level typed metadata must match the current bundle contract
+
+Current provenance metadata includes:
+
+- source format
+- converter version
+- metadata schema version
+- source shard count
+- normalized architectural dimensions
+- config hash
+- tokenizer / tokenizer_config / special_tokens hashes
+- resolved chat-template hash and source
+- safetensors manifest hash
+
+Legacy STAF files remain loadable, but `isValid(...)` intentionally requires the current format and metadata contract so stale caches regenerate automatically.
 
 ## Design Decisions and Rationale
 
@@ -181,9 +200,16 @@ Unknown tensors use `PASSTHROUGH (0xFF)` and are stored as FP16, so the converte
 
 Tensor names (e.g., `model.layers.31.self_attn.q_proj.weight`) vary across model families. Parsing them is fragile. `semantic_role` provides a supplementary hint for each section, but the runtime must function correctly even when all roles are `UNKNOWN`. This simplifies inference code while remaining robust.
 
-### No version field
+### Versioned metadata, not versionless cache files
 
-STAF is deterministically generated from safetensors. When the format specification changes, regenerate. There is no motivation to maintain backward compatibility with old STAF files. `source_fingerprint` is the sole validity proof. A version field would invite the question "should we support old versions?", and the answer is always "no, regenerate."
+STAF now uses a minimal file version plus a typed metadata table.
+
+- header `formatVersion` keeps the loader honest
+- metadata schema version keeps cache compatibility explicit
+- legacy STAF can still be loaded
+- cache validation intentionally rejects stale schema/version combinations and regenerates
+
+This keeps the cache self-describing without bloating the fixed 64-byte header.
 
 ## Designs Considered but Not Adopted
 
@@ -224,9 +250,11 @@ This means the same STAF file can serve both hardware generations — the differ
 
 ```
 ┌─────────────────────────────────┐  offset 0
-│ File Header         (64B)       │  magic, fingerprint, section_count
+│ File Header         (64B)       │  magic, formatVersion, counts/offsets
 ├─────────────────────────────────┤
 │ Section Table       (128B × N)  │  per-tensor metadata
+├─────────────────────────────────┤
+│ Metadata Table      (32B × M)   │  typed file-level metadata entries
 ├─────────────────────────────────┤
 │ String Table                    │  tensor names (null-terminated)
 ├─────────────────────────────────┤

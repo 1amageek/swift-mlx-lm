@@ -17,10 +17,12 @@ public struct STAFConverter: Sendable {
     /// - Parameters:
     ///   - safetensorsURLs: Paths to safetensors shards (sorted by filename).
     ///   - outputURL: Destination path for the .staf file.
+    ///   - metadata: Optional file-level metadata to store in the STAF cache.
     /// - Throws: If parsing fails or the output file cannot be written.
     public func convert(
         safetensorsURLs: [URL],
-        outputURL: URL
+        outputURL: URL,
+        metadata: STAFFileMetadata = .empty
     ) throws {
         let sortedURLs = safetensorsURLs.sorted { $0.lastPathComponent < $1.lastPathComponent }
 
@@ -71,29 +73,38 @@ public struct STAFConverter: Sendable {
         }
 
         // Phase 3: Build STAF file
+        let fileMetadata = STAFFileMetadata.defaultCacheMetadata(sourceShardCount: sortedURLs.count)
+            .merged(with: metadata)
         try writeSTAF(
             entries: tensorEntries,
             sortedURLs: sortedURLs,
-            outputURL: outputURL
+            outputURL: outputURL,
+            metadata: fileMetadata
         )
     }
 
-    /// Check if an existing STAF cache is still valid for the given safetensors.
+    /// Check if an existing STAF cache is still valid for the given bundle inputs.
     ///
-    /// Uses file metadata (mtime) instead of content hashing.
-    /// STAF is a regenerable cache — no cryptographic integrity needed.
-    public func isValid(stafURL: URL, safetensorsURLs: [URL]) throws -> Bool {
-        // Check 1: STAF file must exist and have valid magic
-        let fileHandle = try FileHandle(forReadingFrom: stafURL)
-        defer { fileHandle.closeFile() }
-
-        guard let headerData = try fileHandle.read(upToCount: STAF.headerSize),
-              headerData.count == STAF.headerSize else {
+    /// The cache remains valid only when:
+    /// - the STAF header and tables are structurally valid
+    /// - the source safetensors shards are not newer than the cache
+    /// - optional expected metadata matches the file-level metadata stored in STAF
+    public func isValid(
+        stafURL: URL,
+        safetensorsURLs: [URL],
+        expectedMetadata: STAFFileMetadata? = nil
+    ) throws -> Bool {
+        let fileData = try Data(contentsOf: stafURL, options: [.mappedIfSafe])
+        guard fileData.count >= STAF.headerSize else {
             return false
         }
 
-        let header = headerData.withUnsafeBytes { $0.load(as: STAFHeader.self) }
-        guard header.magic == STAF.magic, header.sectionCount > 0 else {
+        guard let header = STAF.parseHeader(from: fileData),
+              header.magic == STAF.magic,
+              header.sectionCount > 0 else {
+            return false
+        }
+        guard header.formatVersion == STAF.currentFormatVersion else {
             return false
         }
 
@@ -102,19 +113,40 @@ public struct STAFConverter: Sendable {
             return false
         }
 
+        let stafFileSize = UInt64(fileData.count)
+        if header.supportsMetadataTable {
+            let metadataTableOffset = Int(header.metadataTableOffset)
+            let metadataEntryCount = Int(header.metadataEntryCount)
+            let minimumMetadataOffset = STAF.headerSize + Int(header.sectionCount) * STAF.sectionEntrySize
+            if metadataTableOffset < minimumMetadataOffset ||
+                metadataTableOffset + metadataEntryCount * STAF.metadataEntrySize > Int(stafFileSize) {
+                return false
+            }
+        }
+
         // Check: first section entry must have sane payload values.
         // Detects old-format STAF with different struct alignment.
-        let stafFileAttributes = try FileManager.default.attributesOfItem(atPath: stafURL.path)
-        let stafFileSize = stafFileAttributes[.size] as? UInt64 ?? 0
         if stafFileSize > UInt64(STAF.headerSize + STAF.sectionEntrySize) {
-            let firstEntryData = try fileHandle.read(upToCount: STAF.sectionEntrySize)
-            if let entryBytes = firstEntryData, entryBytes.count == STAF.sectionEntrySize {
-                let payloadSize = entryBytes.withUnsafeBytes {
-                    ($0.baseAddress! + 52).loadUnaligned(as: UInt64.self)
+            let payloadSize = fileData.withUnsafeBytes { rawBuffer -> UInt64 in
+                guard let baseAddress = rawBuffer.baseAddress else {
+                    return UInt64.max
                 }
-                if payloadSize > stafFileSize {
-                    return false  // payload size exceeds file size → corrupted
-                }
+                return (baseAddress + STAF.headerSize + 52).loadUnaligned(as: UInt64.self)
+            }
+            if payloadSize > stafFileSize {
+                return false
+            }
+        }
+
+        if let expectedMetadata {
+            let actualMetadata: STAFFileMetadata
+            do {
+                actualMetadata = try STAFMetadataDecoder().decode(from: fileData, header: header)
+            } catch {
+                return false
+            }
+            guard actualMetadata.containsAllValues(of: expectedMetadata) else {
+                return false
             }
         }
 
@@ -247,23 +279,53 @@ public struct STAFConverter: Sendable {
     private func writeSTAF(
         entries: [TensorConversionEntry],
         sortedURLs: [URL],
-        outputURL: URL
+        outputURL: URL,
+        metadata: STAFFileMetadata
     ) throws {
         // Calculate layout
         let sectionCount = entries.count
         let sectionTableOffset = STAF.headerSize
         let sectionTableSize = sectionCount * STAF.sectionEntrySize
 
+        let metadataEntries = metadata.values.sorted { lhs, rhs in
+            lhs.key < rhs.key
+        }
+        let metadataTableOffset = sectionTableOffset + sectionTableSize
+        let metadataTableSize = metadataEntries.count * STAF.metadataEntrySize
+
         // Build string table
         var stringTableData = Data()
+        var stringOffsets: [String: Int] = [:]
         var nameOffsets: [Int] = []
-        for entry in entries {
-            nameOffsets.append(stringTableData.count)
-            stringTableData.append(contentsOf: entry.name.utf8)
-            stringTableData.append(0)  // null terminator
+        var metadataTableEntries: [STAFMetadataTableEntry] = []
+
+        func appendString(_ string: String) -> Int {
+            if let existingOffset = stringOffsets[string] {
+                return existingOffset
+            }
+            let offset = stringTableData.count
+            stringTableData.append(contentsOf: string.utf8)
+            stringTableData.append(0)
+            stringOffsets[string] = offset
+            return offset
         }
 
-        let stringTableOffset = sectionTableOffset + sectionTableSize
+        for entry in entries {
+            nameOffsets.append(appendString(entry.name))
+        }
+
+        for (key, value) in metadataEntries {
+            let keyOffset = appendString(key)
+            let metadataEntry = buildMetadataTableEntry(
+                key: key,
+                keyOffset: keyOffset,
+                value: value,
+                appendString: appendString
+            )
+            metadataTableEntries.append(metadataEntry)
+        }
+
+        let stringTableOffset = metadataTableOffset + metadataTableSize
         let metadataEnd = stringTableOffset + stringTableData.count
 
         // Payload starts at next 4KB boundary
@@ -291,7 +353,10 @@ public struct STAFConverter: Sendable {
         headerData.withUnsafeMutableBytes { buf in
             let base = buf.baseAddress!
             base.storeBytes(of: STAF.magic, toByteOffset: 0, as: UInt32.self)
-            // 4..39: reserved (already zero)
+            base.storeBytes(of: STAF.currentFormatVersion, toByteOffset: 4, as: UInt32.self)
+            base.storeBytes(of: UInt32(metadataTableEntries.count), toByteOffset: 8, as: UInt32.self)
+            base.storeBytes(of: UInt32(metadataTableOffset), toByteOffset: 12, as: UInt32.self)
+            // 16..39: reserved (already zero)
             base.storeBytes(of: UInt32(sectionCount), toByteOffset: 40, as: UInt32.self)
             base.storeBytes(of: UInt32(sectionTableOffset), toByteOffset: 44, as: UInt32.self)
             base.storeBytes(of: UInt32(stringTableOffset), toByteOffset: 48, as: UInt32.self)
@@ -331,6 +396,20 @@ public struct STAFConverter: Sendable {
             fileData.append(entryData)
         }
 
+        for metadataEntry in metadataTableEntries {
+            var entryData = Data(count: STAF.metadataEntrySize)
+            entryData.withUnsafeMutableBytes { buf in
+                let base = buf.baseAddress!
+                base.storeBytes(of: metadataEntry.keyOffset, toByteOffset: 0, as: UInt32.self)
+                base.storeBytes(of: metadataEntry.keyLength, toByteOffset: 4, as: UInt32.self)
+                base.storeBytes(of: metadataEntry.valueType.rawValue, toByteOffset: 8, as: UInt8.self)
+                base.storeBytes(of: metadataEntry.payload0, toByteOffset: 12, as: UInt64.self)
+                base.storeBytes(of: metadataEntry.payload1, toByteOffset: 20, as: UInt64.self)
+                // 28..31 reserved (already zero)
+            }
+            fileData.append(entryData)
+        }
+
         // String table
         fileData.append(stringTableData)
 
@@ -353,6 +432,65 @@ public struct STAFConverter: Sendable {
         }
 
         try fileData.write(to: outputURL)
+    }
+
+    private func buildMetadataTableEntry(
+        key: String,
+        keyOffset: Int,
+        value: STAFMetadataValue,
+        appendString: (String) -> Int
+    ) -> STAFMetadataTableEntry {
+        switch value {
+        case .bool(let boolValue):
+            return STAFMetadataTableEntry(
+                keyOffset: UInt32(keyOffset),
+                keyLength: UInt32(key.utf8.count),
+                valueType: .bool,
+                payload0: boolValue ? 1 : 0,
+                payload1: 0
+            )
+        case .uint32(let uint32Value):
+            return STAFMetadataTableEntry(
+                keyOffset: UInt32(keyOffset),
+                keyLength: UInt32(key.utf8.count),
+                valueType: .uint32,
+                payload0: UInt64(uint32Value),
+                payload1: 0
+            )
+        case .uint64(let uint64Value):
+            return STAFMetadataTableEntry(
+                keyOffset: UInt32(keyOffset),
+                keyLength: UInt32(key.utf8.count),
+                valueType: .uint64,
+                payload0: uint64Value,
+                payload1: 0
+            )
+        case .float32(let float32Value):
+            return STAFMetadataTableEntry(
+                keyOffset: UInt32(keyOffset),
+                keyLength: UInt32(key.utf8.count),
+                valueType: .float32,
+                payload0: UInt64(float32Value.bitPattern),
+                payload1: 0
+            )
+        case .float64(let float64Value):
+            return STAFMetadataTableEntry(
+                keyOffset: UInt32(keyOffset),
+                keyLength: UInt32(key.utf8.count),
+                valueType: .float64,
+                payload0: float64Value.bitPattern,
+                payload1: 0
+            )
+        case .string(let stringValue):
+            let valueOffset = appendString(stringValue)
+            return STAFMetadataTableEntry(
+                keyOffset: UInt32(keyOffset),
+                keyLength: UInt32(key.utf8.count),
+                valueType: .string,
+                payload0: UInt64(valueOffset),
+                payload1: UInt64(stringValue.utf8.count)
+            )
+        }
     }
 
     private func computePayloadSize(entry: TensorConversionEntry) -> Int {

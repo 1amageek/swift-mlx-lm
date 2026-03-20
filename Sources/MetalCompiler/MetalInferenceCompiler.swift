@@ -18,6 +18,7 @@ public struct MetalInferenceCompiler: Sendable {
 
     /// The optimization strategy used for dispatch entry generation.
     public let optimizer: any DispatchOptimizer
+    private let weightAccessPolicyOverride: ProjectionWeightAccessPolicyOverride?
 
     private enum DecodeProjectionShapeFamily {
         case generic
@@ -60,9 +61,13 @@ public struct MetalInferenceCompiler: Sendable {
                 return 4
             case .vocabDense:
                 return 16
-            case .input2048ExpandedDense, .input20486144Dense, .input20488192Dense:
+            case .input20486144Dense:
+                return 4
+            case .input2048ExpandedDense, .input20488192Dense:
                 return 8
-            case .largeDense, .input2048SquareDense, .input8192Tiled:
+            case .input2048SquareDense:
+                return 8
+            case .largeDense, .input8192Tiled:
                 return 8
             }
         }
@@ -138,6 +143,62 @@ public struct MetalInferenceCompiler: Sendable {
         )
     }
 
+    private static func defaultInput2048SourcePolicy(
+        outputDimension: Int,
+        weightFormat: WeightFormat
+    ) -> Input2048GEMVSourcePolicy? {
+        switch outputDimension {
+        case 2_048:
+            return .square(weightFormat: weightFormat)
+        case 6_144:
+            return .expanded6144(weightFormat: weightFormat)
+        case 8_192:
+            return .expanded8192(weightFormat: weightFormat)
+        default:
+            return nil
+        }
+    }
+
+    private static func resolvedInput2048SourcePolicy(
+        for projection: MetalProjection,
+        entry: DispatchEntry,
+        role: String,
+        weightFormat: WeightFormat,
+        stafWeightStore: STAFWeightStore?,
+        accessPolicyResolver: ProjectionWeightAccessPolicyResolver
+    ) -> Input2048GEMVSourcePolicy? {
+        guard
+            projection.inputDimension == 2_048,
+            let defaultPolicy = defaultInput2048SourcePolicy(
+                outputDimension: projection.outputDimension,
+                weightFormat: weightFormat
+            )
+        else {
+            return nil
+        }
+        guard
+            let stafWeightStore,
+            let binding = entry.parameterBindings.first(where: { $0.role == role })
+        else {
+            return defaultPolicy
+        }
+
+        let request = accessPolicyResolver.accessRequest(
+            for: entry,
+            role: role,
+            binding: binding,
+            executionPhase: .decode,
+            stafWeightStore: stafWeightStore
+        )
+        let resolvedLayout = stafWeightStore
+            .resolvedBufferAccess(for: request)?
+            .layout ?? request.preferredLayout
+        let resolvedLayoutPolicy = Input2048WeightLayoutPolicy(
+            stafWeightLayout: resolvedLayout
+        )
+        return defaultPolicy.with(weightLayoutPolicy: resolvedLayoutPolicy)
+    }
+
     /// Immutable inputs shared across one compile invocation.
     private struct CompileContext {
         let graph: ModelGraph
@@ -149,6 +210,7 @@ public struct MetalInferenceCompiler: Sendable {
         let device: MTLDevice
         let weightFormat: WeightFormat
         let decodeBufferPrecision: BufferPrecision
+        let accessPolicyResolver: ProjectionWeightAccessPolicyResolver
 
         var decodeKernelContext: KernelContext {
             KernelContext(
@@ -176,11 +238,19 @@ public struct MetalInferenceCompiler: Sendable {
         let stafWeightStore: STAFWeightStore?
         let fallbackBuffer: MTLBuffer
         let logsMisses: Bool
+        let executionPhase: STAFWeightExecutionPhase
+        let accessPolicyResolver: ProjectionWeightAccessPolicyResolver
 
         func resolve(role: String) -> (MTLBuffer, Int) {
             if let binding = entry.parameterBindings.first(where: { $0.role == role }),
                let staf = stafWeightStore,
-               let access = staf.bufferAccess(for: binding.tensorName) {
+               let access = staf.resolvedBufferAccess(for: accessPolicyResolver.accessRequest(
+                for: entry,
+                role: role,
+                binding: binding,
+                executionPhase: executionPhase,
+                stafWeightStore: staf
+               )) {
                 return (access.buffer, access.offset)
             }
 
@@ -365,6 +435,262 @@ public struct MetalInferenceCompiler: Sendable {
                 optimizedCount: optimizedEntries.count,
                 patterns: patterns.map { .init(name: $0.key, count: $0.value.count, savedDispatches: 0) }
             )
+        }
+    }
+
+    private struct DecodeProjectionCostReportBuilder {
+        private struct FamilyKey: Hashable {
+            let kernelName: String
+            let inputDimension: Int
+            let outputDimension: Int
+            let layoutKey: String
+            let formatKey: String
+        }
+
+        private struct FamilyAccumulator {
+            let kernelName: String
+            let inputDimension: Int
+            let outputDimension: Int
+            let weightTensorCount: Int
+            let layouts: [STAFWeightLayout]
+            let formatIdentifiers: [QuantizationSchemeIdentifier]
+            let inputBytesPerStep: Int64
+            let weightBytesPerStep: Int64
+            let outputBytesPerStep: Int64
+            let estimatedFLOPsPerStep: Int64
+            var stepCount: Int
+        }
+
+        private struct ProjectionComponent {
+            let role: String
+            let tensorName: String?
+            let inputDimension: Int
+            let outputDimension: Int
+        }
+
+        let decodeBufferPrecision: BufferPrecision
+        let kernelContext: KernelContext
+        let stafWeightStore: STAFWeightStore?
+        let accessPolicyResolver: ProjectionWeightAccessPolicyResolver
+        let kernelNameResolver: (DispatchKind, DispatchEntry, STAFWeightStore?, KernelContext) -> String
+
+        func makeReport(entries: [DispatchEntry]) -> DecodeProjectionCostReport {
+            var accumulators: [FamilyKey: FamilyAccumulator] = [:]
+            var totalProjectionSteps = 0
+
+            for entry in entries {
+                guard let estimate = estimate(for: entry) else {
+                    continue
+                }
+                totalProjectionSteps += 1
+                let key = FamilyKey(
+                    kernelName: estimate.kernelName,
+                    inputDimension: estimate.inputDimension,
+                    outputDimension: estimate.outputDimension,
+                    layoutKey: estimate.layouts.map(Self.describe(layout:)).joined(separator: "|"),
+                    formatKey: estimate.formatIdentifiers.map { String($0.rawValue) }.joined(separator: "|")
+                )
+                if var existing = accumulators[key] {
+                    existing.stepCount += 1
+                    accumulators[key] = existing
+                } else {
+                    accumulators[key] = estimate
+                }
+            }
+
+            let families = accumulators.values
+                .map { accumulator in
+                    DecodeProjectionCostReport.FamilyEstimate(
+                        kernelName: accumulator.kernelName,
+                        inputDimension: accumulator.inputDimension,
+                        outputDimension: accumulator.outputDimension,
+                        stepCount: accumulator.stepCount,
+                        weightTensorCount: accumulator.weightTensorCount,
+                        layouts: accumulator.layouts,
+                        formatIdentifiers: accumulator.formatIdentifiers,
+                        inputBytesPerStep: accumulator.inputBytesPerStep,
+                        weightBytesPerStep: accumulator.weightBytesPerStep,
+                        outputBytesPerStep: accumulator.outputBytesPerStep,
+                        estimatedFLOPsPerStep: accumulator.estimatedFLOPsPerStep
+                    )
+                }
+                .sorted { lhs, rhs in
+                    if lhs.totalEstimatedBytes == rhs.totalEstimatedBytes {
+                        return lhs.kernelName < rhs.kernelName
+                    }
+                    return lhs.totalEstimatedBytes > rhs.totalEstimatedBytes
+                }
+
+            return DecodeProjectionCostReport(
+                totalProjectionSteps: totalProjectionSteps,
+                families: families
+            )
+        }
+
+        private func estimate(for entry: DispatchEntry) -> FamilyAccumulator? {
+            guard let components = projectionComponents(for: entry), !components.isEmpty else {
+                return nil
+            }
+
+            let kernelName = kernelNameResolver(
+                entry.kind,
+                entry,
+                stafWeightStore,
+                kernelContext
+            )
+
+            let decodeElementBytes = Int64(decodeBufferPrecision.byteSize)
+            let inputDimension = components[0].inputDimension
+            let outputDimension = components.reduce(0) { $0 + $1.outputDimension }
+            let inputBytesPerStep = Int64(inputDimension) * decodeElementBytes
+            let outputBytesPerStep = Int64(outputDimension) * decodeElementBytes
+
+            var weightBytesPerStep: Int64 = 0
+            var estimatedFLOPsPerStep: Int64 = 0
+            var layouts: [STAFWeightLayout] = []
+            var formatIdentifiers: [QuantizationSchemeIdentifier] = []
+
+            for component in components {
+                let resolved = resolveWeightAccess(for: component, entry: entry)
+                weightBytesPerStep += logicalWeightBytes(
+                    inputDimension: component.inputDimension,
+                    outputDimension: component.outputDimension,
+                    format: resolved.format
+                )
+                estimatedFLOPsPerStep += 2 * Int64(component.inputDimension) * Int64(component.outputDimension)
+                layouts.append(resolved.layout)
+                formatIdentifiers.append(resolved.format.schemeIdentifier)
+            }
+
+            let uniqueLayouts = uniquedLayouts(layouts)
+            let uniqueFormats = uniquedFormats(formatIdentifiers)
+
+            return FamilyAccumulator(
+                kernelName: kernelName,
+                inputDimension: inputDimension,
+                outputDimension: outputDimension,
+                weightTensorCount: components.count,
+                layouts: uniqueLayouts,
+                formatIdentifiers: uniqueFormats,
+                inputBytesPerStep: inputBytesPerStep,
+                weightBytesPerStep: weightBytesPerStep,
+                outputBytesPerStep: outputBytesPerStep,
+                estimatedFLOPsPerStep: estimatedFLOPsPerStep,
+                stepCount: 1
+            )
+        }
+
+        private func projectionComponents(for entry: DispatchEntry) -> [ProjectionComponent]? {
+            switch entry.kind {
+            case .projection(let projection, _):
+                return [
+                    ProjectionComponent(
+                        role: projection.field,
+                        tensorName: entry.parameterBindings.first(where: { $0.role == projection.field })?.tensorName,
+                        inputDimension: projection.inputDimension,
+                        outputDimension: projection.outputDimension
+                    )
+                ]
+            case .batchedProjection(let batched):
+                return batched.projections.map { projection in
+                    ProjectionComponent(
+                        role: projection.field,
+                        tensorName: entry.parameterBindings.first(where: { $0.role == projection.field })?.tensorName,
+                        inputDimension: projection.inputDimension,
+                        outputDimension: projection.outputDimension
+                    )
+                }
+            default:
+                return nil
+            }
+        }
+
+        private func resolveWeightAccess(
+            for component: ProjectionComponent,
+            entry: DispatchEntry
+        ) -> (format: any QuantizationFormat, layout: STAFWeightLayout) {
+            let fallbackFormat: any QuantizationFormat = kernelContext.weightFormat == .bfloat16
+                ? BFloat16Format()
+                : Float16Format()
+            guard
+                let stafWeightStore,
+                let tensorName = component.tensorName,
+                let binding = entry.parameterBindings.first(where: { $0.role == component.role })
+            else {
+                return (fallbackFormat, .rowMajor)
+            }
+
+            let request = accessPolicyResolver.accessRequest(
+                for: entry,
+                role: component.role,
+                binding: binding,
+                executionPhase: .decode,
+                stafWeightStore: stafWeightStore
+            )
+            let resolvedLayout = stafWeightStore
+                .resolvedBufferAccess(for: request)?
+                .layout ?? request.preferredLayout
+            let format = stafWeightStore.tensor(for: tensorName)?.format ?? fallbackFormat
+            return (format, resolvedLayout)
+        }
+
+        private func logicalWeightBytes(
+            inputDimension: Int,
+            outputDimension: Int,
+            format: any QuantizationFormat
+        ) -> Int64 {
+            let logicalWeightCount = Int64(inputDimension) * Int64(outputDimension)
+            let weightsPerBlock = Int64(format.weightsPerBlock)
+            let blockCount = (logicalWeightCount + weightsPerBlock - 1) / weightsPerBlock
+            return blockCount * Int64(format.bytesPerBlock)
+        }
+
+        private static func compare(layout lhs: STAFWeightLayout, rhs: STAFWeightLayout) -> Bool {
+            rank(for: lhs) < rank(for: rhs)
+        }
+
+        private func uniquedLayouts(_ layouts: [STAFWeightLayout]) -> [STAFWeightLayout] {
+            var unique: [STAFWeightLayout] = []
+            for layout in layouts {
+                if !unique.contains(where: { $0 == layout }) {
+                    unique.append(layout)
+                }
+            }
+            return unique.sorted(by: Self.compare(layout:rhs:))
+        }
+
+        private func uniquedFormats(
+            _ formatIdentifiers: [QuantizationSchemeIdentifier]
+        ) -> [QuantizationSchemeIdentifier] {
+            var unique: [QuantizationSchemeIdentifier] = []
+            for identifier in formatIdentifiers {
+                if !unique.contains(where: { $0 == identifier }) {
+                    unique.append(identifier)
+                }
+            }
+            return unique.sorted { $0.rawValue < $1.rawValue }
+        }
+
+        private static func rank(for layout: STAFWeightLayout) -> Int {
+            switch layout {
+            case .rowMajor:
+                return 0
+            case .blockedRows4Tiles128:
+                return 1
+            case .blockedRows8Tiles128:
+                return 2
+            }
+        }
+
+        private static func describe(layout: STAFWeightLayout) -> String {
+            switch layout {
+            case .rowMajor:
+                return "rowMajor"
+            case .blockedRows4Tiles128:
+                return "blocked4x128"
+            case .blockedRows8Tiles128:
+                return "blocked8x128"
+            }
         }
     }
 
@@ -614,6 +940,7 @@ public struct MetalInferenceCompiler: Sendable {
         let stafWeightStore: STAFWeightStore?
         let modelWeightFormat: WeightFormat
         let bufferPrecision: MetalSourceGenerator.BufferPrecision
+        let accessPolicyResolver: ProjectionWeightAccessPolicyResolver
         let kernelNameResolver: (DispatchKind, DispatchEntry, STAFWeightStore?, KernelContext) -> String
 
         func generateSources(entries: [DispatchEntry]) -> GeneratedKernelSources {
@@ -637,9 +964,21 @@ public struct MetalInferenceCompiler: Sendable {
                             inputDimension: projection.inputDimension
                         )
                     if let decodeFamily {
-                        name = weightFormat == .bfloat16
-                            ? decodeFamily.kernelBaseName + "_bf16"
-                            : decodeFamily.kernelBaseName
+                        if let sourcePolicy = MetalInferenceCompiler.resolvedInput2048SourcePolicy(
+                            for: projection,
+                            entry: entry,
+                            role: projection.field,
+                            weightFormat: weightFormat,
+                            stafWeightStore: stafWeightStore,
+                            accessPolicyResolver: accessPolicyResolver
+                        ) {
+                            let baseName = decodeFamily.kernelBaseName + sourcePolicy.weightLayoutPolicy.kernelNameSuffix
+                            name = weightFormat == .bfloat16 ? baseName + "_bf16" : baseName
+                        } else {
+                            name = weightFormat == .bfloat16
+                                ? decodeFamily.kernelBaseName + "_bf16"
+                                : decodeFamily.kernelBaseName
+                        }
                     } else {
                         name = weightFormat == .bfloat16 ? "gemv_bf16" : "gemv"
                     }
@@ -687,7 +1026,14 @@ public struct MetalInferenceCompiler: Sendable {
                                     unrollFactor: 4))
                             }
                         } else if decodeFamily == .input2048SquareDense {
-                            let sourcePolicy = Input2048GEMVSourcePolicy.square(weightFormat: weightFormat)
+                            let sourcePolicy = MetalInferenceCompiler.resolvedInput2048SourcePolicy(
+                                for: projection,
+                                entry: entry,
+                                role: projection.field,
+                                weightFormat: weightFormat,
+                                stafWeightStore: stafWeightStore,
+                                accessPolicyResolver: accessPolicyResolver
+                            ) ?? Input2048GEMVSourcePolicy.square(weightFormat: weightFormat)
                             sources.append(MetalSourceGenerator.generateInput2048GEMV(
                                 name: name,
                                 bufferPrecision: bufferPrecision,
@@ -695,6 +1041,7 @@ public struct MetalInferenceCompiler: Sendable {
                                 fixedOutputDimension: sourcePolicy.fixedOutputDimension,
                                 fixedRowsPerThreadgroup: sourcePolicy.fixedRowsPerThreadgroup,
                                 stagesInputAsFloat: sourcePolicy.stagesInputAsFloat,
+                                weightLayoutPolicy: sourcePolicy.weightLayoutPolicy,
                                 unrollFactor: sourcePolicy.unrollFactor))
                             let argumentKernelName = MetalInferenceCompiler.argumentTableVariantKernelName(for: name)
                             if generatedNames.insert(argumentKernelName).inserted {
@@ -707,11 +1054,19 @@ public struct MetalInferenceCompiler: Sendable {
                                     includesDimensionBindings: false,
                                     fixedRowsPerThreadgroup: sourcePolicy.fixedRowsPerThreadgroup,
                                     stagesInputAsFloat: sourcePolicy.stagesInputAsFloat,
-                                    usesPairwiseBF16Read: sourcePolicy.usesPairwiseBF16ArgumentRead,
+                                    weightLayoutPolicy: sourcePolicy.weightLayoutPolicy,
+                                    bf16ArgumentReadPolicy: sourcePolicy.bf16ArgumentReadPolicy,
                                     unrollFactor: sourcePolicy.unrollFactor))
                             }
                         } else if decodeFamily == .input20486144Dense {
-                            let sourcePolicy = Input2048GEMVSourcePolicy.expanded6144(weightFormat: weightFormat)
+                            let sourcePolicy = MetalInferenceCompiler.resolvedInput2048SourcePolicy(
+                                for: projection,
+                                entry: entry,
+                                role: projection.field,
+                                weightFormat: weightFormat,
+                                stafWeightStore: stafWeightStore,
+                                accessPolicyResolver: accessPolicyResolver
+                            ) ?? Input2048GEMVSourcePolicy.expanded6144(weightFormat: weightFormat)
                             sources.append(MetalSourceGenerator.generateInput2048GEMV(
                                 name: name,
                                 bufferPrecision: bufferPrecision,
@@ -719,6 +1074,7 @@ public struct MetalInferenceCompiler: Sendable {
                                 fixedOutputDimension: sourcePolicy.fixedOutputDimension,
                                 fixedRowsPerThreadgroup: sourcePolicy.fixedRowsPerThreadgroup,
                                 stagesInputAsFloat: sourcePolicy.stagesInputAsFloat,
+                                weightLayoutPolicy: sourcePolicy.weightLayoutPolicy,
                                 unrollFactor: sourcePolicy.unrollFactor))
                             let argumentKernelName = MetalInferenceCompiler.argumentTableVariantKernelName(for: name)
                             if generatedNames.insert(argumentKernelName).inserted {
@@ -731,11 +1087,19 @@ public struct MetalInferenceCompiler: Sendable {
                                     includesDimensionBindings: false,
                                     fixedRowsPerThreadgroup: sourcePolicy.fixedRowsPerThreadgroup,
                                     stagesInputAsFloat: sourcePolicy.stagesInputAsFloat,
-                                    usesPairwiseBF16Read: sourcePolicy.usesPairwiseBF16ArgumentRead,
+                                    weightLayoutPolicy: sourcePolicy.weightLayoutPolicy,
+                                    bf16ArgumentReadPolicy: sourcePolicy.bf16ArgumentReadPolicy,
                                     unrollFactor: sourcePolicy.unrollFactor))
                             }
                         } else if decodeFamily == .input20488192Dense {
-                            let sourcePolicy = Input2048GEMVSourcePolicy.expanded8192(weightFormat: weightFormat)
+                            let sourcePolicy = MetalInferenceCompiler.resolvedInput2048SourcePolicy(
+                                for: projection,
+                                entry: entry,
+                                role: projection.field,
+                                weightFormat: weightFormat,
+                                stafWeightStore: stafWeightStore,
+                                accessPolicyResolver: accessPolicyResolver
+                            ) ?? Input2048GEMVSourcePolicy.expanded8192(weightFormat: weightFormat)
                             sources.append(MetalSourceGenerator.generateInput2048GEMV(
                                 name: name,
                                 bufferPrecision: bufferPrecision,
@@ -743,6 +1107,7 @@ public struct MetalInferenceCompiler: Sendable {
                                 fixedOutputDimension: sourcePolicy.fixedOutputDimension,
                                 fixedRowsPerThreadgroup: sourcePolicy.fixedRowsPerThreadgroup,
                                 stagesInputAsFloat: sourcePolicy.stagesInputAsFloat,
+                                weightLayoutPolicy: sourcePolicy.weightLayoutPolicy,
                                 unrollFactor: sourcePolicy.unrollFactor))
                         } else if decodeFamily == .input2048ExpandedDense {
                             sources.append(MetalSourceGenerator.generateInput2048GEMV(
@@ -961,6 +1326,14 @@ public struct MetalInferenceCompiler: Sendable {
                             name: kernelName,
                             bufferPrecision: bufferPrecision,
                             weightFormat: weightFormat))
+                        let argumentKernelName = MetalInferenceCompiler.argumentTableVariantKernelName(for: kernelName)
+                        if generatedNames.insert(argumentKernelName).inserted {
+                            sources.append(MetalSourceGenerator.generateFusedResidualAddRMSNormArgumentTableVariant(
+                                name: argumentKernelName,
+                                argumentBufferIndex: MetalInferenceCompiler.argumentTableBindingIndex,
+                                bufferPrecision: bufferPrecision,
+                                weightFormat: weightFormat))
+                        }
                     }
 
                 case .fusedSwiGLUProjection(let fused):
@@ -1023,11 +1396,27 @@ public struct MetalInferenceCompiler: Sendable {
                                     name: kernelName,
                                     bufferPrecision: bufferPrecision,
                                     weightFormat: weightFormat))
+                                let argumentKernelName = MetalInferenceCompiler.argumentTableVariantKernelName(for: kernelName)
+                                if generatedNames.insert(argumentKernelName).inserted {
+                                    sources.append(MetalSourceGenerator.generateBatchedGEMV2ArgumentTableVariant(
+                                        name: argumentKernelName,
+                                        argumentBufferIndex: MetalInferenceCompiler.argumentTableBindingIndex,
+                                        bufferPrecision: bufferPrecision,
+                                        weightFormat: weightFormat))
+                                }
                             } else {
                                 sources.append(MetalSourceGenerator.generateBatchedGEMV3(
                                     name: kernelName,
                                     bufferPrecision: bufferPrecision,
                                     weightFormat: weightFormat))
+                                let argumentKernelName = MetalInferenceCompiler.argumentTableVariantKernelName(for: kernelName)
+                                if generatedNames.insert(argumentKernelName).inserted {
+                                    sources.append(MetalSourceGenerator.generateBatchedGEMV3ArgumentTableVariant(
+                                        name: argumentKernelName,
+                                        argumentBufferIndex: MetalInferenceCompiler.argumentTableBindingIndex,
+                                        bufferPrecision: bufferPrecision,
+                                        weightFormat: weightFormat))
+                                }
                             }
                         }
                     } else {
@@ -1053,6 +1442,14 @@ public struct MetalInferenceCompiler: Sendable {
                                     name: kernelName,
                                     bufferPrecision: bufferPrecision,
                                     weightFormat: weightFormat))
+                                let argumentKernelName = MetalInferenceCompiler.argumentTableVariantKernelName(for: kernelName)
+                                if generatedNames.insert(argumentKernelName).inserted {
+                                    sources.append(MetalSourceGenerator.generateBatchedPerHead2ArgumentTableVariant(
+                                        name: argumentKernelName,
+                                        argumentBufferIndex: MetalInferenceCompiler.argumentTableBindingIndex,
+                                        bufferPrecision: bufferPrecision,
+                                        weightFormat: weightFormat))
+                                }
                             }
                         }
                     } else {
@@ -1100,6 +1497,15 @@ public struct MetalInferenceCompiler: Sendable {
 
     public init(optimizer: (any DispatchOptimizer)? = nil) {
         self.optimizer = optimizer ?? StandardOptimizer()
+        self.weightAccessPolicyOverride = nil
+    }
+
+    init(
+        optimizer: (any DispatchOptimizer)? = nil,
+        weightAccessPolicyOverride: ProjectionWeightAccessPolicyOverride
+    ) {
+        self.optimizer = optimizer ?? StandardOptimizer()
+        self.weightAccessPolicyOverride = weightAccessPolicyOverride
     }
 
     private enum SharedPipelineCache {
@@ -1122,14 +1528,19 @@ public struct MetalInferenceCompiler: Sendable {
     private struct PipelineLibraryBuilder {
         let device: MTLDevice
 
-        func compile(_ generated: GeneratedKernelSources) throws -> (pipelines: [String: MTLComputePipelineState], usesMPP: Bool) {
+        func compile(_ generated: GeneratedKernelSources) throws -> (
+            pipelines: [String: MTLComputePipelineState],
+            argumentEncoders: [String: MTLArgumentEncoder],
+            usesMPP: Bool
+        ) {
             let baseLibrary = try makeLibrary(source: generated.baseSource, options: baseCompileOptions())
             var pipelineCache = try makeBasePipelineCache(
                 from: baseLibrary,
                 mppKernelNames: generated.mppKernelNames)
+            var argumentEncoderCache = makeArgumentEncoderCache(from: baseLibrary)
 
             guard !generated.mppSources.isEmpty else {
-                return (pipelineCache, false)
+                return (pipelineCache, argumentEncoderCache, false)
             }
 
             do {
@@ -1137,9 +1548,12 @@ public struct MetalInferenceCompiler: Sendable {
                     source: generated.mppSources.joined(separator: "\n\n"),
                     options: mppCompileOptions())
                 try mergeMPPipelines(from: mppLibrary, into: &pipelineCache)
-                return (pipelineCache, true)
+                argumentEncoderCache.merge(
+                    makeArgumentEncoderCache(from: mppLibrary),
+                    uniquingKeysWith: { existing, _ in existing })
+                return (pipelineCache, argumentEncoderCache, true)
             } catch {
-                return (pipelineCache, false)
+                return (pipelineCache, argumentEncoderCache, false)
             }
         }
 
@@ -1206,6 +1620,20 @@ public struct MetalInferenceCompiler: Sendable {
             }
         }
 
+        private func makeArgumentEncoderCache(
+            from library: MTLLibrary
+        ) -> [String: MTLArgumentEncoder] {
+            var cache: [String: MTLArgumentEncoder] = [:]
+            for name in library.functionNames where name.hasSuffix("_argbuf") {
+                guard let function = library.makeFunction(name: name) else {
+                    continue
+                }
+                cache[name] = function.makeArgumentEncoder(
+                    bufferIndex: MetalInferenceCompiler.argumentTableBindingIndex)
+            }
+            return cache
+        }
+
         private func makePipeline(
             function: MTLFunction,
             label: String
@@ -1239,7 +1667,11 @@ public struct MetalInferenceCompiler: Sendable {
             stafWeightStore: stafWeightStore,
             device: device,
             weightFormat: weightFormat,
-            decodeBufferPrecision: preferredDecodeBufferPrecision(for: weightFormat))
+            decodeBufferPrecision: preferredDecodeBufferPrecision(for: weightFormat),
+            accessPolicyResolver: ProjectionWeightAccessPolicyResolver(
+                override: weightAccessPolicyOverride
+            )
+        )
     }
 
     private func optimizedEntries(
@@ -1270,6 +1702,19 @@ public struct MetalInferenceCompiler: Sendable {
             kernelContext: kernelContext,
             pipelineCache: pipelineCache,
             dispatchHeuristics: DispatchHeuristics())
+    }
+
+    private func prepareSpecializedWeightStore(
+        _ store: STAFWeightStore?,
+        for entries: [DispatchEntry],
+        device: MTLDevice,
+        accessPolicyResolver: ProjectionWeightAccessPolicyResolver
+    ) throws -> STAFWeightStore? {
+        let builder = STAFSpecializedWeightStoreBuilder(
+            device: device,
+            accessPolicyResolver: accessPolicyResolver
+        )
+        return try builder.prepare(store: store, entries: entries)
     }
 
     private func resolvedPipeline(
@@ -1534,6 +1979,54 @@ public struct MetalInferenceCompiler: Sendable {
             optimizedEntries: optimization.fusedEntries)
     }
 
+    public func analyzeDecodeProjectionCosts(
+        graph: ModelGraph,
+        hiddenSize: Int,
+        intermediateSize: Int = 0,
+        vocabSize: Int = 0,
+        stafWeightStore: STAFWeightStore? = nil,
+        device: MTLDevice
+    ) throws -> DecodeProjectionCostReport {
+        let initialContext = makeCompileContext(
+            graph: graph,
+            hiddenSize: hiddenSize,
+            intermediateSize: intermediateSize,
+            vocabSize: vocabSize,
+            stafWeightStore: stafWeightStore,
+            device: device
+        )
+        let initialOptimization = optimizedEntries(
+            using: initialContext,
+            kernelContext: initialContext.decodeKernelContext
+        )
+        let specializedWeightStore = try prepareSpecializedWeightStore(
+            initialContext.stafWeightStore,
+            for: initialOptimization.fusedEntries,
+            device: initialContext.device,
+            accessPolicyResolver: initialContext.accessPolicyResolver
+        )
+        let context = makeCompileContext(
+            graph: graph,
+            hiddenSize: hiddenSize,
+            intermediateSize: intermediateSize,
+            vocabSize: vocabSize,
+            stafWeightStore: specializedWeightStore,
+            device: device
+        )
+        let optimization = optimizedEntries(
+            using: context,
+            kernelContext: context.decodeKernelContext
+        )
+        let reportBuilder = DecodeProjectionCostReportBuilder(
+            decodeBufferPrecision: context.decodeBufferPrecision,
+            kernelContext: context.decodeKernelContext,
+            stafWeightStore: specializedWeightStore,
+            accessPolicyResolver: context.accessPolicyResolver,
+            kernelNameResolver: kernelName(for:entry:stafWeightStore:kernelContext:)
+        )
+        return reportBuilder.makeReport(entries: optimization.fusedEntries)
+    }
+
     /// Dump the compiled decode plan with concrete kernels, grid sizes, and bindings.
     ///
     /// This is a post-compilation diagnostic. Unlike `dumpDispatchEntries`, it shows
@@ -1580,6 +2073,105 @@ public struct MetalInferenceCompiler: Sendable {
         return formatter.formatPrefillPlan(plan, maximumSequenceLength: maximumSequenceLength)
     }
 
+    struct DecodeWeightBindingSummary: Sendable {
+        let stepIndex: Int
+        let kernelName: String
+        let layerIndex: Int?
+        let roles: [String]
+        let tensorNames: [String]
+        let inputDimension: Int
+        let outputDimension: Int
+        let preferredLayouts: [STAFWeightLayout]
+        let resolvedLayouts: [STAFWeightLayout]
+        let resolvedBufferLabels: [String]
+    }
+
+    func summarizeCompiledDecodeWeightBindings(
+        graph: ModelGraph,
+        hiddenSize: Int,
+        intermediateSize: Int = 0,
+        vocabSize: Int = 0,
+        stafWeightStore: STAFWeightStore? = nil,
+        device: MTLDevice
+    ) throws -> [DecodeWeightBindingSummary] {
+        let initialContext = makeCompileContext(
+            graph: graph,
+            hiddenSize: hiddenSize,
+            intermediateSize: intermediateSize,
+            vocabSize: vocabSize,
+            stafWeightStore: stafWeightStore,
+            device: device)
+        let initialOptimization = optimizedEntries(
+            using: initialContext,
+            kernelContext: initialContext.decodeKernelContext)
+        let specializedWeightStore = try prepareSpecializedWeightStore(
+            initialContext.stafWeightStore,
+            for: initialOptimization.fusedEntries,
+            device: initialContext.device,
+            accessPolicyResolver: initialContext.accessPolicyResolver
+        )
+        let context = makeCompileContext(
+            graph: graph,
+            hiddenSize: hiddenSize,
+            intermediateSize: intermediateSize,
+            vocabSize: vocabSize,
+            stafWeightStore: specializedWeightStore,
+            device: device)
+        let optimization = optimizedEntries(
+            using: context,
+            kernelContext: context.decodeKernelContext)
+        let plan = try compile(
+            graph: graph,
+            hiddenSize: hiddenSize,
+            intermediateSize: intermediateSize,
+            vocabSize: vocabSize,
+            stafWeightStore: specializedWeightStore,
+            device: device)
+
+        let paired = zip(plan.steps.indices, zip(plan.steps, optimization.fusedEntries))
+        let accessPolicyResolver = context.accessPolicyResolver
+        return paired.compactMap { index, pair -> DecodeWeightBindingSummary? in
+            let step = pair.0
+            let entry = pair.1
+            guard let base = Self.decodeWeightBindingBase(for: entry) else {
+                return nil
+            }
+            let requests = base.roles.compactMap { role -> STAFWeightAccessRequest? in
+                guard
+                    let store = specializedWeightStore,
+                    let binding = entry.parameterBindings.first(where: { $0.role == role })
+                else {
+                    return nil
+                }
+                return accessPolicyResolver.accessRequest(
+                    for: entry,
+                    role: role,
+                    binding: binding,
+                    executionPhase: .decode,
+                    stafWeightStore: store
+                )
+            }
+            let preferredLayouts = requests.map(\.preferredLayout)
+            let resolvedAccesses = requests.compactMap { request in
+                specializedWeightStore?.resolvedBufferAccess(for: request)
+            }
+            return DecodeWeightBindingSummary(
+                stepIndex: index,
+                kernelName: step.pipeline.label ?? "(unlabeled)",
+                layerIndex: entry.layerIndex,
+                roles: base.roles,
+                tensorNames: base.roles.compactMap { role in
+                    entry.parameterBindings.first(where: { $0.role == role })?.tensorName
+                },
+                inputDimension: base.inputDimension,
+                outputDimension: base.outputDimension,
+                preferredLayouts: preferredLayouts,
+                resolvedLayouts: resolvedAccesses.map(\.layout),
+                resolvedBufferLabels: resolvedAccesses.map { $0.buffer.label ?? "(unlabeled)" }
+            )
+        }
+    }
+
     /// Dump the generated decode kernel source for the optimized entry set.
     ///
     /// Unlike `dumpCompiledDecodePlan`, this returns the actual MSL that is fed
@@ -1602,6 +2194,7 @@ public struct MetalInferenceCompiler: Sendable {
             stafWeightStore: context.stafWeightStore,
             modelWeightFormat: context.weightFormat,
             bufferPrecision: context.decodeBufferPrecision,
+            accessPolicyResolver: context.accessPolicyResolver,
             kernelNameResolver: kernelName(for:entry:stafWeightStore:kernelContext:))
         let generated = sourceBuilder.generateSources(entries: optimization.fusedEntries)
         return sourceBuilder.format(generated)
@@ -1625,6 +2218,7 @@ public struct MetalInferenceCompiler: Sendable {
             stafWeightStore: context.stafWeightStore,
             modelWeightFormat: context.weightFormat,
             bufferPrecision: .float32,
+            accessPolicyResolver: context.accessPolicyResolver,
             kernelNameResolver: kernelName(for:entry:stafWeightStore:kernelContext:))
         let generated = sourceBuilder.generateSources(entries: optimization.fusedEntries)
         return sourceBuilder.format(generated)
@@ -1638,12 +2232,26 @@ public struct MetalInferenceCompiler: Sendable {
         stafWeightStore: STAFWeightStore? = nil,
         device: MTLDevice
     ) throws -> MetalDispatchPlan {
-        let context = makeCompileContext(
+        let initialContext = makeCompileContext(
             graph: graph,
             hiddenSize: hiddenSize,
             intermediateSize: intermediateSize,
             vocabSize: vocabSize,
             stafWeightStore: stafWeightStore,
+            device: device)
+        let initialOptimization = optimizedEntries(using: initialContext, kernelContext: initialContext.decodeKernelContext)
+        let specializedWeightStore = try prepareSpecializedWeightStore(
+            initialContext.stafWeightStore,
+            for: initialOptimization.fusedEntries,
+            device: initialContext.device,
+            accessPolicyResolver: initialContext.accessPolicyResolver
+        )
+        let context = makeCompileContext(
+            graph: graph,
+            hiddenSize: hiddenSize,
+            intermediateSize: intermediateSize,
+            vocabSize: vocabSize,
+            stafWeightStore: specializedWeightStore,
             device: device)
         let optimization = optimizedEntries(using: context, kernelContext: context.decodeKernelContext)
         let walkContext = optimization.walkContext
@@ -1652,7 +2260,7 @@ public struct MetalInferenceCompiler: Sendable {
 
         // Phase 3: Compile only the kernels needed by this model's dispatch entries
         // Decode uses F16 buffers (single token, no accumulation)
-        let (pipelineCache, _) = try compilePipelineCache(
+        let (pipelineCache, argumentEncoderCache, _) = try compilePipelineCache(
             entries: fusedEntries, stafWeightStore: context.stafWeightStore,
             bufferPrecision: context.decodeBufferPrecision, device: context.device)
         let planBuildContext = makePlanBuildContext(
@@ -1677,7 +2285,9 @@ public struct MetalInferenceCompiler: Sendable {
             bufferSet: bufferSet,
             stafWeightStore: context.stafWeightStore,
             hiddenSize: context.hiddenSize,
-            slotDimension: decodeSlotDimension)
+            slotDimension: decodeSlotDimension,
+            accessPolicyResolver: context.accessPolicyResolver
+        )
 
         for entry in fusedEntries {
             let resolved = try resolvedDispatch(for: entry, using: planBuildContext)
@@ -1689,7 +2299,10 @@ public struct MetalInferenceCompiler: Sendable {
                 bufferBindings: bindings.buffers,
                 bytesBindings: bindings.bytes,
                 threadgroupMemoryLength: resolved.config.sharedMemoryBytes,
-                sync: .bufferBarrier
+                sync: .bufferBarrier,
+                bufferAccesses: Self.decodeBufferAccesses(
+                    for: entry,
+                    buffers: bindings.buffers)
             ))
         }
 
@@ -1698,12 +2311,14 @@ public struct MetalInferenceCompiler: Sendable {
         let preparedArgumentSteps = try makePreparedArgumentTableSteps(
             argumentTableSteps,
             allocator: preparedArgumentAllocator)
-        let encodedArgumentSteps = makeEncodedArgumentTableSteps(
+        let encodedArgumentSteps = try makeEncodedArgumentTableSteps(
             preparedArgumentSteps,
-            pipelineCache: planBuildContext.pipelineCache)
+            pipelineCache: planBuildContext.pipelineCache,
+            argumentEncoders: argumentEncoderCache)
+        let optimizedBarrierSteps = Self.optimizeDecodeBarrierPolicies(encodedArgumentSteps)
 
         return MetalDispatchPlan(
-            steps: encodedArgumentSteps, buffers: bufferSet,
+            steps: optimizedBarrierSteps, buffers: bufferSet,
             unfusedEntryCount: unfusedCount, fusedEntryCount: fusedEntries.count)
     }
 
@@ -1745,7 +2360,7 @@ public struct MetalInferenceCompiler: Sendable {
 
         // Compile only the kernels needed by this model's prefill dispatch entries
         // For prefill (F32), attempts Metal 4 MPP GEMM with fallback to naive GEMM.
-        let (pipelineCache, prefillUsesMPP) = try compilePipelineCache(
+        let (pipelineCache, _, prefillUsesMPP) = try compilePipelineCache(
             entries: fusedEntries, stafWeightStore: context.stafWeightStore,
             bufferPrecision: .float32, device: context.device)
         let planBuildContext = makePlanBuildContext(
@@ -1803,7 +2418,10 @@ public struct MetalInferenceCompiler: Sendable {
         let bindingTables = steps.map(\.bindings)
         let residentBindings = try allocator.makeBindingTables(from: bindingTables)
         return zip(steps, residentBindings).map { step, bindings in
-            MetalDispatchStep(descriptor: step.descriptor, bindings: bindings)
+            MetalDispatchStep(
+                descriptor: step.descriptor,
+                bindings: bindings,
+                bufferAccesses: step.bufferAccesses)
         }
     }
 
@@ -1831,7 +2449,10 @@ public struct MetalInferenceCompiler: Sendable {
         let bindingTables = steps.map(\.bindings)
         let plannedBindings = allocator.makeBindingTables(from: bindingTables)
         return zip(steps, plannedBindings).map { step, bindings in
-            MetalDispatchStep(descriptor: step.descriptor, bindings: bindings)
+            MetalDispatchStep(
+                descriptor: step.descriptor,
+                bindings: bindings,
+                bufferAccesses: step.bufferAccesses)
         }
     }
 
@@ -1842,32 +2463,51 @@ public struct MetalInferenceCompiler: Sendable {
         let bindingTables = steps.map(\.bindings)
         let preparedBindings = try allocator.makeBindingTables(from: bindingTables)
         return zip(steps, preparedBindings).map { step, bindings in
-            MetalDispatchStep(descriptor: step.descriptor, bindings: bindings)
+            MetalDispatchStep(
+                descriptor: step.descriptor,
+                bindings: bindings,
+                bufferAccesses: step.bufferAccesses)
         }
     }
 
     private func makeEncodedArgumentTableSteps(
         _ steps: [MetalDispatchStep],
-        pipelineCache: [String: MTLComputePipelineState]
-    ) -> [MetalDispatchStep] {
-        steps.map { step in
+        pipelineCache: [String: MTLComputePipelineState],
+        argumentEncoders: [String: MTLArgumentEncoder]
+    ) throws -> [MetalDispatchStep] {
+        try steps.map { step in
             guard
                 let kernelLabel = step.pipeline.label,
                 let variantKernelName = Self.encodedArgumentTableKernelName(
                     for: kernelLabel,
                     bindings: step.bindings),
                 let variantPipeline = pipelineCache[variantKernelName],
+                let argumentEncoder = argumentEncoders[variantKernelName],
                 case .argumentTable(let table) = step.bindings.bufferBindings,
-                case .prepared(let buffer, let index, let offset) = table.encodingState
+                case .prepared(_, let index, let offset) = table.encodingState
             else {
                 return step
             }
+
+            guard let encodedArgumentBuffer = variantPipeline.device.makeBuffer(
+                length: argumentEncoder.encodedLength,
+                options: .storageModeShared)
+            else {
+                throw MetalCompilerError.deviceSetupFailed(
+                    "Cannot allocate encoded argument buffer for \(variantKernelName)")
+            }
+            encodedArgumentBuffer.label = "swift-lm.argtable.encoded.\(variantKernelName).layout\(table.layout.id)"
+            argumentEncoder.setArgumentBuffer(encodedArgumentBuffer, offset: 0)
+            for binding in table.bindings {
+                argumentEncoder.setBuffer(binding.buffer, offset: binding.offset, index: binding.index)
+            }
+            encodedArgumentBuffer.didModifyRange(0..<argumentEncoder.encodedLength)
 
             let encodedBindings = MetalBindingTable(
                 bufferBindings: .argumentTable(MetalArgumentTableBindings(
                     layout: table.layout,
                     bindings: table.bindings,
-                    encodingState: .encoded(buffer: buffer, index: index, offset: offset))),
+                    encodingState: .encoded(buffer: encodedArgumentBuffer, index: index, offset: offset))),
                 constantBindings: Self.constantBindingsForEncodedVariant(
                     step.bindings.constantBindings,
                     variantKernelName: variantKernelName))
@@ -1877,7 +2517,10 @@ public struct MetalInferenceCompiler: Sendable {
                 threadgroupSize: step.threadgroupSize,
                 threadgroupMemoryLength: step.threadgroupMemoryLength,
                 barrierPolicy: step.barrierPolicy)
-            return MetalDispatchStep(descriptor: encodedDescriptor, bindings: encodedBindings)
+            return MetalDispatchStep(
+                descriptor: encodedDescriptor,
+                bindings: encodedBindings,
+                bufferAccesses: step.bufferAccesses)
         }
     }
 
@@ -1885,12 +2528,84 @@ public struct MetalInferenceCompiler: Sendable {
         _ bindings: MetalConstantBindingSet,
         variantKernelName: String
     ) -> MetalConstantBindingSet {
-        switch variantKernelName {
-        case "gemv_2048_sq_argbuf", "gemv_2048_sq_bf16_argbuf",
-             "gemv_2048_6144_argbuf", "gemv_2048_6144_bf16_argbuf":
+        if (
+            variantKernelName.hasPrefix("gemv_2048_sq") ||
+            variantKernelName.hasPrefix("gemv_2048_6144")
+        ) && variantKernelName.hasSuffix("_argbuf") {
             return .inline([])
-        default:
-            return bindings
+        }
+        return bindings
+    }
+
+    private static func decodeBufferAccesses(
+        for entry: DispatchEntry,
+        buffers: [(index: Int, buffer: MTLBuffer, offset: Int)]
+    ) -> MetalBufferAccesses {
+        let mapped = buffers.map { MetalBufferBinding(index: $0.index, buffer: $0.buffer, offset: $0.offset) }
+
+        func binding(_ index: Int) -> MTLBuffer? {
+            mapped.first(where: { $0.index == index })?.buffer
+        }
+
+        func bindings(in indices: some Sequence<Int>) -> [MTLBuffer] {
+            indices.compactMap(binding(_:))
+        }
+
+        switch entry.kind {
+        case .projection:
+            return MetalBufferAccesses(
+                readBuffers: bindings(in: [0, 1]),
+                writeBuffers: bindings(in: [2]))
+        case .fusedSwiGLUProjection:
+            return MetalBufferAccesses(
+                readBuffers: bindings(in: [0, 1, 2]),
+                writeBuffers: bindings(in: [3]))
+        case .fusedCopyNorm, .fusedResidualAddCopyNorm, .fusedResidualAddNorm:
+            return MetalBufferAccesses(
+                readBuffers: bindings(in: [0, 1, 2]),
+                writeBuffers: bindings(in: [3]))
+        case .structuralCopy:
+            return MetalBufferAccesses(
+                readBuffers: bindings(in: [0]),
+                writeBuffers: bindings(in: [1]))
+        case .structuralAdd:
+            return MetalBufferAccesses(
+                readBuffers: bindings(in: [0, 1]),
+                writeBuffers: bindings(in: [2]))
+        case .batchedProjection(let batched):
+            let count = batched.projections.count
+            return MetalBufferAccesses(
+                readBuffers: bindings(in: 0..<(1 + count)),
+                writeBuffers: bindings(in: (1 + count)..<(1 + 2 * count)))
+        case .batchedFragment, .fragment:
+            return MetalBufferAccesses.conservative(mapped)
+        }
+    }
+
+    private static func optimizeDecodeBarrierPolicies(
+        _ steps: [MetalDispatchStep]
+    ) -> [MetalDispatchStep] {
+        var pendingWrites = Set<ObjectIdentifier>()
+        return steps.map { step in
+            let requiresBarrier = step.bufferAccesses.requiresBarrier(after: pendingWrites)
+            let barrierPolicy: MetalBarrierPolicy = requiresBarrier ? .bufferBarrier : .none
+            let descriptor = MetalDispatchDescriptor(
+                pipeline: step.pipeline,
+                gridSize: step.gridSize,
+                threadgroupSize: step.threadgroupSize,
+                threadgroupMemoryLength: step.threadgroupMemoryLength,
+                barrierPolicy: barrierPolicy)
+
+            if requiresBarrier {
+                pendingWrites = step.bufferAccesses.writes
+            } else {
+                pendingWrites.formUnion(step.bufferAccesses.writes)
+            }
+
+            return MetalDispatchStep(
+                descriptor: descriptor,
+                bindings: step.bindings,
+                bufferAccesses: step.bufferAccesses)
         }
     }
 
@@ -1917,22 +2632,25 @@ public struct MetalInferenceCompiler: Sendable {
             switch kernelName {
             case "embedding_lookup", "embedding_lookup_bf16":
                 return argumentTableVariantKernelName(for: kernelName)
-            case "gemv_2048_sq", "gemv_2048_sq_bf16":
-                return argumentTableVariantKernelName(for: kernelName)
-            case "gemv_2048_6144", "gemv_2048_6144_bf16":
-                return argumentTableVariantKernelName(for: kernelName)
-            case "gemv_8192_tiled", "gemv_8192_tiled_bf16":
-                return argumentTableVariantKernelName(for: kernelName)
-            case "gemv", "gemv_bf16":
-                return argumentTableVariantKernelName(for: kernelName)
-            case "gemv_vocab", "gemv_vocab_bf16":
-                return argumentTableVariantKernelName(for: kernelName)
+            default:
+                if kernelName.hasPrefix("gemv_2048_sq") ||
+                    kernelName.hasPrefix("gemv_2048_6144") ||
+                    kernelName == "gemv_8192_tiled" ||
+                    kernelName == "gemv_8192_tiled_bf16" ||
+                    kernelName == "gemv" ||
+                    kernelName == "gemv_bf16" ||
+                    kernelName == "gemv_vocab" ||
+                    kernelName == "gemv_vocab_bf16" {
+                    return argumentTableVariantKernelName(for: kernelName)
+                }
+                switch kernelName {
             case "residual_add":
                 return argumentTableVariantKernelName(for: kernelName)
             case "rope":
                 return argumentTableVariantKernelName(for: kernelName)
             default:
                 return nil
+                }
             }
         case [0, 1, 2, 3]:
             switch kernelName {
@@ -1940,9 +2658,20 @@ public struct MetalInferenceCompiler: Sendable {
                 return argumentTableVariantKernelName(for: kernelName)
             case "fused_residual_add_copy_rms_norm", "fused_residual_add_copy_rms_norm_bf16":
                 return argumentTableVariantKernelName(for: kernelName)
+            case "fused_residual_add_rms_norm", "fused_residual_add_rms_norm_bf16":
+                return argumentTableVariantKernelName(for: kernelName)
             case "fused_swiglu_projection_2048", "fused_swiglu_projection_2048_bf16":
                 return argumentTableVariantKernelName(for: kernelName)
             case "conv_state_update", "conv_state_update_bf16":
+                return argumentTableVariantKernelName(for: kernelName)
+            case "batched_qk_rms_norm_2", "batched_qk_rms_norm_bf16_2":
+                return argumentTableVariantKernelName(for: kernelName)
+            default:
+                return nil
+            }
+        case [0, 1, 2, 3, 4]:
+            switch kernelName {
+            case "batched_gemv2", "batched_gemv2_bf16":
                 return argumentTableVariantKernelName(for: kernelName)
             default:
                 return nil
@@ -1951,6 +2680,8 @@ public struct MetalInferenceCompiler: Sendable {
             if table.layout.indices == [0, 1, 2, 3, 4, 5, 6] {
                 switch kernelName {
                 case "flash_attn_decode":
+                    return argumentTableVariantKernelName(for: kernelName)
+                case "batched_gemv3", "batched_gemv3_bf16":
                     return argumentTableVariantKernelName(for: kernelName)
                 default:
                     return nil
@@ -2012,7 +2743,10 @@ public struct MetalInferenceCompiler: Sendable {
                 entry: entry,
                 stafWeightStore: stafWeightStore,
                 fallbackBuffer: buffers.hidden,
-                logsMisses: false)
+                logsMisses: false,
+                executionPhase: .prefill,
+                accessPolicyResolver: planBuildContext.compileContext.accessPolicyResolver
+            )
 
             // Determine the sequence-aware kernel and buffer routing
             switch entry.kind {
@@ -2347,7 +3081,10 @@ public struct MetalInferenceCompiler: Sendable {
                 entry: entry,
                 stafWeightStore: stafWeightStore,
                 fallbackBuffer: buffers.hidden,
-                logsMisses: false)
+                logsMisses: false,
+                executionPhase: .prefill,
+                accessPolicyResolver: planBuildContext.compileContext.accessPolicyResolver
+            )
 
             let normKernelName = Reduction(dimension: dimension, epsilon: epsilon)
                 .kernelName(context: planBuildContext.kernelContext)
@@ -2464,6 +3201,25 @@ public struct MetalInferenceCompiler: Sendable {
     private func preferredDecodeBufferPrecision(for weightFormat: WeightFormat) -> BufferPrecision {
         _ = weightFormat
         return .float16
+    }
+
+    private static func decodeWeightBindingBase(
+        for entry: DispatchEntry
+    ) -> (roles: [String], inputDimension: Int, outputDimension: Int)? {
+        switch entry.kind {
+        case .projection(let projection, _):
+            return ([projection.field], projection.inputDimension, projection.outputDimension)
+        case .fusedSwiGLUProjection(let fused):
+            return ([fused.gateField, fused.upField], fused.inputDimension, fused.outputDimension)
+        case .batchedProjection(let batched):
+            return (
+                batched.projections.map(\.field),
+                batched.inputDimension,
+                batched.totalOutputDimension
+            )
+        default:
+            return nil
+        }
     }
 
     private func walkRegion(
@@ -2655,6 +3411,24 @@ public struct MetalInferenceCompiler: Sendable {
                     outputDimension: projection.outputDimension,
                     inputDimension: projection.inputDimension,
                     schemeIdentifier: tensorInfo.format.schemeIdentifier) {
+                    let weightFormat: WeightFormat = tensorInfo.format.schemeIdentifier == .bf16RowMajor
+                        ? .bfloat16
+                        : .float16
+                    if let sourcePolicy = Self.resolvedInput2048SourcePolicy(
+                        for: projection,
+                        entry: entry,
+                        role: projection.field,
+                        weightFormat: weightFormat,
+                        stafWeightStore: stafWeightStore,
+                        accessPolicyResolver: ProjectionWeightAccessPolicyResolver(
+                            override: weightAccessPolicyOverride
+                        )
+                    ) {
+                        let baseName = family.kernelBaseName + sourcePolicy.weightLayoutPolicy.kernelNameSuffix
+                        return tensorInfo.format.schemeIdentifier == .bf16RowMajor
+                            ? baseName + "_bf16"
+                            : baseName
+                    }
                     return tensorInfo.format.schemeIdentifier == .bf16RowMajor
                         ? family.kernelBaseName + "_bf16"
                         : family.kernelBaseName
@@ -2668,6 +3442,19 @@ public struct MetalInferenceCompiler: Sendable {
                 outputDimension: projection.outputDimension,
                 inputDimension: projection.inputDimension,
                 schemeIdentifier: isBF16 ? .bf16RowMajor : .fp16RowMajor) {
+                if let sourcePolicy = Self.resolvedInput2048SourcePolicy(
+                    for: projection,
+                    entry: entry,
+                    role: projection.field,
+                    weightFormat: isBF16 ? .bfloat16 : .float16,
+                    stafWeightStore: stafWeightStore,
+                    accessPolicyResolver: ProjectionWeightAccessPolicyResolver(
+                        override: weightAccessPolicyOverride
+                    )
+                ) {
+                    let baseName = family.kernelBaseName + sourcePolicy.weightLayoutPolicy.kernelNameSuffix
+                    return isBF16 ? baseName + "_bf16" : baseName
+                }
                 return isBF16 ? family.kernelBaseName + "_bf16" : family.kernelBaseName
             }
             return isPrefill ? (isBF16 ? "gemm_bf16_f32s" : "gemm_f32s") : "gemv"
@@ -2742,6 +3529,7 @@ public struct MetalInferenceCompiler: Sendable {
         let stafWeightStore: STAFWeightStore?
         let hiddenSize: Int
         let slotDimension: Int
+        let accessPolicyResolver: ProjectionWeightAccessPolicyResolver
         private let elementSize = MemoryLayout<Float16>.size
         private var kvCacheIndex: Int = 0
         private var routingState = BufferRoutingState()
@@ -2750,12 +3538,14 @@ public struct MetalInferenceCompiler: Sendable {
             bufferSet: MetalBufferSet,
             stafWeightStore: STAFWeightStore?,
             hiddenSize: Int,
-            slotDimension: Int
+            slotDimension: Int,
+            accessPolicyResolver: ProjectionWeightAccessPolicyResolver
         ) {
             self.bufferSet = bufferSet
             self.stafWeightStore = stafWeightStore
             self.hiddenSize = hiddenSize
             self.slotDimension = slotDimension
+            self.accessPolicyResolver = accessPolicyResolver
         }
 
         mutating func bindings(
@@ -2767,7 +3557,10 @@ public struct MetalInferenceCompiler: Sendable {
                 entry: entry,
                 stafWeightStore: stafWeightStore,
                 fallbackBuffer: bufferSet.hidden,
-                logsMisses: true)
+                logsMisses: true,
+                executionPhase: .decode,
+                accessPolicyResolver: accessPolicyResolver
+            )
 
             func fusedNormBindings(dimension: Int, epsilon: Float) -> (
             buffers: [(index: Int, buffer: MTLBuffer, offset: Int)],
@@ -3072,11 +3865,18 @@ public struct MetalInferenceCompiler: Sendable {
         stafWeightStore: STAFWeightStore?,
         bufferPrecision: MetalSourceGenerator.BufferPrecision,
         device: MTLDevice
-    ) throws -> (pipelines: [String: MTLComputePipelineState], usesMPP: Bool) {
+    ) throws -> (
+        pipelines: [String: MTLComputePipelineState],
+        argumentEncoders: [String: MTLArgumentEncoder],
+        usesMPP: Bool
+    ) {
         let sourceBuilder = KernelSourceBuilder(
             stafWeightStore: stafWeightStore,
             modelWeightFormat: resolveModelWeightFormat(stafWeightStore),
             bufferPrecision: bufferPrecision,
+            accessPolicyResolver: ProjectionWeightAccessPolicyResolver(
+                override: weightAccessPolicyOverride
+            ),
             kernelNameResolver: kernelName(for:entry:stafWeightStore:kernelContext:))
         let generated = sourceBuilder.generateSources(entries: entries)
         let libraryBuilder = PipelineLibraryBuilder(device: device)

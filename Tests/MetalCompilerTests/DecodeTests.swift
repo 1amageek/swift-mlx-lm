@@ -105,9 +105,9 @@ struct DecodeTests {
 
         // Check KV cache has data (not all zeros)
         if let kv = decodePlan.buffers.kvCache {
-            let kvPtr = kv.keys.contents().bindMemory(to: Float16.self, capacity: 64)
-            let kvSample = (0..<8).map { Float(kvPtr[$0]) }
-            let kvNonZero = (0..<64).contains { Float(kvPtr[$0]) != 0.0 }
+            let kvValues = try readBuffer(kv.keys, precision: decodePlan.buffers.bufferPrecision, count: 64)
+            let kvSample = Array(kvValues.prefix(8))
+            let kvNonZero = kvValues.contains { $0 != 0.0 }
             print("[Decode after prefill] KV cache keys[0..7]: \(kvSample) nonZero=\(kvNonZero)")
             #expect(kvNonZero, "KV cache should have non-zero values after prefill")
         }
@@ -231,17 +231,17 @@ struct DecodeTests {
         let out1 = model1.decodeSync(tokenID: 708)
 
         // Capture logits
-        let logits1 = (0..<8).map { Float(decodePlan.buffers.logits.contents().bindMemory(to: Float16.self, capacity: 8)[$0]) }
+        let logits1 = try readBuffer(decodePlan.buffers.logits, precision: decodePlan.buffers.bufferPrecision, count: 8)
 
         // Run 2: decode WITHOUT prefill (empty KV cache, position 0)
         var model2 = try MetalInferenceModel(plan: decodePlan, device: device)
         // Zero out KV cache
         if let kv = decodePlan.buffers.kvCache {
-            memset(kv.keys.contents(), 0, kv.keys.length)
-            memset(kv.values.contents(), 0, kv.values.length)
+            try zeroBuffer(kv.keys)
+            try zeroBuffer(kv.values)
         }
         let out2 = model2.decodeSync(tokenID: 708)
-        let logits2 = (0..<8).map { Float(decodePlan.buffers.logits.contents().bindMemory(to: Float16.self, capacity: 8)[$0]) }
+        let logits2 = try readBuffer(decodePlan.buffers.logits, precision: decodePlan.buffers.bufferPrecision, count: 8)
 
         print("[KV test] With KV: logits=\(logits1) out=\(out1)")
         print("[KV test] No KV:   logits=\(logits2) out=\(out2)")
@@ -288,19 +288,19 @@ struct DecodeTests {
         // Decode token 708 (newline)
         var model1 = try MetalInferenceModel(plan: plan, device: device)
         let out1 = model1.decodeSync(tokenID: 708)
-        let hidden1 = (0..<16).map { Float(plan.buffers.hidden.contents().bindMemory(to: Float16.self, capacity: 2048)[$0]) }
-        let logitsDim = plan.buffers.logits.length / MemoryLayout<Float16>.size
-        let logitsPtr1 = plan.buffers.logits.contents().bindMemory(to: Float16.self, capacity: logitsDim)
+        let hidden1 = try readBuffer(plan.buffers.hidden, precision: plan.buffers.bufferPrecision, count: 16)
+        let logits1 = try readBuffer(plan.buffers.logits, precision: plan.buffers.bufferPrecision)
+        let logitsDim = logits1.count
         var maxVal1: Float = -.infinity; var maxIdx1 = 0
-        for i in 0..<logitsDim { let v = Float(logitsPtr1[i]); if v > maxVal1 { maxVal1 = v; maxIdx1 = i } }
+        for i in 0..<logitsDim { let v = logits1[i]; if v > maxVal1 { maxVal1 = v; maxIdx1 = i } }
 
         // Decode token 6423 ("hi" in this tokenizer)
         var model2 = try MetalInferenceModel(plan: plan, device: device)
         let out2 = model2.decodeSync(tokenID: 6423)
-        let hidden2 = (0..<16).map { Float(plan.buffers.hidden.contents().bindMemory(to: Float16.self, capacity: 2048)[$0]) }
-        let logitsPtr2 = plan.buffers.logits.contents().bindMemory(to: Float16.self, capacity: logitsDim)
+        let hidden2 = try readBuffer(plan.buffers.hidden, precision: plan.buffers.bufferPrecision, count: 16)
+        let logits2 = try readBuffer(plan.buffers.logits, precision: plan.buffers.bufferPrecision)
         var maxVal2: Float = -.infinity; var maxIdx2 = 0
-        for i in 0..<logitsDim { let v = Float(logitsPtr2[i]); if v > maxVal2 { maxVal2 = v; maxIdx2 = i } }
+        for i in 0..<logitsDim { let v = logits2[i]; if v > maxVal2 { maxVal2 = v; maxIdx2 = i } }
 
         print("[Token test] token=708: hidden[0..3]=\(Array(hidden1[0..<4])) logits max=\(maxVal1)@\(maxIdx1) out=\(out1)")
         print("[Token test] token=6423: hidden[0..3]=\(Array(hidden2[0..<4])) logits max=\(maxVal2)@\(maxIdx2) out=\(out2)")
@@ -324,11 +324,10 @@ struct DecodeTests {
 
         // Dump prefill logits top-5 from the PREFILL plan's logits buffer (not decode plan)
         do {
-            let prefillLogitsDim = prefillPlan.buffers.logits.length / MemoryLayout<Float16>.size
-            let pLogits = prefillPlan.buffers.logits.contents().bindMemory(to: Float16.self, capacity: prefillLogitsDim)
+            let pLogits = try readBuffer(prefillPlan.buffers.logits, precision: prefillPlan.buffers.bufferPrecision)
             var top5: [(Int, Float)] = []
-            for i in 0..<prefillLogitsDim {
-                let v = Float(pLogits[i])
+            for i in 0..<pLogits.count {
+                let v = pLogits[i]
                 if top5.count < 5 { top5.append((i, v)); top5.sort { $0.1 > $1.1 } }
                 else if v > top5.last!.1 { top5[4] = (i, v); top5.sort { $0.1 > $1.1 } }
             }
@@ -340,19 +339,19 @@ struct DecodeTests {
         var outputs: [Int32] = []
         var token: Int32 = 708
         for step in 0..<5 {
-            let hiddenPre = (0..<4).map { Float(plan.buffers.hidden.contents().bindMemory(to: Float16.self, capacity: 2048)[$0]) }
+            let hiddenPre = try readBuffer(plan.buffers.hidden, precision: plan.buffers.bufferPrecision, count: 4)
             token = model3.decodeSync(tokenID: token)
             outputs.append(token)
 
             // Top-5 logits
-            let lPtr = plan.buffers.logits.contents().bindMemory(to: Float16.self, capacity: logitsDim)
+            let logits = try readBuffer(plan.buffers.logits, precision: plan.buffers.bufferPrecision)
             var top5: [(Int, Float)] = []
             for i in 0..<logitsDim {
-                let v = Float(lPtr[i])
+                let v = logits[i]
                 if top5.count < 5 { top5.append((i, v)); top5.sort { $0.1 > $1.1 } }
                 else if v > top5.last!.1 { top5[4] = (i, v); top5.sort { $0.1 > $1.1 } }
             }
-            let hiddenPost = (0..<4).map { Float(plan.buffers.hidden.contents().bindMemory(to: Float16.self, capacity: 2048)[$0]) }
+            let hiddenPost = try readBuffer(plan.buffers.hidden, precision: plan.buffers.bufferPrecision, count: 4)
             print("[Token test] step \(step): in=\(token == outputs.last! ? token : outputs[step]) → out=\(token) hidden_pre=\(hiddenPre) hidden_post=\(hiddenPost)")
             print("[Token test] step \(step) top5: \(top5.map { "id=\($0.0) val=\(String(format: "%.2f", $0.1))" }.joined(separator: ", "))")
         }
@@ -370,10 +369,10 @@ struct DecodeTests {
             token2 = model4.decodeSync(tokenID: token2)
             outputs2.append(token2)
             // Top-3 logits
-            let lPtr = plan.buffers.logits.contents().bindMemory(to: Float16.self, capacity: logitsDim)
+            let logits = try readBuffer(plan.buffers.logits, precision: plan.buffers.bufferPrecision)
             var top3: [(Int, Float)] = []
             for i in 0..<logitsDim {
-                let v = Float(lPtr[i])
+                let v = logits[i]
                 if top3.count < 3 { top3.append((i, v)); top3.sort { $0.1 > $1.1 } }
                 else if v > top3.last!.1 { top3[2] = (i, v); top3.sort { $0.1 > $1.1 } }
             }
@@ -387,4 +386,63 @@ struct DecodeTests {
         let anyVaried = uniqueTokens.count > 1 || uniqueTokens2.count > 1
         #expect(anyVaried, "Decode must produce varied output — path A: \(uniqueTokens), path B: \(uniqueTokens2)")
     }
+
+    private func readBuffer(_ buffer: MTLBuffer, precision: BufferPrecision, count: Int? = nil) throws -> [Float] {
+        let readableBuffer = try makeReadableBuffer(buffer)
+        let readableCount = readableBuffer.length / precision.byteSize
+        let resolvedCount = min(count ?? readableCount, readableCount)
+
+        switch precision {
+        case .float16:
+            let pointer = readableBuffer.contents().bindMemory(to: Float16.self, capacity: resolvedCount)
+            return (0..<resolvedCount).map { Float(pointer[$0]) }
+        case .bfloat16:
+            let pointer = readableBuffer.contents().bindMemory(to: BFloat16.self, capacity: resolvedCount)
+            return (0..<resolvedCount).map { Float(pointer[$0]) }
+        case .float32:
+            let pointer = readableBuffer.contents().bindMemory(to: Float32.self, capacity: resolvedCount)
+            return (0..<resolvedCount).map { pointer[$0] }
+        }
+    }
+
+    private func zeroBuffer(_ buffer: MTLBuffer) throws {
+        if buffer.storageMode != .private {
+            memset(buffer.contents(), 0, buffer.length)
+            return
+        }
+
+        guard let queue = buffer.device.makeCommandQueue(),
+              let commandBuffer = queue.makeCommandBuffer(),
+              let blit = commandBuffer.makeBlitCommandEncoder() else {
+            throw DecodeTestError.unavailableCommandSubmission
+        }
+
+        blit.fill(buffer: buffer, range: 0..<buffer.length, value: 0)
+        blit.endEncoding()
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+    }
+
+    private func makeReadableBuffer(_ buffer: MTLBuffer) throws -> MTLBuffer {
+        if buffer.storageMode != .private {
+            return buffer
+        }
+
+        guard let staging = buffer.device.makeBuffer(length: buffer.length, options: .storageModeShared),
+              let queue = buffer.device.makeCommandQueue(),
+              let commandBuffer = queue.makeCommandBuffer(),
+              let blit = commandBuffer.makeBlitCommandEncoder() else {
+            throw DecodeTestError.unavailableCommandSubmission
+        }
+
+        blit.copy(from: buffer, sourceOffset: 0, to: staging, destinationOffset: 0, size: buffer.length)
+        blit.endEncoding()
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+        return staging
+    }
+}
+
+private enum DecodeTestError: Error {
+    case unavailableCommandSubmission
 }

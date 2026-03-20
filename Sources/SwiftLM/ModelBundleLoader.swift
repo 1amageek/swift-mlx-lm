@@ -53,7 +53,20 @@ public struct ModelBundleLoader: Sendable {
         // 2. Parallel: tokenizer + chat template + STAF
         // These are independent and can run concurrently.
         async let tokenizerTask = AutoTokenizer.from(modelFolder: directory)
-        async let weightStoreTask = loadOrConvertSTAF(directory: directory, device: device)
+        let safetensorsURLs = try findSafetensorsFiles(in: directory)
+        let stafMetadata = try STAFModelBundleMetadataBuilder().build(
+            directory: directory,
+            modelType: modelType,
+            config: config,
+            configData: configData,
+            safetensorsURLs: safetensorsURLs
+        )
+        async let weightStoreTask = loadOrConvertSTAF(
+            directory: directory,
+            device: device,
+            safetensorsURLs: safetensorsURLs,
+            metadata: stafMetadata
+        )
 
         let tokenizer = try await tokenizerTask
         let weightStore = try await weightStoreTask
@@ -123,22 +136,31 @@ public struct ModelBundleLoader: Sendable {
 
     /// Load STAF from cache, or convert from safetensors if needed.
     private func loadOrConvertSTAF(
-        directory: URL, device: MTLDevice
+        directory: URL,
+        device: MTLDevice,
+        safetensorsURLs: [URL],
+        metadata: STAFFileMetadata
     ) async throws -> STAFWeightStore {
-        let safetensorsURLs = try findSafetensorsFiles(in: directory)
         let stafURL = directory.appendingPathComponent("model.staf")
 
         let converter = STAFConverter()
         let needsConversion: Bool
         if FileManager.default.fileExists(atPath: stafURL.path) {
             needsConversion = !(try converter.isValid(
-                stafURL: stafURL, safetensorsURLs: safetensorsURLs))
+                stafURL: stafURL,
+                safetensorsURLs: safetensorsURLs,
+                expectedMetadata: metadata
+            ))
         } else {
             needsConversion = true
         }
 
         if needsConversion {
-            try converter.convert(safetensorsURLs: safetensorsURLs, outputURL: stafURL)
+            try converter.convert(
+                safetensorsURLs: safetensorsURLs,
+                outputURL: stafURL,
+                metadata: metadata
+            )
         }
         return try STAFLoader().load(at: stafURL, device: device)
     }

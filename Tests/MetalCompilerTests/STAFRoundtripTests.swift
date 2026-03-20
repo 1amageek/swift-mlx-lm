@@ -618,6 +618,90 @@ struct STAFRoundtripTests {
         #expect(isValid, "Freshly converted STAF should be valid")
     }
 
+    @Test("STAF header records format version and metadata table")
+    func headerContainsVersionedMetadataTable() throws {
+        let tempDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("staf_test_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDirectory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDirectory) }
+
+        var values: [Float16] = [1, 2, 3, 4]
+        let safetensorsURL = tempDirectory.appendingPathComponent("model.safetensors")
+        try writeSafetensors(
+            tensors: [
+                TestTensor(name: "test.weight", dtype: "F16", shape: [4],
+                           data: Data(bytes: &values, count: values.count * 2))
+            ],
+            to: safetensorsURL)
+
+        let stafURL = tempDirectory.appendingPathComponent("model.staf")
+        try STAFConverter().convert(safetensorsURLs: [safetensorsURL], outputURL: stafURL)
+
+        let stafData = try Data(contentsOf: stafURL)
+        guard let header = STAF.parseHeader(from: stafData) else {
+            Issue.record("Cannot parse STAF header")
+            return
+        }
+
+        #expect(header.magic == STAF.magic)
+        #expect(header.formatVersion == STAF.currentFormatVersion)
+        #expect(header.sectionTableOffset == UInt32(STAF.headerSize))
+        #expect(header.metadataEntryCount > 0)
+        #expect(header.metadataTableOffset == UInt32(STAF.headerSize + STAF.sectionEntrySize))
+        #expect(header.stringTableOffset > header.metadataTableOffset)
+    }
+
+    @Test("STAF metadata roundtrip preserves typed file metadata")
+    func fileMetadataRoundtrip() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else {
+            Issue.record("No Metal device")
+            return
+        }
+
+        let tempDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("staf_test_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDirectory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDirectory) }
+
+        var values: [Float16] = [1, 2, 3, 4]
+        let safetensorsURL = tempDirectory.appendingPathComponent("model.safetensors")
+        try writeSafetensors(
+            tensors: [
+                TestTensor(name: "test.weight", dtype: "F16", shape: [4],
+                           data: Data(bytes: &values, count: values.count * 2))
+            ],
+            to: safetensorsURL)
+
+        let metadata = STAFFileMetadata(values: [
+            "model.architecture_family": .string("transformer"),
+            "model.hidden_size": .uint64(2048),
+            "model.attention_heads": .uint32(16),
+            "model.tied_embeddings": .bool(true),
+            "model.rope_theta": .float64(10000.0),
+            "model.norm_eps": .float32(1e-5)
+        ])
+
+        let stafURL = tempDirectory.appendingPathComponent("model.staf")
+        try STAFConverter().convert(
+            safetensorsURLs: [safetensorsURL],
+            outputURL: stafURL,
+            metadata: metadata
+        )
+
+        let store = try STAFLoader().load(at: stafURL, device: device)
+
+        #expect(store.metadata[STAFMetadataKey.sourceFormat] == .string("safetensors"))
+        #expect(store.metadata[STAFMetadataKey.converterVersion] == .uint32(1))
+        #expect(store.metadata[STAFMetadataKey.sourceShardCount] == .uint64(1))
+        #expect(store.metadata[STAFMetadataKey.metadataSchemaVersion] == .uint32(1))
+        #expect(store.metadata["model.architecture_family"] == .string("transformer"))
+        #expect(store.metadata["model.hidden_size"] == .uint64(2048))
+        #expect(store.metadata["model.attention_heads"] == .uint32(16))
+        #expect(store.metadata["model.tied_embeddings"] == .bool(true))
+        #expect(store.metadata["model.rope_theta"] == .float64(10000.0))
+        #expect(store.metadata["model.norm_eps"] == .float32(1e-5))
+    }
+
     // MARK: - Helpers
 
     private func converter() -> STAFConverter { STAFConverter() }

@@ -76,16 +76,16 @@ public struct MetalSourceGenerator: Sendable {
         let input20486144BF16 = Input2048GEMVSourcePolicy.expanded6144(weightFormat: .bfloat16)
         let input20488192F16 = Input2048GEMVSourcePolicy.expanded8192(weightFormat: .float16)
         let input20488192BF16 = Input2048GEMVSourcePolicy.expanded8192(weightFormat: .bfloat16)
-        sources.append(generateInput2048GEMV(name: "gemv_2048_sq", bufferPrecision: decode, weightFormat: .float16, fixedOutputDimension: input2048SquareF16.fixedOutputDimension, fixedRowsPerThreadgroup: input2048SquareF16.fixedRowsPerThreadgroup, stagesInputAsFloat: input2048SquareF16.stagesInputAsFloat, unrollFactor: input2048SquareF16.unrollFactor))
-        sources.append(generateInput2048GEMV(name: "gemv_2048_sq_bf16", bufferPrecision: decode, weightFormat: .bfloat16, fixedOutputDimension: input2048SquareBF16.fixedOutputDimension, fixedRowsPerThreadgroup: input2048SquareBF16.fixedRowsPerThreadgroup, stagesInputAsFloat: input2048SquareBF16.stagesInputAsFloat, unrollFactor: input2048SquareBF16.unrollFactor))
-        sources.append(generateInput2048GEMVArgumentTableVariant(name: "gemv_2048_sq_argbuf", argumentBufferIndex: 30, bufferPrecision: decode, weightFormat: .float16, fixedOutputDimension: input2048SquareF16.fixedOutputDimension, includesDimensionBindings: false, fixedRowsPerThreadgroup: input2048SquareF16.fixedRowsPerThreadgroup, stagesInputAsFloat: input2048SquareF16.stagesInputAsFloat, usesPairwiseBF16Read: input2048SquareF16.usesPairwiseBF16ArgumentRead, unrollFactor: input2048SquareF16.unrollFactor))
-        sources.append(generateInput2048GEMVArgumentTableVariant(name: "gemv_2048_sq_bf16_argbuf", argumentBufferIndex: 30, bufferPrecision: decode, weightFormat: .bfloat16, fixedOutputDimension: input2048SquareBF16.fixedOutputDimension, includesDimensionBindings: false, fixedRowsPerThreadgroup: input2048SquareBF16.fixedRowsPerThreadgroup, stagesInputAsFloat: input2048SquareBF16.stagesInputAsFloat, usesPairwiseBF16Read: input2048SquareBF16.usesPairwiseBF16ArgumentRead, unrollFactor: input2048SquareBF16.unrollFactor))
-        sources.append(generateInput2048GEMV(name: "gemv_2048_6144", bufferPrecision: decode, weightFormat: .float16, fixedOutputDimension: input20486144F16.fixedOutputDimension, fixedRowsPerThreadgroup: input20486144F16.fixedRowsPerThreadgroup, stagesInputAsFloat: input20486144F16.stagesInputAsFloat, unrollFactor: input20486144F16.unrollFactor))
-        sources.append(generateInput2048GEMV(name: "gemv_2048_6144_bf16", bufferPrecision: decode, weightFormat: .bfloat16, fixedOutputDimension: input20486144BF16.fixedOutputDimension, fixedRowsPerThreadgroup: input20486144BF16.fixedRowsPerThreadgroup, stagesInputAsFloat: input20486144BF16.stagesInputAsFloat, unrollFactor: input20486144BF16.unrollFactor))
-        sources.append(generateInput2048GEMVArgumentTableVariant(name: "gemv_2048_6144_argbuf", argumentBufferIndex: 30, bufferPrecision: decode, weightFormat: .float16, fixedOutputDimension: input20486144F16.fixedOutputDimension, includesDimensionBindings: false, fixedRowsPerThreadgroup: input20486144F16.fixedRowsPerThreadgroup, stagesInputAsFloat: input20486144F16.stagesInputAsFloat, usesPairwiseBF16Read: input20486144F16.usesPairwiseBF16ArgumentRead, unrollFactor: input20486144F16.unrollFactor))
-        sources.append(generateInput2048GEMVArgumentTableVariant(name: "gemv_2048_6144_bf16_argbuf", argumentBufferIndex: 30, bufferPrecision: decode, weightFormat: .bfloat16, fixedOutputDimension: input20486144BF16.fixedOutputDimension, includesDimensionBindings: false, fixedRowsPerThreadgroup: input20486144BF16.fixedRowsPerThreadgroup, stagesInputAsFloat: input20486144BF16.stagesInputAsFloat, usesPairwiseBF16Read: input20486144BF16.usesPairwiseBF16ArgumentRead, unrollFactor: input20486144BF16.unrollFactor))
-        sources.append(generateInput2048GEMV(name: "gemv_2048_8192", bufferPrecision: decode, weightFormat: .float16, fixedOutputDimension: input20488192F16.fixedOutputDimension, fixedRowsPerThreadgroup: input20488192F16.fixedRowsPerThreadgroup, stagesInputAsFloat: input20488192F16.stagesInputAsFloat, unrollFactor: input20488192F16.unrollFactor))
-        sources.append(generateInput2048GEMV(name: "gemv_2048_8192_bf16", bufferPrecision: decode, weightFormat: .bfloat16, fixedOutputDimension: input20488192BF16.fixedOutputDimension, fixedRowsPerThreadgroup: input20488192BF16.fixedRowsPerThreadgroup, stagesInputAsFloat: input20488192BF16.stagesInputAsFloat, unrollFactor: input20488192BF16.unrollFactor))
+        sources.append(generateInput2048GEMV(name: "gemv_2048_sq", bufferPrecision: decode, weightFormat: .float16, fixedOutputDimension: input2048SquareF16.fixedOutputDimension, fixedRowsPerThreadgroup: input2048SquareF16.fixedRowsPerThreadgroup, fixedSimdgroups: input2048SquareF16.fixedSimdgroups, stagesInputAsFloat: input2048SquareF16.stagesInputAsFloat, weightLayoutPolicy: input2048SquareF16.weightLayoutPolicy, unrollFactor: input2048SquareF16.unrollFactor))
+        sources.append(generateInput2048GEMV(name: "gemv_2048_sq_bf16", bufferPrecision: decode, weightFormat: .bfloat16, fixedOutputDimension: input2048SquareBF16.fixedOutputDimension, fixedRowsPerThreadgroup: input2048SquareBF16.fixedRowsPerThreadgroup, fixedSimdgroups: input2048SquareBF16.fixedSimdgroups, stagesInputAsFloat: input2048SquareBF16.stagesInputAsFloat, weightLayoutPolicy: input2048SquareBF16.weightLayoutPolicy, unrollFactor: input2048SquareBF16.unrollFactor))
+        sources.append(generateInput2048GEMVArgumentTableVariant(name: "gemv_2048_sq_argbuf", argumentBufferIndex: 30, bufferPrecision: decode, weightFormat: .float16, fixedOutputDimension: input2048SquareF16.fixedOutputDimension, includesDimensionBindings: false, fixedRowsPerThreadgroup: input2048SquareF16.fixedRowsPerThreadgroup, fixedSimdgroups: input2048SquareF16.fixedSimdgroups, stagesInputAsFloat: input2048SquareF16.stagesInputAsFloat, weightLayoutPolicy: input2048SquareF16.weightLayoutPolicy, bf16ArgumentReadPolicy: input2048SquareF16.bf16ArgumentReadPolicy, unrollFactor: input2048SquareF16.unrollFactor))
+        sources.append(generateInput2048GEMVArgumentTableVariant(name: "gemv_2048_sq_bf16_argbuf", argumentBufferIndex: 30, bufferPrecision: decode, weightFormat: .bfloat16, fixedOutputDimension: input2048SquareBF16.fixedOutputDimension, includesDimensionBindings: false, fixedRowsPerThreadgroup: input2048SquareBF16.fixedRowsPerThreadgroup, fixedSimdgroups: input2048SquareBF16.fixedSimdgroups, stagesInputAsFloat: input2048SquareBF16.stagesInputAsFloat, weightLayoutPolicy: input2048SquareBF16.weightLayoutPolicy, bf16ArgumentReadPolicy: input2048SquareBF16.bf16ArgumentReadPolicy, unrollFactor: input2048SquareBF16.unrollFactor))
+        sources.append(generateInput2048GEMV(name: "gemv_2048_6144", bufferPrecision: decode, weightFormat: .float16, fixedOutputDimension: input20486144F16.fixedOutputDimension, fixedRowsPerThreadgroup: input20486144F16.fixedRowsPerThreadgroup, fixedSimdgroups: input20486144F16.fixedSimdgroups, stagesInputAsFloat: input20486144F16.stagesInputAsFloat, weightLayoutPolicy: input20486144F16.weightLayoutPolicy, unrollFactor: input20486144F16.unrollFactor))
+        sources.append(generateInput2048GEMV(name: "gemv_2048_6144_bf16", bufferPrecision: decode, weightFormat: .bfloat16, fixedOutputDimension: input20486144BF16.fixedOutputDimension, fixedRowsPerThreadgroup: input20486144BF16.fixedRowsPerThreadgroup, fixedSimdgroups: input20486144BF16.fixedSimdgroups, stagesInputAsFloat: input20486144BF16.stagesInputAsFloat, weightLayoutPolicy: input20486144BF16.weightLayoutPolicy, unrollFactor: input20486144BF16.unrollFactor))
+        sources.append(generateInput2048GEMVArgumentTableVariant(name: "gemv_2048_6144_argbuf", argumentBufferIndex: 30, bufferPrecision: decode, weightFormat: .float16, fixedOutputDimension: input20486144F16.fixedOutputDimension, includesDimensionBindings: false, fixedRowsPerThreadgroup: input20486144F16.fixedRowsPerThreadgroup, fixedSimdgroups: input20486144F16.fixedSimdgroups, stagesInputAsFloat: input20486144F16.stagesInputAsFloat, weightLayoutPolicy: input20486144F16.weightLayoutPolicy, bf16ArgumentReadPolicy: input20486144F16.bf16ArgumentReadPolicy, unrollFactor: input20486144F16.unrollFactor))
+        sources.append(generateInput2048GEMVArgumentTableVariant(name: "gemv_2048_6144_bf16_argbuf", argumentBufferIndex: 30, bufferPrecision: decode, weightFormat: .bfloat16, fixedOutputDimension: input20486144BF16.fixedOutputDimension, includesDimensionBindings: false, fixedRowsPerThreadgroup: input20486144BF16.fixedRowsPerThreadgroup, fixedSimdgroups: input20486144BF16.fixedSimdgroups, stagesInputAsFloat: input20486144BF16.stagesInputAsFloat, weightLayoutPolicy: input20486144BF16.weightLayoutPolicy, bf16ArgumentReadPolicy: input20486144BF16.bf16ArgumentReadPolicy, unrollFactor: input20486144BF16.unrollFactor))
+        sources.append(generateInput2048GEMV(name: "gemv_2048_8192", bufferPrecision: decode, weightFormat: .float16, fixedOutputDimension: input20488192F16.fixedOutputDimension, fixedRowsPerThreadgroup: input20488192F16.fixedRowsPerThreadgroup, stagesInputAsFloat: input20488192F16.stagesInputAsFloat, weightLayoutPolicy: input20488192F16.weightLayoutPolicy, unrollFactor: input20488192F16.unrollFactor))
+        sources.append(generateInput2048GEMV(name: "gemv_2048_8192_bf16", bufferPrecision: decode, weightFormat: .bfloat16, fixedOutputDimension: input20488192BF16.fixedOutputDimension, fixedRowsPerThreadgroup: input20488192BF16.fixedRowsPerThreadgroup, stagesInputAsFloat: input20488192BF16.stagesInputAsFloat, weightLayoutPolicy: input20488192BF16.weightLayoutPolicy, unrollFactor: input20488192BF16.unrollFactor))
         sources.append(generateVocabGEMV(name: "gemv_vocab", bufferPrecision: decode, weightFormat: .float16))
         sources.append(generateVocabGEMV(name: "gemv_vocab_bf16", bufferPrecision: decode, weightFormat: .bfloat16))
         sources.append(generateVocabGEMVArgumentTableVariant(name: "gemv_vocab_argbuf", argumentBufferIndex: 30, bufferPrecision: decode, weightFormat: .float16))
@@ -104,6 +104,22 @@ public struct MetalSourceGenerator: Sendable {
         sources.append(generateFusedResidualAddCopyRMSNorm(name: "fused_residual_add_copy_rms_norm_bf16", bufferPrecision: decode, weightFormat: .bfloat16))
         sources.append(generateFusedResidualAddCopyRMSNormArgumentTableVariant(name: "fused_residual_add_copy_rms_norm_argbuf", argumentBufferIndex: 30, bufferPrecision: decode, weightFormat: .float16))
         sources.append(generateFusedResidualAddCopyRMSNormArgumentTableVariant(name: "fused_residual_add_copy_rms_norm_bf16_argbuf", argumentBufferIndex: 30, bufferPrecision: decode, weightFormat: .bfloat16))
+        sources.append(generateFusedResidualAddRMSNorm(name: "fused_residual_add_rms_norm", bufferPrecision: decode, weightFormat: .float16))
+        sources.append(generateFusedResidualAddRMSNorm(name: "fused_residual_add_rms_norm_bf16", bufferPrecision: decode, weightFormat: .bfloat16))
+        sources.append(generateFusedResidualAddRMSNormArgumentTableVariant(name: "fused_residual_add_rms_norm_argbuf", argumentBufferIndex: 30, bufferPrecision: decode, weightFormat: .float16))
+        sources.append(generateFusedResidualAddRMSNormArgumentTableVariant(name: "fused_residual_add_rms_norm_bf16_argbuf", argumentBufferIndex: 30, bufferPrecision: decode, weightFormat: .bfloat16))
+        sources.append(generateBatchedGEMV2(name: "batched_gemv2", bufferPrecision: decode, weightFormat: .float16))
+        sources.append(generateBatchedGEMV2(name: "batched_gemv2_bf16", bufferPrecision: decode, weightFormat: .bfloat16))
+        sources.append(generateBatchedGEMV2ArgumentTableVariant(name: "batched_gemv2_argbuf", argumentBufferIndex: 30, bufferPrecision: decode, weightFormat: .float16))
+        sources.append(generateBatchedGEMV2ArgumentTableVariant(name: "batched_gemv2_bf16_argbuf", argumentBufferIndex: 30, bufferPrecision: decode, weightFormat: .bfloat16))
+        sources.append(generateBatchedGEMV3(name: "batched_gemv3", bufferPrecision: decode, weightFormat: .float16))
+        sources.append(generateBatchedGEMV3(name: "batched_gemv3_bf16", bufferPrecision: decode, weightFormat: .bfloat16))
+        sources.append(generateBatchedGEMV3ArgumentTableVariant(name: "batched_gemv3_argbuf", argumentBufferIndex: 30, bufferPrecision: decode, weightFormat: .float16))
+        sources.append(generateBatchedGEMV3ArgumentTableVariant(name: "batched_gemv3_bf16_argbuf", argumentBufferIndex: 30, bufferPrecision: decode, weightFormat: .bfloat16))
+        sources.append(generateBatchedPerHead2(name: "batched_qk_rms_norm_2", bufferPrecision: decode, weightFormat: .float16))
+        sources.append(generateBatchedPerHead2(name: "batched_qk_rms_norm_bf16_2", bufferPrecision: decode, weightFormat: .bfloat16))
+        sources.append(generateBatchedPerHead2ArgumentTableVariant(name: "batched_qk_rms_norm_2_argbuf", argumentBufferIndex: 30, bufferPrecision: decode, weightFormat: .float16))
+        sources.append(generateBatchedPerHead2ArgumentTableVariant(name: "batched_qk_rms_norm_bf16_2_argbuf", argumentBufferIndex: 30, bufferPrecision: decode, weightFormat: .bfloat16))
         sources.append(generateFusedSwiGLUProjection(name: "fused_swiglu_projection", bufferPrecision: decode, weightFormat: .float16))
         sources.append(generateFusedSwiGLUProjection(name: "fused_swiglu_projection_bf16", bufferPrecision: decode, weightFormat: .bfloat16))
         sources.append(generateInput2048FusedSwiGLUProjection(name: "fused_swiglu_projection_2048", bufferPrecision: decode, weightFormat: .float16, stagesInputAsFloat: false, unrollFactor: 8))
@@ -229,6 +245,15 @@ public struct MetalSourceGenerator: Sendable {
 
     inline float2 bf16x2_to_float2(ushort2 bf16) {
         return float2(bf16_to_float(bf16.x), bf16_to_float(bf16.y));
+    }
+
+    inline float4 bf16x4_to_float4(ushort4 bf16) {
+        return float4(
+            bf16_to_float(bf16.x),
+            bf16_to_float(bf16.y),
+            bf16_to_float(bf16.z),
+            bf16_to_float(bf16.w)
+        );
     }
 
     """
@@ -624,9 +649,12 @@ public struct MetalSourceGenerator: Sendable {
         weightFormat: WeightFormat,
         fixedOutputDimension: Int? = nil,
         fixedRowsPerThreadgroup: Int? = nil,
+        fixedSimdgroups: Int? = nil,
         stagesInputAsFloat: Bool = true,
+        weightLayoutPolicy: Input2048WeightLayoutPolicy = .rowMajor,
         unrollFactor: Int = 4
     ) -> String {
+        _ = weightLayoutPolicy
         return generateSpecializedDenseGEMV(
             name: name,
             bufferPrecision: bufferPrecision,
@@ -635,6 +663,7 @@ public struct MetalSourceGenerator: Sendable {
             fixedInputDimension: 2_048,
             fixedOutputDimension: fixedOutputDimension,
             fixedRowsPerThreadgroup: fixedRowsPerThreadgroup,
+            fixedSimdgroups: fixedSimdgroups,
             inputStaging: stagesInputAsFloat ? .float : .bufferPrecision,
             accumulationStyle: .indexed,
             unrollFactor: unrollFactor
@@ -649,10 +678,13 @@ public struct MetalSourceGenerator: Sendable {
         fixedOutputDimension: Int,
         includesDimensionBindings: Bool = true,
         fixedRowsPerThreadgroup: Int? = nil,
+        fixedSimdgroups: Int? = nil,
         stagesInputAsFloat: Bool = true,
-        usesPairwiseBF16Read: Bool = false,
+        weightLayoutPolicy: Input2048WeightLayoutPolicy = .rowMajor,
+        bf16ArgumentReadPolicy: Input2048BF16ArgumentReadPolicy = .scalar,
         unrollFactor: Int = 4
     ) -> String {
+        _ = weightLayoutPolicy
         let bt = bufferPrecision.metalType
         let wt = weightFormat.bufferType
         let stagedInputType = stagesInputAsFloat ? "float" : bt
@@ -660,9 +692,43 @@ public struct MetalSourceGenerator: Sendable {
         let stagedInputStore = stagesInputAsFloat ? "inputTile[j] = float(args.input[j]);" : "inputTile[j] = args.input[j];"
         let readWeight = { (expr: String) in weightFormat.readExpression(expr) }
         let effectiveUnroll = max(1, unrollFactor)
+        let effectiveThreadsPerThreadgroup = fixedSimdgroups.map { "SIMD_WIDTH * \($0)u" } ?? "threadsPerThreadgroup"
         let inputStructName = "\(name)_args"
-        let usesPairwiseWeightRead = usesPairwiseBF16Read && weightFormat == .bfloat16 && effectiveUnroll.isMultiple(of: 2)
-        let weightRowDeclaration = usesPairwiseWeightRead
+        let usesPairwiseWeightRead =
+            (bf16ArgumentReadPolicy == .pairwise ||
+             bf16ArgumentReadPolicy == .pairwisePointerInput ||
+             bf16ArgumentReadPolicy == .pairwisePointerFloatInput) &&
+            weightFormat == .bfloat16 &&
+            effectiveUnroll.isMultiple(of: 2)
+        let usesPointerInputRead =
+            bf16ArgumentReadPolicy == .pairwisePointerInput
+        let usesPointerFloatInputRead = bf16ArgumentReadPolicy == .pairwisePointerFloatInput
+        let usesPacked4PointerInputRead =
+            (bf16ArgumentReadPolicy == .packed4PointerInput ||
+             bf16ArgumentReadPolicy == .packed4FixedPointerInput ||
+             bf16ArgumentReadPolicy == .packed4ThreadgroupFixedPointerInput) &&
+            weightFormat == .bfloat16 &&
+            effectiveUnroll == 4
+        let usesPacked4FixedPointerInputRead =
+            (bf16ArgumentReadPolicy == .packed4FixedPointerInput ||
+             bf16ArgumentReadPolicy == .packed4ThreadgroupFixedPointerInput) &&
+            weightFormat == .bfloat16 &&
+            effectiveUnroll == 4
+        let usesPacked4ThreadgroupFixedPointerInputRead =
+            bf16ArgumentReadPolicy == .packed4ThreadgroupFixedPointerInput &&
+            weightFormat == .bfloat16 &&
+            effectiveUnroll == 4
+        let usesBlockedRows8Tile128Layout =
+            weightLayoutPolicy == .blockedRows8Tiles128 &&
+            usesPairwiseWeightRead &&
+            fixedRowsPerThreadgroup == 8 &&
+            fixedOutputDimension.isMultiple(of: 8)
+        let usesBlockedRows4Tile128Layout =
+            weightLayoutPolicy == .blockedRows4Tiles128 &&
+            usesPacked4PointerInputRead &&
+            fixedRowsPerThreadgroup == 4 &&
+            fixedOutputDimension.isMultiple(of: 4)
+        let weightRowDeclaration = (usesPairwiseWeightRead || usesPacked4PointerInputRead)
             ? ""
             : "device const \(wt)* weightRow = args.weight + row * 2048u;"
         let pairCount = effectiveUnroll / 2
@@ -677,6 +743,20 @@ public struct MetalSourceGenerator: Sendable {
         }.joined(separator: "\n")
         let pairwiseAccumulate = (0..<pairCount).map { pair -> String in
             let base = pair * 2
+            if usesPointerInputRead {
+                return """
+                    float2 w\(pair) = bf16x2_to_float2(weightLane[\(pair)]);
+                    sum += w\(pair).x * float(inputLane[\(base)]);
+                    sum += w\(pair).y * float(inputLane[\(base + 1)]);
+                    """
+            }
+            if usesPointerFloatInputRead {
+                return """
+                    float2 w\(pair) = bf16x2_to_float2(weightLane[\(pair)]);
+                    sum += w\(pair).x * inputLane[\(base)];
+                    sum += w\(pair).y * inputLane[\(base + 1)];
+                    """
+            }
             return """
                 float2 w\(pair) = bf16x2_to_float2(weightLane[\(pair)]);
                 sum += w\(pair).x * \(stagedInputRead("j + \(base)"));
@@ -705,18 +785,41 @@ public struct MetalSourceGenerator: Sendable {
             if (row >= \(fixedOutputDimension)u) return;
 
             threadgroup \(stagedInputType) inputTile[stagedInputElements];
-            for (uint j = tid; j < stagedInputElements; j += threadsPerThreadgroup) {
+            for (uint j = tid; j < stagedInputElements; j += \(effectiveThreadsPerThreadgroup)) {
                 \(stagedInputStore)
             }
             threadgroup_barrier(mem_flags::mem_threadgroup);
 
             float sum = 0.0f;
             \(weightRowDeclaration)
-            \(usesPairwiseWeightRead ? """
-            device const ushort2* weightLane = (device const ushort2*)(args.weight + row * 2048u) + tiisg * \(pairCount);
+            \(usesPacked4PointerInputRead ? """
+            \(usesBlockedRows4Tile128Layout
+                ? "device const ushort4* weightLane = (device const ushort4*)args.weight + gid * 2048u + sgitg * 32u + tiisg;"
+                : usesPacked4ThreadgroupFixedPointerInputRead
+                    ? "device const ushort4* weightLane = (device const ushort4*)args.weight + gid * 2048u + sgitg * 512u + tiisg;"
+                : "device const ushort4* weightLane = (device const ushort4*)(args.weight + row * 2048u) + tiisg;")
+            threadgroup const \(bt)* inputLane = inputTile + tiisg * 4;
+            \(usesPacked4FixedPointerInputRead
+                ? "for (uint iteration = 0; iteration < stagedInputElements / (SIMD_WIDTH * 4u); ++iteration) {"
+                : "for (uint j = tiisg * 4; j < 2048u; j += SIMD_WIDTH * 4) {")
+                float4 w = bf16x4_to_float4(weightLane[0]);
+                sum += w.x * float(inputLane[0]);
+                sum += w.y * float(inputLane[1]);
+                sum += w.z * float(inputLane[2]);
+                sum += w.w * float(inputLane[3]);
+                weightLane += \(usesBlockedRows4Tile128Layout ? "128u" : "SIMD_WIDTH");
+                inputLane += SIMD_WIDTH * 4;
+            }
+            """ : usesPairwiseWeightRead ? """
+            \(usesBlockedRows8Tile128Layout
+                ? "device const ushort2* weightLane = (device const ushort2*)args.weight + gid * 8192u + sgitg * 64u + tiisg * \(pairCount);"
+                : "device const ushort2* weightLane = (device const ushort2*)(args.weight + row * 2048u) + tiisg * \(pairCount);")
+            \(usesPointerInputRead ? "threadgroup const \(bt)* inputLane = inputTile + tiisg * \(effectiveUnroll);" : "")
+            \(usesPointerFloatInputRead ? "threadgroup const float* inputLane = inputTile + tiisg * \(effectiveUnroll);" : "")
             for (uint j = tiisg * \(effectiveUnroll); j < 2048u; j += SIMD_WIDTH * \(effectiveUnroll)) {
                 \(pairwiseAccumulate)
-                weightLane += SIMD_WIDTH * \(pairCount);
+                weightLane += \(usesBlockedRows8Tile128Layout ? "512u" : "SIMD_WIDTH * \(pairCount)");
+                \(usesPointerInputRead || usesPointerFloatInputRead ? "inputLane += SIMD_WIDTH * \(effectiveUnroll);" : "")
             }
             """ : """
             for (uint j = tiisg * \(effectiveUnroll); j < 2048u; j += SIMD_WIDTH * \(effectiveUnroll)) {
@@ -1001,6 +1104,7 @@ public struct MetalSourceGenerator: Sendable {
         fixedInputDimension: Int? = nil,
         fixedOutputDimension: Int? = nil,
         fixedRowsPerThreadgroup: Int? = nil,
+        fixedSimdgroups: Int? = nil,
         inputStaging: SpecializedDenseInputStaging = .bufferPrecision,
         accumulationStyle: SpecializedDenseAccumulationStyle = .indexed,
         unrollFactor: Int = 4,
@@ -1015,6 +1119,7 @@ public struct MetalSourceGenerator: Sendable {
         let effectiveUnroll = max(1, unrollFactor)
         let inputDimensionExpr = fixedInputDimension.map { "\($0)u" } ?? "inputDimension"
         let outputDimensionExpr = fixedOutputDimension.map { "\($0)u" } ?? "outputDimension"
+        let effectiveThreadsPerThreadgroupExpr = fixedSimdgroups.map { "SIMD_WIDTH * \($0)u" } ?? "threadsPerThreadgroup"
         let rowsPerThreadgroupExpr = fixedRowsPerThreadgroup.map { "\($0)u" } ?? "max(1u, threadsPerThreadgroup / SIMD_WIDTH)"
         let canElideInputBounds = if let fixedInputDimension {
             fixedInputDimension % (32 * effectiveUnroll) == 0
@@ -1075,7 +1180,7 @@ public struct MetalSourceGenerator: Sendable {
             if (row >= \(outputDimensionExpr)) return;
 
             threadgroup \(stagedInputType) inputTile[stagedInputElements];
-            for (uint j = tid; j < stagedInputElements; j += threadsPerThreadgroup) {
+            for (uint j = tid; j < stagedInputElements; j += \(effectiveThreadsPerThreadgroupExpr)) {
                 \(inputTileLoad)
             }
             threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -1639,6 +1744,65 @@ public struct MetalSourceGenerator: Sendable {
         """
     }
 
+    public static func generateFusedResidualAddRMSNormArgumentTableVariant(
+        name: String,
+        argumentBufferIndex: Int,
+        bufferPrecision: BufferPrecision,
+        weightFormat: WeightFormat
+    ) -> String {
+        let bt = bufferPrecision.metalType
+        let wt = weightFormat.bufferType
+        let readWeight = { (expr: String) in weightFormat.readExpression(expr) }
+        let inputStructName = "\(name)_args"
+
+        return """
+        struct \(inputStructName) {
+            device \(bt)* hidden [[id(0)]];
+            device const \(bt)* residual [[id(1)]];
+            device const \(wt)* weight [[id(2)]];
+            device \(bt)* output [[id(3)]];
+        };
+
+        kernel void \(name)(
+            constant \(inputStructName)& args        [[buffer(\(argumentBufferIndex))]],
+            constant uint& dimension                 [[buffer(4)]],
+            constant float& epsilon                 [[buffer(5)]],
+            uint tid                                [[thread_index_in_threadgroup]],
+            uint tiisg                              [[thread_index_in_simdgroup]],
+            uint sgitg                              [[simdgroup_index_in_threadgroup]],
+            uint threadgroupSize                    [[threads_per_threadgroup]]
+        ) {
+            float sumSquared = 0.0f;
+            for (uint i = tid; i < dimension; i += threadgroupSize) {
+                float h = float(args.hidden[i]) + float(args.residual[i]);
+                sumSquared += h * h;
+            }
+            sumSquared = simd_sum(sumSquared);
+
+            threadgroup float shared[32];
+            if (tid % SIMD_WIDTH == 0) shared[tid / SIMD_WIDTH] = sumSquared;
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+
+            if (sgitg == 0) {
+                const uint sgCount = (threadgroupSize + SIMD_WIDTH - 1) / SIMD_WIDTH;
+                float total = tiisg < sgCount ? shared[tiisg] : 0.0f;
+                total = simd_sum(total);
+                if (tiisg == 0) {
+                    shared[0] = rsqrt(total / float(dimension) + epsilon);
+                }
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+
+            float scale = shared[0];
+            for (uint i = tid; i < dimension; i += threadgroupSize) {
+                float h = float(args.hidden[i]) + float(args.residual[i]);
+                args.hidden[i] = \(bt)(h);
+                args.output[i] = \(bt)(h * scale * \(readWeight("args.weight[i]")));
+            }
+        }
+        """
+    }
+
     // MARK: - Batched GEMV
 
     /// Generate fused gate_proj + up_proj + SwiGLU kernel for decode.
@@ -1912,6 +2076,72 @@ public struct MetalSourceGenerator: Sendable {
         """
     }
 
+    public static func generateBatchedGEMV2ArgumentTableVariant(
+        name: String,
+        argumentBufferIndex: Int,
+        bufferPrecision: BufferPrecision,
+        weightFormat: WeightFormat
+    ) -> String {
+        let bt = bufferPrecision.metalType
+        let wt = weightFormat.bufferType
+        let readWeight = { (expr: String) in weightFormat.readExpression(expr) }
+        let inputStructName = "\(name)_args"
+
+        return """
+        struct \(inputStructName) {
+            device const \(bt)* input [[id(0)]];
+            device const \(wt)* weight0 [[id(1)]];
+            device const \(wt)* weight1 [[id(2)]];
+            device \(bt)* output0 [[id(3)]];
+            device \(bt)* output1 [[id(4)]];
+        };
+
+        kernel void \(name)(
+            constant \(inputStructName)& args        [[buffer(\(argumentBufferIndex))]],
+            constant uint& inputDimension            [[buffer(5)]],
+            constant uint& outputDim0               [[buffer(6)]],
+            constant uint& outputDim1               [[buffer(7)]],
+            uint gid                                 [[threadgroup_position_in_grid]],
+            uint tid                                 [[thread_index_in_threadgroup]],
+            uint tiisg                               [[thread_index_in_simdgroup]],
+            uint sgitg                               [[simdgroup_index_in_threadgroup]],
+            uint threadsPerThreadgroup               [[threads_per_threadgroup]]
+        ) {
+            const uint tileElements = 256;
+            const uint rowsPerThreadgroup = max(1u, threadsPerThreadgroup / SIMD_WIDTH);
+            const uint globalRow = gid * rowsPerThreadgroup + sgitg;
+            const uint totalRows = outputDim0 + outputDim1;
+            if (globalRow >= totalRows) return;
+
+            const bool isSecond = (globalRow >= outputDim0);
+            const uint localRow = isSecond ? (globalRow - outputDim0) : globalRow;
+            device const \(wt)* weight = isSecond ? args.weight1 : args.weight0;
+            device \(bt)* output = isSecond ? args.output1 : args.output0;
+
+            threadgroup \(bt) inputTile[tileElements];
+            float sum = 0.0f;
+            device const \(wt)* weightRow = weight + localRow * inputDimension;
+            for (uint base = 0; base < inputDimension; base += tileElements) {
+                for (uint j = tid; j < tileElements; j += threadsPerThreadgroup) {
+                    const uint inputIndex = base + j;
+                    inputTile[j] = inputIndex < inputDimension ? args.input[inputIndex] : \(bt)(0.0f);
+                }
+                threadgroup_barrier(mem_flags::mem_threadgroup);
+
+                const uint tileCount = min(tileElements, inputDimension - base);
+                for (uint j = tiisg; j < tileCount; j += SIMD_WIDTH) {
+                    sum += \(readWeight("weightRow[base + j]")) * float(inputTile[j]);
+                }
+                threadgroup_barrier(mem_flags::mem_threadgroup);
+            }
+            sum = simd_sum(sum);
+            if (tiisg == 0) {
+                output[localRow] = \(bt)(sum);
+            }
+        }
+        """
+    }
+
     /// Generate batched GEMV kernel for 3 projections sharing the same input.
     public static func generateBatchedGEMV3(
         name: String,
@@ -1982,6 +2212,81 @@ public struct MetalSourceGenerator: Sendable {
         """
     }
 
+    public static func generateBatchedGEMV3ArgumentTableVariant(
+        name: String,
+        argumentBufferIndex: Int,
+        bufferPrecision: BufferPrecision,
+        weightFormat: WeightFormat
+    ) -> String {
+        let bt = bufferPrecision.metalType
+        let wt = weightFormat.bufferType
+        let readWeight = { (expr: String) in weightFormat.readExpression(expr) }
+        let inputStructName = "\(name)_args"
+
+        return """
+        struct \(inputStructName) {
+            device const \(bt)* input [[id(0)]];
+            device const \(wt)* weight0 [[id(1)]];
+            device const \(wt)* weight1 [[id(2)]];
+            device const \(wt)* weight2 [[id(3)]];
+            device \(bt)* output0 [[id(4)]];
+            device \(bt)* output1 [[id(5)]];
+            device \(bt)* output2 [[id(6)]];
+        };
+
+        kernel void \(name)(
+            constant \(inputStructName)& args        [[buffer(\(argumentBufferIndex))]],
+            constant uint& inputDimension            [[buffer(7)]],
+            constant uint& outputDim0               [[buffer(8)]],
+            constant uint& outputDim1               [[buffer(9)]],
+            constant uint& outputDim2               [[buffer(10)]],
+            uint gid                                 [[threadgroup_position_in_grid]],
+            uint tid                                 [[thread_index_in_threadgroup]],
+            uint tiisg                               [[thread_index_in_simdgroup]],
+            uint sgitg                               [[simdgroup_index_in_threadgroup]],
+            uint threadsPerThreadgroup               [[threads_per_threadgroup]]
+        ) {
+            const uint tileElements = 256;
+            const uint rowsPerThreadgroup = max(1u, threadsPerThreadgroup / SIMD_WIDTH);
+            const uint globalRow = gid * rowsPerThreadgroup + sgitg;
+            const uint totalRows = outputDim0 + outputDim1 + outputDim2;
+            if (globalRow >= totalRows) return;
+
+            device const \(wt)* weight;
+            device \(bt)* output;
+            uint localRow;
+            if (globalRow < outputDim0) {
+                weight = args.weight0; output = args.output0; localRow = globalRow;
+            } else if (globalRow < outputDim0 + outputDim1) {
+                weight = args.weight1; output = args.output1; localRow = globalRow - outputDim0;
+            } else {
+                weight = args.weight2; output = args.output2; localRow = globalRow - outputDim0 - outputDim1;
+            }
+
+            threadgroup \(bt) inputTile[tileElements];
+            float sum = 0.0f;
+            device const \(wt)* weightRow = weight + localRow * inputDimension;
+            for (uint base = 0; base < inputDimension; base += tileElements) {
+                for (uint j = tid; j < tileElements; j += threadsPerThreadgroup) {
+                    const uint inputIndex = base + j;
+                    inputTile[j] = inputIndex < inputDimension ? args.input[inputIndex] : \(bt)(0.0f);
+                }
+                threadgroup_barrier(mem_flags::mem_threadgroup);
+
+                const uint tileCount = min(tileElements, inputDimension - base);
+                for (uint j = tiisg; j < tileCount; j += SIMD_WIDTH) {
+                    sum += \(readWeight("weightRow[base + j]")) * float(inputTile[j]);
+                }
+                threadgroup_barrier(mem_flags::mem_threadgroup);
+            }
+            sum = simd_sum(sum);
+            if (tiisg == 0) {
+                output[localRow] = \(bt)(sum);
+            }
+        }
+        """
+    }
+
     // MARK: - Batched Per-Head Fragment
 
     /// Generate batched per-head kernel for 2 independent in-place operations.
@@ -2022,6 +2327,73 @@ public struct MetalSourceGenerator: Sendable {
             uint offset = localHead * headDim;
 
             // Per-head RMS norm (in-place)
+            float sumSq = 0.0f;
+            for (uint i = tid; i < headDim; i += threadgroupSize) {
+                float v = float(data[offset + i]);
+                sumSq += v * v;
+            }
+            sumSq = simd_sum(sumSq);
+
+            threadgroup float shared[32];
+            if (tid % SIMD_WIDTH == 0) shared[tid / SIMD_WIDTH] = sumSq;
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+
+            if (tid == 0) {
+                float total = 0.0f;
+                uint sgCount = (threadgroupSize + SIMD_WIDTH - 1) / SIMD_WIDTH;
+                for (uint i = 0; i < sgCount; i++) total += shared[i];
+                shared[0] = rsqrt(total / float(headDim) + epsilon);
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+
+            float scale = shared[0];
+            for (uint i = tid; i < headDim; i += threadgroupSize) {
+                data[offset + i] = \(bt)(float(data[offset + i]) * scale * \(readWeight("weight[i]")));
+            }
+        }
+        """
+    }
+
+    public static func generateBatchedPerHead2ArgumentTableVariant(
+        name: String,
+        argumentBufferIndex: Int,
+        bufferPrecision: BufferPrecision,
+        weightFormat: WeightFormat
+    ) -> String {
+        let bt = bufferPrecision.metalType
+        let wt = weightFormat.bufferType
+        let readWeight = { (expr: String) in weightFormat.readExpression(expr) }
+        let inputStructName = "\(name)_args"
+
+        return """
+        struct \(inputStructName) {
+            device \(bt)* data0 [[id(0)]];
+            device \(bt)* data1 [[id(1)]];
+            device const \(wt)* weight0 [[id(2)]];
+            device const \(wt)* weight1 [[id(3)]];
+        };
+
+        kernel void \(name)(
+            constant \(inputStructName)& args        [[buffer(\(argumentBufferIndex))]],
+            constant uint& count0                    [[buffer(4)]],
+            constant uint& count1                    [[buffer(5)]],
+            constant uint& headDim                   [[buffer(6)]],
+            constant float& epsilon                  [[buffer(7)]],
+            uint headIndex                           [[threadgroup_position_in_grid]],
+            uint tid                                 [[thread_index_in_threadgroup]],
+            uint threadgroupSize                     [[threads_per_threadgroup]]
+        ) {
+            device \(bt)* data;
+            device const \(wt)* weight;
+            uint localHead;
+            if (headIndex < count0) {
+                data = args.data0; weight = args.weight0; localHead = headIndex;
+            } else {
+                data = args.data1; weight = args.weight1; localHead = headIndex - count0;
+                if (localHead >= count1) return;
+            }
+            uint offset = localHead * headDim;
+
             float sumSq = 0.0f;
             for (uint i = tid; i < headDim; i += threadgroupSize) {
                 float v = float(data[offset + i]);

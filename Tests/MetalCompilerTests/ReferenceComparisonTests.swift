@@ -28,6 +28,8 @@ struct ReferenceComparisonTests {
 
     @Test("Prefill logits match Python reference")
     func prefillLogitsMatchReference() throws {
+        let gpuLock = try GPUTestExclusion.acquire()
+        defer { gpuLock.release() }
         let env = try setupOrSkip()
         var model = env.model
 
@@ -61,6 +63,8 @@ struct ReferenceComparisonTests {
 
     @Test("Prefill embedding matches Python reference")
     func prefillEmbeddingMatches() throws {
+        let gpuLock = try GPUTestExclusion.acquire()
+        defer { gpuLock.release() }
         let env = try setupOrSkip()
 
         // Run prefill step-by-step to capture embedding output
@@ -124,6 +128,8 @@ struct ReferenceComparisonTests {
 
     @Test("Conv state after prefill matches Python reference")
     func convStateAfterPrefillMatches() throws {
+        let gpuLock = try GPUTestExclusion.acquire()
+        defer { gpuLock.release() }
         let env = try setupOrSkip()
         var model = env.model
 
@@ -164,6 +170,8 @@ struct ReferenceComparisonTests {
 
     @Test("Prefill per-layer hidden states match Python reference")
     func prefillPerLayerMatch() throws {
+        let gpuLock = try GPUTestExclusion.acquire()
+        defer { gpuLock.release() }
         let env = try setupOrSkip()
         guard let prefillPlan = env.model.prefillPlan else {
             Issue.record("No prefill plan"); return
@@ -277,6 +285,8 @@ struct ReferenceComparisonTests {
 
     @Test("Prefill argmax matches Python for all sequence lengths 5-11")
     func prefillArgmaxSweep() throws {
+        let gpuLock = try GPUTestExclusion.acquire()
+        defer { gpuLock.release() }
         guard let device = MTLCreateSystemDefaultDevice() else { throw SetupError.noDevice }
         let stafURL = URL(fileURLWithPath: Self.stafPath)
         guard FileManager.default.fileExists(atPath: stafURL.path) else { throw SetupError.noSTAF }
@@ -322,6 +332,8 @@ struct ReferenceComparisonTests {
 
     @Test("Dump IR graph and dispatch entries for LFM2")
     func dumpGraphAndDispatches() throws {
+        let gpuLock = try GPUTestExclusion.acquire()
+        defer { gpuLock.release() }
         let config = ModelConfig(
             hiddenSize: 2048, layerCount: 16, intermediateSize: 8192,
             vocabSize: 65536, attentionHeads: 32, kvHeads: 8, headDim: 64,
@@ -352,6 +364,8 @@ struct ReferenceComparisonTests {
 
     @Test("Dump compiled decode plan for LFM2")
     func dumpCompiledDecodePlan() throws {
+        let gpuLock = try GPUTestExclusion.acquire()
+        defer { gpuLock.release() }
         guard let device = MTLCreateSystemDefaultDevice() else { throw SetupError.noDevice }
         let stafURL = URL(fileURLWithPath: Self.stafPath)
         guard FileManager.default.fileExists(atPath: stafURL.path) else {
@@ -393,21 +407,29 @@ struct ReferenceComparisonTests {
 
     @Test("Decode step 0 logits match Python reference")
     func decodeStep0LogitsMatch() throws {
+        let gpuLock = try GPUTestExclusion.acquire()
+        defer { gpuLock.release() }
         try verifyDecodeStep(step: 0)
     }
 
     @Test("Decode step 1 logits match Python reference")
     func decodeStep1LogitsMatch() throws {
+        let gpuLock = try GPUTestExclusion.acquire()
+        defer { gpuLock.release() }
         try verifyDecodeStep(step: 1)
     }
 
     @Test("Decode step 2 logits match Python reference")
     func decodeStep2LogitsMatch() throws {
+        let gpuLock = try GPUTestExclusion.acquire()
+        defer { gpuLock.release() }
         try verifyDecodeStep(step: 2)
     }
 
     @Test("Decode step 1 output head matches Python when fed Python final_hidden")
     func decodeStep1OutputHeadMatchesPythonHidden() throws {
+        let gpuLock = try GPUTestExclusion.acquire()
+        defer { gpuLock.release() }
         let env = try setupOrSkip()
         let refHidden = try readRefTensorAsFloats(env.ref, name: "ref.decode_1.final_hidden")
         let refLogits = try readRefTensorAsFloats(env.ref, name: "ref.decode_1.logits")
@@ -447,6 +469,8 @@ struct ReferenceComparisonTests {
 
     @Test("Decode step 1 layerwise diagnostic")
     func decodeStep1LayerwiseDiagnostic() throws {
+        let gpuLock = try GPUTestExclusion.acquire()
+        defer { gpuLock.release() }
         let env = try setupOrSkip()
         let compiler = MetalInferenceCompiler()
         let dispatchDump = try makeDispatchDump(compiler: compiler)
@@ -507,12 +531,17 @@ struct ReferenceComparisonTests {
 
     @Test("Decode step 1 final norm kernel matches Python reference")
     func decodeStep1FinalNormKernelMatchesPython() throws {
+        let gpuLock = try GPUTestExclusion.acquire()
+        defer { gpuLock.release() }
         let env = try setupOrSkip()
-        let input = try readRefTensorAsFloats(env.ref, name: "ref.decode_1.layer_15.after_mlp")
+        let normStep = finalNormStep(for: env.model.plan)
+        let input = try finalNormDiagnosticInput(for: normStep, env: env)
         let expected = try readRefTensorAsFloats(env.ref, name: "ref.decode_1.final_hidden")
-        let normStep = env.model.plan.steps[env.model.plan.steps.count - 3]
 
-        writeDecodeBuffer(input, to: env.model.plan.buffers.hidden, precision: env.model.plan.buffers.bufferPrecision)
+        writeDecodeBuffer(input.hidden, to: env.model.plan.buffers.hidden, precision: env.model.plan.buffers.bufferPrecision)
+        if let residual = input.residual {
+            writeDecodeBuffer(residual, to: env.model.plan.buffers.residual, precision: env.model.plan.buffers.bufferPrecision)
+        }
 
         guard let cb = env.model.commandQueue.makeCommandBuffer(),
               let enc = cb.makeComputeCommandEncoder() else {
@@ -527,7 +556,7 @@ struct ReferenceComparisonTests {
         cb.commit()
         cb.waitUntilCompleted()
 
-        let actual = readDecodeBuffer(env.model.plan.buffers.hidden, precision: env.model.plan.buffers.bufferPrecision)
+        let actual = readDecodeBuffer(finalHiddenInputBuffer(for: env.model.plan), precision: env.model.plan.buffers.bufferPrecision)
         let maxErr = maxAbsoluteError(actual, expected)
         print("[RefComp] Final norm kernel maxErr vs Python final_hidden: \(String(format: "%.4f", maxErr))")
         #expect(maxErr < 0.125, "Final norm kernel drifted: maxErr=\(maxErr)")
@@ -535,23 +564,32 @@ struct ReferenceComparisonTests {
 
     @Test("Decode step 1 final norm CPU diagnostic")
     func decodeStep1FinalNormCPUDiagnostic() throws {
+        let gpuLock = try GPUTestExclusion.acquire()
+        defer { gpuLock.release() }
         let env = try setupOrSkip()
-        let input = try readRefTensorAsFloats(env.ref, name: "ref.decode_1.layer_15.after_mlp")
+        let normStep = finalNormStep(for: env.model.plan)
+        let input = try finalNormDiagnosticInput(for: normStep, env: env)
         let expected = try readRefTensorAsFloats(env.ref, name: "ref.decode_1.final_hidden")
-        let normStep = env.model.plan.steps[env.model.plan.steps.count - 3]
-        let weightBinding = normStep.bufferBindings.first { $0.index == 1 }
+        let weightBinding = finalNormWeightBinding(for: normStep)
         guard let weightBinding else {
             Issue.record("Final norm weight binding not found")
             return
         }
 
         let weightPtr = (weightBinding.buffer.contents() + weightBinding.offset)
-            .bindMemory(to: BFloat16.self, capacity: input.count)
-        let weights = (0..<input.count).map { Float(weightPtr[$0]) }
+            .bindMemory(to: BFloat16.self, capacity: input.hidden.count)
+        let weights = (0..<input.hidden.count).map { Float(weightPtr[$0]) }
 
-        let sumSq = input.reduce(Float.zero) { $0 + $1 * $1 }
-        let invRMS = 1.0 / sqrtf(sumSq / Float(input.count) + 1e-5)
-        let cpu = zip(input, weights).map { $0 * invRMS * $1 }
+        let preNorm: [Float]
+        if let residual = input.residual {
+            preNorm = zip(input.hidden, residual).map(+)
+        } else {
+            preNorm = input.hidden
+        }
+
+        let sumSq = preNorm.reduce(Float.zero) { $0 + $1 * $1 }
+        let invRMS = 1.0 / sqrtf(sumSq / Float(preNorm.count) + 1e-5)
+        let cpu = zip(preNorm, weights).map { $0 * invRMS * $1 }
         let cpuErr = maxAbsoluteError(cpu, expected)
         let cpuTop = argmax(cpu)
         let refTop = argmax(expected)
@@ -758,6 +796,56 @@ struct ReferenceComparisonTests {
             fatalError("Output head projection missing input buffer binding")
         }
         return binding.buffer
+    }
+
+    private struct FinalNormDiagnosticInput {
+        let hidden: [Float]
+        let residual: [Float]?
+    }
+
+    private func finalNormStep(for plan: MetalDispatchPlan) -> MetalDispatchStep {
+        let projectionStepIndex = plan.steps.count - 2
+        let projectionStep = plan.steps[projectionStepIndex]
+        guard let projectionInput = projectionStep.bufferBindings.first(where: { $0.index == 0 }) else {
+            fatalError("Output head projection missing input buffer binding")
+        }
+
+        for step in plan.steps[..<projectionStepIndex].reversed() {
+            let label = step.pipeline.label ?? ""
+            guard label.contains("rms_norm") else { continue }
+            if step.bufferBindings.contains(where: { binding in
+                binding.buffer === projectionInput.buffer && binding.offset == projectionInput.offset
+            }) {
+                return step
+            }
+        }
+
+        fatalError("Final norm step not found")
+    }
+
+    private func finalNormDiagnosticInput(
+        for step: MetalDispatchStep,
+        env: TestEnvironment
+    ) throws -> FinalNormDiagnosticInput {
+        let kernelName = step.pipeline.label ?? ""
+        if kernelName.contains("fused_residual_add_rms_norm") {
+            let afterMLP = try readRefTensorAsFloats(env.ref, name: "ref.decode_1.layer_15.after_mlp")
+            let residual = try readRefTensorAsFloats(env.ref, name: "ref.decode_1.layer_15.after_op")
+            return FinalNormDiagnosticInput(
+                hidden: zip(afterMLP, residual).map(-),
+                residual: residual
+            )
+        }
+        return FinalNormDiagnosticInput(
+            hidden: try readRefTensorAsFloats(env.ref, name: "ref.decode_1.layer_15.after_mlp"),
+            residual: nil
+        )
+    }
+
+    private func finalNormWeightBinding(for step: MetalDispatchStep) -> (index: Int, buffer: MTLBuffer, offset: Int)? {
+        let kernelName = step.pipeline.label ?? ""
+        let weightIndex = kernelName.contains("fused_") ? 2 : 1
+        return step.bufferBindings.first(where: { $0.index == weightIndex })
     }
 
     // MARK: - Reference Tensor Access

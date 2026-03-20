@@ -35,16 +35,31 @@ public struct STAFLoader: Sendable {
             throw STAFLoadError.mmapFailed("mmap failed for: \(url.path)")
         }
 
-        // Parse header — manual byte offsets (packed 64-byte layout)
-        let magic = validPointer.loadUnaligned(as: UInt32.self)
-        guard magic == STAF.magic else {
+        let header = STAF.parseHeader(at: validPointer)
+        guard header.magic == STAF.magic else {
             munmap(validPointer, fileSize)
             throw STAFLoadError.invalidFile("Bad magic: expected STAF")
         }
+        guard header.formatVersion == STAF.legacyFormatVersion ||
+                header.formatVersion == STAF.currentFormatVersion else {
+            munmap(validPointer, fileSize)
+            throw STAFLoadError.invalidFile("Unsupported STAF format version: \(header.formatVersion)")
+        }
 
-        let sectionCount = Int((validPointer + 40).loadUnaligned(as: UInt32.self))
-        let sectionTableOffset = Int((validPointer + 44).loadUnaligned(as: UInt32.self))
-        let stringTableOffset = Int((validPointer + 48).loadUnaligned(as: UInt32.self))
+        let sectionCount = Int(header.sectionCount)
+        let sectionTableOffset = Int(header.sectionTableOffset)
+        let stringTableOffset = Int(header.stringTableOffset)
+        let metadata: STAFFileMetadata
+        do {
+            metadata = try STAFMetadataDecoder().decode(
+                at: validPointer,
+                fileSize: fileSize,
+                header: header
+            )
+        } catch let error as STAFMetadataDecodeError {
+            munmap(validPointer, fileSize)
+            throw STAFLoadError.invalidFile(error.description)
+        }
 
         // Parse section table
         var tensorEntries: [String: STAFTensorEntry] = [:]
@@ -189,7 +204,9 @@ public struct STAFLoader: Sendable {
 
         return STAFWeightStore(
             buffer: metalBuffer,
-            entries: adjustedEntries
+            entries: adjustedEntries,
+            metadata: metadata,
+            specializedBufferAccesses: [:]
         )
     }
 
@@ -197,6 +214,7 @@ public struct STAFLoader: Sendable {
         let remainder = value % alignment
         return remainder == 0 ? value : value + (alignment - remainder)
     }
+
 }
 
 // MARK: - STAF Weight Store
@@ -210,6 +228,10 @@ public struct STAFWeightStore: @unchecked Sendable {
     public let buffer: MTLBuffer
     /// Tensor metadata indexed by name.
     public let entries: [String: STAFTensorEntry]
+    /// File-level typed metadata describing the execution cache.
+    public let metadata: STAFFileMetadata
+    /// Optional specialized GPU-ready buffer accesses keyed by tensor name and layout.
+    let specializedBufferAccesses: [STAFSpecializedWeightKey: STAFWeightBufferAccess]
 
     /// Get the buffer offset and quantization format for a named tensor.
     public func tensor(for name: String) -> (offset: Int, format: any QuantizationFormat)? {
@@ -220,10 +242,61 @@ public struct STAFWeightStore: @unchecked Sendable {
         return (offset: entry.bufferOffset, format: format)
     }
 
-    /// Get raw buffer access for a named tensor.
-    public func bufferAccess(for name: String) -> (buffer: MTLBuffer, offset: Int, size: Int)? {
+    /// Get raw buffer access for a named tensor and exact layout.
+    public func bufferAccess(
+        for name: String,
+        layout: STAFWeightLayout = .rowMajor
+    ) -> STAFWeightBufferAccess? {
         guard let entry = entries[name] else { return nil }
-        return (buffer: buffer, offset: entry.bufferOffset, size: entry.payloadSize)
+        switch layout {
+        case .rowMajor:
+            return STAFWeightBufferAccess(
+                buffer: buffer,
+                offset: entry.bufferOffset,
+                size: entry.payloadSize,
+                layout: .rowMajor
+            )
+        case .blockedRows4Tiles128:
+            return specializedBufferAccesses[STAFSpecializedWeightKey(
+                tensorName: name,
+                layout: .blockedRows4Tiles128
+            )]
+        case .blockedRows8Tiles128:
+            return specializedBufferAccesses[STAFSpecializedWeightKey(
+                tensorName: name,
+                layout: .blockedRows8Tiles128
+            )]
+        }
+    }
+
+    /// Resolve the best available access for a tensor, falling back to row-major storage.
+    public func resolvedBufferAccess(
+        for request: STAFWeightAccessRequest
+    ) -> STAFWeightBufferAccess? {
+        if let preferred = bufferAccess(
+            for: request.tensorName,
+            layout: request.preferredLayout
+        ) {
+            return preferred
+        }
+        return bufferAccess(for: request.tensorName, layout: .rowMajor)
+    }
+
+    public func registeringSpecializedBufferAccess(
+        _ access: STAFWeightBufferAccess,
+        for request: STAFWeightAccessRequest
+    ) -> STAFWeightStore {
+        var updated = specializedBufferAccesses
+        updated[STAFSpecializedWeightKey(
+            tensorName: request.tensorName,
+            layout: request.preferredLayout
+        )] = access
+        return STAFWeightStore(
+            buffer: buffer,
+            entries: entries,
+            metadata: metadata,
+            specializedBufferAccesses: updated
+        )
     }
 }
 
