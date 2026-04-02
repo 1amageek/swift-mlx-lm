@@ -275,6 +275,12 @@ xcodebuild test -scheme swift-lm-Package -destination 'platform=macOS' \
 - [swift-jinja](https://github.com/huggingface/swift-jinja) — Chat template evaluation
 - [swift-transformers](https://github.com/huggingface/swift-transformers) — Tokenizers and HuggingFace Hub
 
+## Documentation
+
+- `AGENTS.md` — repository architecture and contribution guidance
+- `DESIGN-Metal4.md` — forward-looking Metal 4 design work
+- `docs/README.md` — documentation map and archive layout
+
 ## License
 
 MIT
