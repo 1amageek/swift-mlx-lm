@@ -32,7 +32,7 @@ public struct AggressiveOptimizer: DispatchOptimizer {
             // Only batch non-output projections. The last projection in the
             // composite is likely the output projection (o_proj, down_proj) and
             // must remain as .projection for markLastProjectionAsOutput().
-            if case .gemv(let outputDim, let inputDim) = primitives[i].fragment.dispatchDimension {
+            if case .gemv(_, let inputDim) = primitives[i].fragment.dispatchDimension {
                 var batch: [CollectedPrimitive] = [primitives[i]]
                 var j = i + 1
                 while j < primitives.count,

@@ -74,7 +74,7 @@ public struct MetalInferenceModel: @unchecked Sendable {
     }
 
     private static func zeroStateBuffers(_ buffers: MetalBufferSet, submission: MetalSubmissionContext) throws {
-        try submission.withTransaction(label: "state.zero") { transaction in
+        _ = try submission.withTransaction(label: "state.zero") { transaction in
             try transaction.withBlitEncoder { blit in
                 blit.fill(buffer: buffers.hidden, range: 0..<buffers.hidden.length, value: 0)
                 blit.fill(buffer: buffers.residual, range: 0..<buffers.residual.length, value: 0)
@@ -443,7 +443,7 @@ public struct MetalInferenceModel: @unchecked Sendable {
             try Self.makePrivateBuffer(length: $0.length, device: device)
         }
 
-        try submission.withTransaction(label: "prompt.snapshot") { transaction in
+        _ = try submission.withTransaction(label: "prompt.snapshot") { transaction in
             try transaction.withBlitEncoder { blit in
                 if let liveKV = plan.buffers.kvCache,
                    let snapshotKVKeys,
@@ -471,7 +471,7 @@ public struct MetalInferenceModel: @unchecked Sendable {
         pendingCommandBuffer = nil
         hasPendingResult = false
 
-        try submission.withTransaction(label: "prompt.restore") { transaction in
+        _ = try submission.withTransaction(label: "prompt.restore") { transaction in
             try transaction.withBlitEncoder { blit in
                 blit.fill(buffer: plan.buffers.hidden, range: 0..<plan.buffers.hidden.length, value: 0)
                 blit.fill(buffer: plan.buffers.residual, range: 0..<plan.buffers.residual.length, value: 0)

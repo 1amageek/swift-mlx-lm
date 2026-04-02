@@ -35,7 +35,6 @@ struct MetalConstantBindingAllocator: Sendable {
         }
 
         let baseAddress = buffer.contents()
-        var constants: [MetalConstantBinding] = []
         var residentBindings: [MetalConstantBufferBinding] = []
         residentBindings.reserveCapacity(bytesBindings.count)
 
