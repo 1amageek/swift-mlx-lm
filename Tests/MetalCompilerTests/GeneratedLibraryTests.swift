@@ -40,12 +40,12 @@ struct GeneratedLibraryTests {
 
     @Test("Dump generated decode kernel library for LFM2")
     func dumpGeneratedDecodeKernelLibraryForLFM2() throws {
-        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        guard let resources = try RealModelTestSupport.loadOrSkip(skipMessage: "STAF not found — skipping") else {
+            return
+        }
+        defer { resources.release() }
 
-        let stafURL = URL(fileURLWithPath: "/Users/1amageek/Desktop/swift-lm/TestData/LFM2.5-1.2B-Thinking/model.staf")
-        guard FileManager.default.fileExists(atPath: stafURL.path) else { return }
-
-        let store = try STAFLoader().load(at: stafURL, device: device)
+        let store = resources.store
         let config = ModelConfig(
             hiddenSize: 2048, layerCount: 16, intermediateSize: 8192,
             vocabSize: 65536, attentionHeads: 32, kvHeads: 8, headDim: 64,
@@ -74,12 +74,13 @@ struct GeneratedLibraryTests {
 
     @Test("Compiled decode plan marks argument-table and resident-constant steps")
     func compiledDecodePlanRecordsBindingBackends() throws {
-        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        guard let resources = try RealModelTestSupport.loadOrSkip(skipMessage: "STAF not found — skipping") else {
+            return
+        }
+        defer { resources.release() }
 
-        let stafURL = URL(fileURLWithPath: "/Users/1amageek/Desktop/swift-lm/TestData/LFM2.5-1.2B-Thinking/model.staf")
-        guard FileManager.default.fileExists(atPath: stafURL.path) else { return }
-
-        let store = try STAFLoader().load(at: stafURL, device: device)
+        let device = resources.device
+        let store = resources.store
         let config = ModelConfig(
             hiddenSize: 2048, layerCount: 16, intermediateSize: 8192,
             vocabSize: 65536, attentionHeads: 32, kvHeads: 8, headDim: 64,
@@ -142,12 +143,13 @@ struct GeneratedLibraryTests {
 
     @Test("Compiled decode plan reports dominant argument-table layouts")
     func compiledDecodePlanReportsDominantArgumentTableLayouts() throws {
-        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        guard let resources = try RealModelTestSupport.loadOrSkip(skipMessage: "STAF not found — skipping") else {
+            return
+        }
+        defer { resources.release() }
 
-        let stafURL = URL(fileURLWithPath: "/Users/1amageek/Desktop/swift-lm/TestData/LFM2.5-1.2B-Thinking/model.staf")
-        guard FileManager.default.fileExists(atPath: stafURL.path) else { return }
-
-        let store = try STAFLoader().load(at: stafURL, device: device)
+        let device = resources.device
+        let store = resources.store
         let config = ModelConfig(
             hiddenSize: 2048, layerCount: 16, intermediateSize: 8192,
             vocabSize: 65536, attentionHeads: 32, kvHeads: 8, headDim: 64,
@@ -188,12 +190,13 @@ struct GeneratedLibraryTests {
 
     @Test("Compiled decode plan reports dominant layout kernel families")
     func compiledDecodePlanReportsDominantLayoutKernelFamilies() throws {
-        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        guard let resources = try RealModelTestSupport.loadOrSkip(skipMessage: "STAF not found — skipping") else {
+            return
+        }
+        defer { resources.release() }
 
-        let stafURL = URL(fileURLWithPath: "/Users/1amageek/Desktop/swift-lm/TestData/LFM2.5-1.2B-Thinking/model.staf")
-        guard FileManager.default.fileExists(atPath: stafURL.path) else { return }
-
-        let store = try STAFLoader().load(at: stafURL, device: device)
+        let device = resources.device
+        let store = resources.store
         let config = ModelConfig(
             hiddenSize: 2048, layerCount: 16, intermediateSize: 8192,
             vocabSize: 65536, attentionHeads: 32, kvHeads: 8, headDim: 64,
@@ -252,12 +255,13 @@ struct GeneratedLibraryTests {
 
     @Test("Decode projection cost report highlights low-intensity hot families")
     func decodeProjectionCostReportHighlightsHotFamilies() throws {
-        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        guard let resources = try RealModelTestSupport.loadOrSkip(skipMessage: "STAF not found — skipping") else {
+            return
+        }
+        defer { resources.release() }
 
-        let stafURL = URL(fileURLWithPath: "/Users/1amageek/Desktop/swift-lm/TestData/LFM2.5-1.2B-Thinking/model.staf")
-        guard FileManager.default.fileExists(atPath: stafURL.path) else { return }
-
-        let store = try STAFLoader().load(at: stafURL, device: device)
+        let device = resources.device
+        let store = resources.store
         let config = ModelConfig(
             hiddenSize: 2048, layerCount: 16, intermediateSize: 8192,
             vocabSize: 65536, attentionHeads: 32, kvHeads: 8, headDim: 64,

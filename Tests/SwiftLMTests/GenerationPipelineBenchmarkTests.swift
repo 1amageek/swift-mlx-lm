@@ -15,9 +15,10 @@ struct GenerationPipelineBenchmarkTests {
 
     @Test("ModelContainer generate throughput", .timeLimit(.minutes(2)))
     func modelContainerGenerateThroughput() async throws {
-        var resources = try await makeResources()
         let promptTokens = [1, 1, 6, 6423, 708]
         let generateCount = 50
+        var resources = try await makeResources(maximumSequenceLength: promptTokens.count)
+        defer { resources.release() }
 
         let syncResult = try measureMedian(name: "sync decode", iterations: 5, warmup: 1) {
             try runSynchronousLoop(
@@ -61,9 +62,10 @@ struct GenerationPipelineBenchmarkTests {
 
     @Test("Generation host overhead breakdown", .timeLimit(.minutes(2)))
     func generationHostOverheadBreakdown() async throws {
-        var resources = try await makeResources()
         let promptTokens = [1, 1, 6, 6423, 708]
         let generateCount = 50
+        var resources = try await makeResources(maximumSequenceLength: promptTokens.count)
+        defer { resources.release() }
 
         let rawTokens = try collectGeneratedTokens(
             model: &resources.syncModel,
@@ -112,26 +114,38 @@ struct GenerationPipelineBenchmarkTests {
 
     @Test("Request-level optimizer comparison", .timeLimit(.minutes(2)))
     func requestLevelOptimizerComparison() async throws {
-        var standardResources = try await makeResources(optimizer: StandardOptimizer())
-        var aggressiveResources = try await makeResources(optimizer: AggressiveOptimizer())
         let promptTokens = [1, 1, 6, 6423, 708]
         let generateCount = 50
 
-        let standardResult = try measureMedian(name: "standard", iterations: 5, warmup: 1) {
-            try runSynchronousLoopNoTokenizer(
-                model: &standardResources.syncModel,
-                promptTokens: promptTokens,
-                generateCount: generateCount
+        let standardResult: ThroughputResult = try await {
+            var resources = try await makeResources(
+                optimizer: StandardOptimizer(),
+                maximumSequenceLength: promptTokens.count
             )
-        }
+            defer { resources.release() }
+            return try measureMedian(name: "standard", iterations: 5, warmup: 1) {
+                try runSynchronousLoopNoTokenizer(
+                    model: &resources.syncModel,
+                    promptTokens: promptTokens,
+                    generateCount: generateCount
+                )
+            }
+        }()
 
-        let aggressiveResult = try measureMedian(name: "aggressive", iterations: 5, warmup: 1) {
-            try runSynchronousLoopNoTokenizer(
-                model: &aggressiveResources.syncModel,
-                promptTokens: promptTokens,
-                generateCount: generateCount
+        let aggressiveResult: ThroughputResult = try await {
+            var resources = try await makeResources(
+                optimizer: AggressiveOptimizer(),
+                maximumSequenceLength: promptTokens.count
             )
-        }
+            defer { resources.release() }
+            return try measureMedian(name: "aggressive", iterations: 5, warmup: 1) {
+                try runSynchronousLoopNoTokenizer(
+                    model: &resources.syncModel,
+                    promptTokens: promptTokens,
+                    generateCount: generateCount
+                )
+            }
+        }()
 
         print("")
         print("=== Request-Level Optimizer Comparison: LFM2.5-1.2B ===")
@@ -149,9 +163,13 @@ struct GenerationPipelineBenchmarkTests {
 
     @Test("Request-level scaling", .timeLimit(.minutes(3)))
     func requestLevelScaling() async throws {
-        var resources = try await makeResources(optimizer: AggressiveOptimizer())
         let promptTokens = [1, 1, 6, 6423, 708]
         let generateCounts = [50, 128, 256, 512]
+        var resources = try await makeResources(
+            optimizer: AggressiveOptimizer(),
+            maximumSequenceLength: promptTokens.count
+        )
+        defer { resources.release() }
 
         print("")
         print("=== Request-Level Scaling: LFM2.5-1.2B ===")
@@ -212,18 +230,24 @@ struct GenerationPipelineBenchmarkTests {
         print("-----------------------------------------------------")
 
         for chunkSize in chunkSizes {
-            let resources = try await makeResources(optimizer: AggressiveOptimizer())
-            let result = try await measureStreamMedian(
-                iterations: 3,
-                warmup: 1
-            ) {
-                try await runContainerGenerateMeasured(
-                    container: resources.container,
-                    promptTokens: promptTokens,
-                    generateCount: generateCount,
-                    chunkTokenCount: chunkSize
+            let result: StreamResult = try await {
+                var resources = try await makeResources(
+                    optimizer: AggressiveOptimizer(),
+                    maximumSequenceLength: promptTokens.count
                 )
-            }
+                defer { resources.release() }
+                return try await measureStreamMedian(
+                    iterations: 3,
+                    warmup: 1
+                ) {
+                    try await runContainerGenerateMeasured(
+                        container: resources.container,
+                        promptTokens: promptTokens,
+                        generateCount: generateCount,
+                        chunkTokenCount: chunkSize
+                    )
+                }
+            }()
 
             let sizeText = String(format: "%10d", chunkSize)
             let tokText = String(format: "%7.1f", result.tokensPerSecond)
@@ -240,7 +264,11 @@ struct GenerationPipelineBenchmarkTests {
     func promptStateReuseComparison() async throws {
         let promptTokens = [Int](repeating: 1, count: 256)
         let generateCount = 50
-        let resources = try await makeResources(optimizer: AggressiveOptimizer())
+        var resources = try await makeResources(
+            optimizer: AggressiveOptimizer(),
+            maximumSequenceLength: promptTokens.count
+        )
+        defer { resources.release() }
         let promptState = try resources.container.makePromptState(input: LMInput(tokens: promptTokens))
 
         let baseline = try await measureStreamMedian(iterations: 3, warmup: 1) {
@@ -277,7 +305,8 @@ struct GenerationPipelineBenchmarkTests {
     }
 
     private func makeResources(
-        optimizer: any DispatchOptimizer = AggressiveOptimizer()
+        optimizer: any DispatchOptimizer = AggressiveOptimizer(),
+        maximumSequenceLength: Int = 256
     ) async throws -> BenchmarkResources {
         guard let device = MTLCreateSystemDefaultDevice() else {
             throw BenchmarkError.noDevice
@@ -317,7 +346,7 @@ struct GenerationPipelineBenchmarkTests {
             hiddenSize: config.hiddenSize,
             intermediateSize: config.intermediateSize,
             vocabSize: config.vocabSize,
-            maximumSequenceLength: 4096,
+            maximumSequenceLength: max(1, maximumSequenceLength),
             stafWeightStore: store,
             sharedKVCache: decodePlan.buffers.kvCache,
             sharedConvState: decodePlan.buffers.convState,
@@ -701,6 +730,12 @@ struct GenerationPipelineBenchmarkTests {
         var syncModel: MetalInferenceModel
         var pipelinedModel: MetalInferenceModel
         let container: ModelContainer
+
+        mutating func release() {
+            syncModel.resetCaches()
+            pipelinedModel.resetCaches()
+            container.resetCaches()
+        }
     }
 
     private struct ThroughputResult {

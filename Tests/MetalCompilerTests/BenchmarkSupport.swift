@@ -6,6 +6,11 @@ import ModelDeclarations
 @testable import MetalCompiler
 
 enum BenchmarkSupport {
+    private struct LoadedStore {
+        let device: MTLDevice
+        let store: STAFWeightStore
+    }
+
     struct StepProfile {
         let index: Int
         let kernelName: String
@@ -51,6 +56,8 @@ enum BenchmarkSupport {
         "model.layers.12.self_attn.q_proj.weight",
     ]
     static let squareSingleQProjBlockedTensorName = "model.layers.10.self_attn.q_proj.weight"
+    private static let loadedStoreLock = NSLock()
+    nonisolated(unsafe) private static var loadedStoreCache: LoadedStore?
 
     static func isHotExactShapeGEMVKernel(_ name: String) -> Bool {
         (name.hasPrefix("gemv_2048_6144") || name.hasPrefix("gemv_2048_sq")) &&
@@ -175,19 +182,7 @@ enum BenchmarkSupport {
         optimizer: (any DispatchOptimizer)? = nil,
         weightAccessPolicyOverride: ProjectionWeightAccessPolicyOverride? = nil
     ) throws -> (MetalInferenceModel, STAFWeightStore) {
-        guard let device = MTLCreateSystemDefaultDevice() else { throw BenchError.noDevice }
-
-        let stafURL = URL(fileURLWithPath: stafPath)
-        if !FileManager.default.fileExists(atPath: stafURL.path) {
-            let safetensorsURL = stafURL.deletingLastPathComponent()
-                .appendingPathComponent("model.safetensors")
-            guard FileManager.default.fileExists(atPath: safetensorsURL.path) else {
-                throw BenchError.noModel
-            }
-            try STAFConverter().convert(safetensorsURLs: [safetensorsURL], outputURL: stafURL)
-        }
-
-        let store = try STAFLoader().load(at: stafURL, device: device)
+        let (device, store) = try loadStoreOrSkip()
 
         let config = ModelConfig(
             hiddenSize: 2048, layerCount: 16, intermediateSize: 8192,
@@ -232,6 +227,30 @@ enum BenchmarkSupport {
         model.prefillPlan = prefillPlan
 
         return (model, store)
+    }
+
+    static func loadStoreOrSkip() throws -> (MTLDevice, STAFWeightStore) {
+        loadedStoreLock.lock()
+        defer { loadedStoreLock.unlock() }
+
+        if let cached = loadedStoreCache {
+            return (cached.device, cached.store)
+        }
+
+        guard let device = MTLCreateSystemDefaultDevice() else { throw BenchError.noDevice }
+
+        let stafURL = URL(fileURLWithPath: stafPath)
+        if !FileManager.default.fileExists(atPath: stafURL.path) {
+            let safetensorsURL = stafURL.deletingLastPathComponent()
+                .appendingPathComponent("model.safetensors")
+            guard FileManager.default.fileExists(atPath: safetensorsURL.path) else {
+                throw BenchError.noModel
+            }
+            try STAFConverter().convert(safetensorsURLs: [safetensorsURL], outputURL: stafURL)
+        }
+        let store = try STAFLoader().load(at: stafURL, device: device)
+        loadedStoreCache = LoadedStore(device: device, store: store)
+        return (device, store)
     }
 
     static func profileDecodeSteps(

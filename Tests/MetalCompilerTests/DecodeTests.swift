@@ -49,16 +49,13 @@ struct DecodeTests {
 
     @Test("Decode after prefill uses KV cache from prefill")
     func decodeAfterPrefillUsesKVCache() throws {
-        guard let device = MTLCreateSystemDefaultDevice() else {
-            Issue.record("No Metal device"); return
+        guard let resources = try RealModelTestSupport.loadOrSkip(skipMessage: "STAF not found — skipping") else {
+            return
         }
+        defer { resources.release() }
 
-        let stafPath = "/Users/1amageek/Desktop/swift-lm/TestData/LFM2.5-1.2B-Thinking/model.staf"
-        guard FileManager.default.fileExists(atPath: stafPath) else {
-            print("STAF not found — skipping"); return
-        }
-
-        let store = try STAFLoader().load(at: URL(fileURLWithPath: stafPath), device: device)
+        let device = resources.device
+        let store = resources.store
         let config = ModelConfig(
             hiddenSize: 2048, layerCount: 16, intermediateSize: 8192,
             vocabSize: 65536, attentionHeads: 32, kvHeads: 8, headDim: 64,
@@ -119,16 +116,13 @@ struct DecodeTests {
 
     @Test("Attention-only model attempt (layer index mismatch expected)")
     func attentionOnlyDecodeProducesVariedOutput() throws {
-        guard let device = MTLCreateSystemDefaultDevice() else {
-            Issue.record("No Metal device"); return
+        guard let resources = try RealModelTestSupport.loadOrSkip(skipMessage: "STAF not found — skipping") else {
+            return
         }
+        defer { resources.release() }
 
-        let stafPath = "/Users/1amageek/Desktop/swift-lm/TestData/LFM2.5-1.2B-Thinking/model.staf"
-        guard FileManager.default.fileExists(atPath: stafPath) else {
-            print("STAF not found — skipping"); return
-        }
-
-        let store = try STAFLoader().load(at: URL(fileURLWithPath: stafPath), device: device)
+        let device = resources.device
+        let store = resources.store
 
         // Use only attention layers (no conv) to isolate decode behavior
         let config = ModelConfig(
@@ -188,16 +182,13 @@ struct DecodeTests {
 
     @Test("KV cache affects decode output (zeroed KV produces different logits)")
     func kvCacheAffectsOutput() throws {
-        guard let device = MTLCreateSystemDefaultDevice() else {
-            Issue.record("No Metal device"); return
+        guard let resources = try RealModelTestSupport.loadOrSkip(skipMessage: "STAF not found — skipping") else {
+            return
         }
+        defer { resources.release() }
 
-        let stafPath = "/Users/1amageek/Desktop/swift-lm/TestData/LFM2.5-1.2B-Thinking/model.staf"
-        guard FileManager.default.fileExists(atPath: stafPath) else {
-            print("STAF not found — skipping"); return
-        }
-
-        let store = try STAFLoader().load(at: URL(fileURLWithPath: stafPath), device: device)
+        let device = resources.device
+        let store = resources.store
         let config = ModelConfig(
             hiddenSize: 2048, layerCount: 16, intermediateSize: 8192,
             vocabSize: 65536, attentionHeads: 32, kvHeads: 8, headDim: 64,
@@ -253,16 +244,13 @@ struct DecodeTests {
 
     @Test("Different input tokens produce different hidden states and logits")
     func differentTokensDifferentHiddenStates() throws {
-        guard let device = MTLCreateSystemDefaultDevice() else {
-            Issue.record("No Metal device"); return
+        guard let resources = try RealModelTestSupport.loadOrSkip(skipMessage: "STAF not found — skipping") else {
+            return
         }
+        defer { resources.release() }
 
-        let stafPath = "/Users/1amageek/Desktop/swift-lm/TestData/LFM2.5-1.2B-Thinking/model.staf"
-        guard FileManager.default.fileExists(atPath: stafPath) else {
-            print("STAF not found — skipping"); return
-        }
-
-        let store = try STAFLoader().load(at: URL(fileURLWithPath: stafPath), device: device)
+        let device = resources.device
+        let store = resources.store
         let config = ModelConfig(
             hiddenSize: 2048, layerCount: 16, intermediateSize: 8192,
             vocabSize: 65536, attentionHeads: 32, kvHeads: 8, headDim: 64,

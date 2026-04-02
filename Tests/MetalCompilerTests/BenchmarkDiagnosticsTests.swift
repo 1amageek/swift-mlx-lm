@@ -17,45 +17,26 @@ struct BenchmarkDiagnosticsTests {
 
         let decodeSteps = 50
         let promptTokens: [Int32] = [1, 1, 6, 6423, 708]
+        let syncResult = try measureDecodeThroughput(
+            mode: .sync,
+            optimizer: AggressiveOptimizer(),
+            decodeSteps: decodeSteps,
+            promptTokens: promptTokens
+        )
+        let pipelinedResult = try measureDecodeThroughput(
+            mode: .pipelined,
+            optimizer: AggressiveOptimizer(),
+            decodeSteps: decodeSteps,
+            promptTokens: promptTokens
+        )
 
-        let (syncModel, _) = try BenchmarkSupport.setupOrSkip(optimizer: AggressiveOptimizer())
-        var syncInference = syncModel
-        var syncToken = syncInference.prefill(tokens: promptTokens)
-        for _ in 0..<3 { syncToken = syncInference.decodeSync(tokenID: syncToken) }
-
-        let syncStart = CFAbsoluteTimeGetCurrent()
-        for _ in 0..<decodeSteps {
-            syncToken = syncInference.decodeSync(tokenID: syncToken)
-        }
-        let syncElapsed = CFAbsoluteTimeGetCurrent() - syncStart
-
-        BenchmarkSupport.settleGPU()
-
-        let (pipelinedModel, _) = try BenchmarkSupport.setupOrSkip(optimizer: AggressiveOptimizer())
-        var pipelinedInference = pipelinedModel
-        var pipelinedToken = pipelinedInference.prefill(tokens: promptTokens)
-        for _ in 0..<3 {
-            _ = pipelinedInference.decode(tokenID: pipelinedToken)
-            pipelinedToken = pipelinedInference.flush()
-        }
-
-        let pipelinedStart = CFAbsoluteTimeGetCurrent()
-        _ = pipelinedInference.decode(tokenID: pipelinedToken)
-        for step in 0..<decodeSteps {
-            pipelinedToken = pipelinedInference.flush()
-            if step + 1 < decodeSteps {
-                _ = pipelinedInference.decode(tokenID: pipelinedToken)
-            }
-        }
-        let pipelinedElapsed = CFAbsoluteTimeGetCurrent() - pipelinedStart
-
-        let syncTokPerSec = Double(decodeSteps) / syncElapsed
-        let pipelinedTokPerSec = Double(decodeSteps) / pipelinedElapsed
+        let syncTokPerSec = syncResult.tokensPerSecond
+        let pipelinedTokPerSec = pipelinedResult.tokensPerSecond
         let deltaPct = syncTokPerSec > 0 ? (pipelinedTokPerSec - syncTokPerSec) / syncTokPerSec * 100 : 0
 
         print("\n=== Decode Sync vs Pipelined Decode (aggressive) ===")
-        print("sync:      \(String(format: "%.1f", syncTokPerSec)) tok/s (\(String(format: "%.2f", syncElapsed / Double(decodeSteps) * 1000)) ms/tok)")
-        print("pipelined: \(String(format: "%.1f", pipelinedTokPerSec)) tok/s (\(String(format: "%.2f", pipelinedElapsed / Double(decodeSteps) * 1000)) ms/tok)")
+        print("sync:      \(String(format: "%.1f", syncTokPerSec)) tok/s (\(String(format: "%.2f", syncResult.millisecondsPerToken)) ms/tok)")
+        print("pipelined: \(String(format: "%.1f", pipelinedTokPerSec)) tok/s (\(String(format: "%.2f", pipelinedResult.millisecondsPerToken)) ms/tok)")
         print("delta:     \(String(format: "%+.1f", deltaPct))%")
     }
 
@@ -129,7 +110,7 @@ struct BenchmarkDiagnosticsTests {
 
     @Test("Compilation time (IR → dispatch plan)")
     func compilationBenchmark() throws {
-        let (_, store) = try BenchmarkSupport.setupOrSkip()
+        let (device, store) = try BenchmarkSupport.loadStoreOrSkip()
 
         let config = ModelConfig(
             hiddenSize: 2048, layerCount: 16, intermediateSize: 8192,
@@ -147,9 +128,6 @@ struct BenchmarkDiagnosticsTests {
         )
         let graph = try LFM2(config: config).makeModelGraph()
         let resolved = ParameterResolver().resolve(graph: graph, convention: .lfm2Family)
-        guard let device = MTLCreateSystemDefaultDevice() else {
-            throw BenchmarkSupport.BenchError.noDevice
-        }
 
         let start = CFAbsoluteTimeGetCurrent()
         let compiler = MetalInferenceCompiler()
@@ -161,7 +139,7 @@ struct BenchmarkDiagnosticsTests {
         let prefillStart = CFAbsoluteTimeGetCurrent()
         let prefillPlan = try compiler.compilePrefill(
             graph: resolved, hiddenSize: 2048, intermediateSize: 8192,
-            vocabSize: 65536, maximumSequenceLength: 4096,
+            vocabSize: 65536, maximumSequenceLength: 64,
             stafWeightStore: store, device: device)
         let prefillCompileTime = CFAbsoluteTimeGetCurrent() - prefillStart
 
@@ -429,387 +407,318 @@ struct BenchmarkDiagnosticsTests {
     @Test("Blocked layout override: 2048->6144 hot-family microbench")
     func blocked6144HotFamilyMicrobench() throws {
         let override = BenchmarkSupport.blocked6144DecodeOverride()
-        let (baselineModel, _) = try BenchmarkSupport.setupOrSkip()
-        let (overrideModel, _) = try BenchmarkSupport.setupOrSkip(weightAccessPolicyOverride: override)
-        var baseline = baselineModel
-        var specialized = overrideModel
-
         let promptTokens: [Int32] = [1, 1, 6, 6423, 708]
-        let baselineFirst = baseline.prefill(tokens: promptTokens)
-        let specializedFirst = specialized.prefill(tokens: promptTokens)
-        var baselineSequence: [Int32] = [baselineFirst]
-        var specializedSequence: [Int32] = [specializedFirst]
-
-        let decodeSteps = 3
-        var baselineToken = baselineFirst
-        var specializedToken = specializedFirst
-        for _ in 0..<decodeSteps {
-            baselineToken = baseline.decodeSync(tokenID: baselineToken)
-            specializedToken = specialized.decodeSync(tokenID: specializedToken)
-            baselineSequence.append(baselineToken)
-            specializedSequence.append(specializedToken)
-        }
-
-        guard let device = MTLCreateSystemDefaultDevice(),
-              let queue = device.makeCommandQueue() else {
-            throw BenchmarkSupport.BenchError.noDevice
-        }
-
         let iterations = 20
-        let baselineProfiles = try BenchmarkSupport.profileDecodeSteps(
-            model: &baseline,
-            queue: queue,
+        let baseline = try profileDecodeVariant(
+            promptTokens: promptTokens,
             iterations: iterations,
-            filter: { step in
-                BenchmarkSupport.isHot6144GEMVKernel(step.pipeline.label ?? "")
-            })
-        let specializedProfiles = try BenchmarkSupport.profileDecodeSteps(
-            model: &specialized,
-            queue: queue,
+            filter: { BenchmarkSupport.isHot6144GEMVKernel($0.pipeline.label ?? "") }
+        )
+        let specialized = try profileDecodeVariant(
+            weightAccessPolicyOverride: override,
+            promptTokens: promptTokens,
             iterations: iterations,
-            filter: { step in
-                BenchmarkSupport.isHot6144GEMVKernel(step.pipeline.label ?? "")
-            })
+            filter: { BenchmarkSupport.isHot6144GEMVKernel($0.pipeline.label ?? "") }
+        )
 
-        let baselineTotal = baselineProfiles.reduce(0.0) { $0 + $1.totalMicroseconds } / Double(iterations)
-        let specializedTotal = specializedProfiles.reduce(0.0) { $0 + $1.totalMicroseconds } / Double(iterations)
-        let baselinePerStep = baselineTotal / Double(baselineProfiles.count)
-        let specializedPerStep = specializedTotal / Double(specializedProfiles.count)
+        let baselineTotal = baseline.profiles.reduce(0.0) { $0 + $1.totalMicroseconds } / Double(iterations)
+        let specializedTotal = specialized.profiles.reduce(0.0) { $0 + $1.totalMicroseconds } / Double(iterations)
+        let baselinePerStep = baselineTotal / Double(baseline.profiles.count)
+        let specializedPerStep = specializedTotal / Double(specialized.profiles.count)
         let delta = specializedTotal - baselineTotal
         let deltaPct = baselineTotal > 0 ? delta / baselineTotal * 100 : 0
 
         print("\n=== Blocked Layout Override: 2048->6144 Hot Family ===")
-        print("baseline tokens:    \(baselineSequence)")
-        print("specialized tokens: \(specializedSequence)")
-        print("baseline:    total=\(String(format: "%.0f", baselineTotal)) us step=\(String(format: "%.1f", baselinePerStep)) us count=\(baselineProfiles.count)")
-        print("specialized: total=\(String(format: "%.0f", specializedTotal)) us step=\(String(format: "%.1f", specializedPerStep)) us count=\(specializedProfiles.count)")
+        print("baseline tokens:    \(baseline.sequence)")
+        print("specialized tokens: \(specialized.sequence)")
+        print("baseline:    total=\(String(format: "%.0f", baselineTotal)) us step=\(String(format: "%.1f", baselinePerStep)) us count=\(baseline.profiles.count)")
+        print("specialized: total=\(String(format: "%.0f", specializedTotal)) us step=\(String(format: "%.1f", specializedPerStep)) us count=\(specialized.profiles.count)")
         print("delta:       \(String(format: "%+.0f", delta)) us (\(String(format: "%+.1f", deltaPct))%)")
     }
 
     @Test("Blocked 4x128 layout override: 2048->6144 hot-family microbench")
     func blocked4x1286144HotFamilyMicrobench() throws {
         let override = BenchmarkSupport.blocked4x1286144DecodeOverride()
-        let (baselineModel, _) = try BenchmarkSupport.setupOrSkip()
-        let (overrideModel, _) = try BenchmarkSupport.setupOrSkip(weightAccessPolicyOverride: override)
-        var baseline = baselineModel
-        var specialized = overrideModel
-
         let promptTokens: [Int32] = [1, 1, 6, 6423, 708]
-        let baselineFirst = baseline.prefill(tokens: promptTokens)
-        let specializedFirst = specialized.prefill(tokens: promptTokens)
-        var baselineSequence: [Int32] = [baselineFirst]
-        var specializedSequence: [Int32] = [specializedFirst]
-
-        let decodeSteps = 3
-        var baselineToken = baselineFirst
-        var specializedToken = specializedFirst
-        for _ in 0..<decodeSteps {
-            baselineToken = baseline.decodeSync(tokenID: baselineToken)
-            specializedToken = specialized.decodeSync(tokenID: specializedToken)
-            baselineSequence.append(baselineToken)
-            specializedSequence.append(specializedToken)
-        }
-
-        guard let device = MTLCreateSystemDefaultDevice(),
-              let queue = device.makeCommandQueue() else {
-            throw BenchmarkSupport.BenchError.noDevice
-        }
-
         let iterations = 20
-        let baselineProfiles = try BenchmarkSupport.profileDecodeSteps(
-            model: &baseline,
-            queue: queue,
+        let baseline = try profileDecodeVariant(
+            promptTokens: promptTokens,
             iterations: iterations,
-            filter: { step in
-                BenchmarkSupport.isHot6144GEMVKernel(step.pipeline.label ?? "")
-            })
-        let specializedProfiles = try BenchmarkSupport.profileDecodeSteps(
-            model: &specialized,
-            queue: queue,
+            filter: { BenchmarkSupport.isHot6144GEMVKernel($0.pipeline.label ?? "") }
+        )
+        let specialized = try profileDecodeVariant(
+            weightAccessPolicyOverride: override,
+            promptTokens: promptTokens,
             iterations: iterations,
-            filter: { step in
-                BenchmarkSupport.isHot6144GEMVKernel(step.pipeline.label ?? "")
-            })
+            filter: { BenchmarkSupport.isHot6144GEMVKernel($0.pipeline.label ?? "") }
+        )
 
-        let baselineTotal = baselineProfiles.reduce(0.0) { $0 + $1.totalMicroseconds } / Double(iterations)
-        let specializedTotal = specializedProfiles.reduce(0.0) { $0 + $1.totalMicroseconds } / Double(iterations)
-        let baselinePerStep = baselineTotal / Double(baselineProfiles.count)
-        let specializedPerStep = specializedTotal / Double(specializedProfiles.count)
+        let baselineTotal = baseline.profiles.reduce(0.0) { $0 + $1.totalMicroseconds } / Double(iterations)
+        let specializedTotal = specialized.profiles.reduce(0.0) { $0 + $1.totalMicroseconds } / Double(iterations)
+        let baselinePerStep = baselineTotal / Double(baseline.profiles.count)
+        let specializedPerStep = specializedTotal / Double(specialized.profiles.count)
         let delta = specializedTotal - baselineTotal
         let deltaPct = baselineTotal > 0 ? delta / baselineTotal * 100 : 0
 
         print("\n=== Blocked 4x128 Layout Override: 2048->6144 Hot Family ===")
-        print("baseline tokens:    \(baselineSequence)")
-        print("specialized tokens: \(specializedSequence)")
-        print("baseline:    total=\(String(format: "%.0f", baselineTotal)) us step=\(String(format: "%.1f", baselinePerStep)) us count=\(baselineProfiles.count)")
-        print("specialized: total=\(String(format: "%.0f", specializedTotal)) us step=\(String(format: "%.1f", specializedPerStep)) us count=\(specializedProfiles.count)")
+        print("baseline tokens:    \(baseline.sequence)")
+        print("specialized tokens: \(specialized.sequence)")
+        print("baseline:    total=\(String(format: "%.0f", baselineTotal)) us step=\(String(format: "%.1f", baselinePerStep)) us count=\(baseline.profiles.count)")
+        print("specialized: total=\(String(format: "%.0f", specializedTotal)) us step=\(String(format: "%.1f", specializedPerStep)) us count=\(specialized.profiles.count)")
         print("delta:       \(String(format: "%+.0f", delta)) us (\(String(format: "%+.1f", deltaPct))%)")
     }
 
     @Test("Blocked 8x128 layout override: 2048->2048 hot-family microbench")
     func blocked8x128SquareHotFamilyMicrobench() throws {
         let override = BenchmarkSupport.blocked8x128SquareDecodeOverride()
-        let (baselineModel, _) = try BenchmarkSupport.setupOrSkip()
-        let (overrideModel, _) = try BenchmarkSupport.setupOrSkip(weightAccessPolicyOverride: override)
-        var baseline = baselineModel
-        var specialized = overrideModel
-
         let promptTokens: [Int32] = [1, 1, 6, 6423, 708]
-        let baselineFirst = baseline.prefill(tokens: promptTokens)
-        let specializedFirst = specialized.prefill(tokens: promptTokens)
-        var baselineSequence: [Int32] = [baselineFirst]
-        var specializedSequence: [Int32] = [specializedFirst]
-
-        let decodeSteps = 3
-        var baselineToken = baselineFirst
-        var specializedToken = specializedFirst
-        for _ in 0..<decodeSteps {
-            baselineToken = baseline.decodeSync(tokenID: baselineToken)
-            specializedToken = specialized.decodeSync(tokenID: specializedToken)
-            baselineSequence.append(baselineToken)
-            specializedSequence.append(specializedToken)
-        }
-
-        guard let device = MTLCreateSystemDefaultDevice(),
-              let queue = device.makeCommandQueue() else {
-            throw BenchmarkSupport.BenchError.noDevice
-        }
-
         let iterations = 20
-        let baselineProfiles = try BenchmarkSupport.profileDecodeSteps(
-            model: &baseline,
-            queue: queue,
+        let baseline = try profileDecodeVariant(
+            promptTokens: promptTokens,
             iterations: iterations,
-            filter: { step in
-                BenchmarkSupport.isHotSquareGEMVKernel(step.pipeline.label ?? "")
-            })
-        let specializedProfiles = try BenchmarkSupport.profileDecodeSteps(
-            model: &specialized,
-            queue: queue,
+            filter: { BenchmarkSupport.isHotSquareGEMVKernel($0.pipeline.label ?? "") }
+        )
+        let specialized = try profileDecodeVariant(
+            weightAccessPolicyOverride: override,
+            promptTokens: promptTokens,
             iterations: iterations,
-            filter: { step in
-                BenchmarkSupport.isHotSquareGEMVKernel(step.pipeline.label ?? "")
-            })
+            filter: { BenchmarkSupport.isHotSquareGEMVKernel($0.pipeline.label ?? "") }
+        )
 
-        let baselineTotal = baselineProfiles.reduce(0.0) { $0 + $1.totalMicroseconds } / Double(iterations)
-        let specializedTotal = specializedProfiles.reduce(0.0) { $0 + $1.totalMicroseconds } / Double(iterations)
-        let baselinePerStep = baselineTotal / Double(baselineProfiles.count)
-        let specializedPerStep = specializedTotal / Double(specializedProfiles.count)
+        let baselineTotal = baseline.profiles.reduce(0.0) { $0 + $1.totalMicroseconds } / Double(iterations)
+        let specializedTotal = specialized.profiles.reduce(0.0) { $0 + $1.totalMicroseconds } / Double(iterations)
+        let baselinePerStep = baselineTotal / Double(baseline.profiles.count)
+        let specializedPerStep = specializedTotal / Double(specialized.profiles.count)
         let delta = specializedTotal - baselineTotal
         let deltaPct = baselineTotal > 0 ? delta / baselineTotal * 100 : 0
 
         print("\n=== Blocked 8x128 Layout Override: 2048->2048 Hot Family ===")
-        print("baseline tokens:    \(baselineSequence)")
-        print("specialized tokens: \(specializedSequence)")
-        print("baseline:    total=\(String(format: "%.0f", baselineTotal)) us step=\(String(format: "%.1f", baselinePerStep)) us count=\(baselineProfiles.count)")
-        print("specialized: total=\(String(format: "%.0f", specializedTotal)) us step=\(String(format: "%.1f", specializedPerStep)) us count=\(specializedProfiles.count)")
+        print("baseline tokens:    \(baseline.sequence)")
+        print("specialized tokens: \(specialized.sequence)")
+        print("baseline:    total=\(String(format: "%.0f", baselineTotal)) us step=\(String(format: "%.1f", baselinePerStep)) us count=\(baseline.profiles.count)")
+        print("specialized: total=\(String(format: "%.0f", specializedTotal)) us step=\(String(format: "%.1f", specializedPerStep)) us count=\(specialized.profiles.count)")
         print("delta:       \(String(format: "%+.0f", delta)) us (\(String(format: "%+.1f", deltaPct))%)")
     }
 
     @Test("Blocked 8x128 layout override: square q_proj-only diagnostic")
     func blocked8x128SquareQProjOnlyDiagnostic() throws {
         let override = BenchmarkSupport.blocked8x128SquareQProjDecodeOverride()
-        let (baselineModel, _) = try BenchmarkSupport.setupOrSkip()
-        let (overrideModel, _) = try BenchmarkSupport.setupOrSkip(weightAccessPolicyOverride: override)
-        var baseline = baselineModel
-        var specialized = overrideModel
-
         let promptTokens: [Int32] = [1, 1, 6, 6423, 708]
-        let baselineFirst = baseline.prefill(tokens: promptTokens)
-        let specializedFirst = specialized.prefill(tokens: promptTokens)
-        var baselineSequence: [Int32] = [baselineFirst]
-        var specializedSequence: [Int32] = [specializedFirst]
-
-        let decodeSteps = 3
-        var baselineToken = baselineFirst
-        var specializedToken = specializedFirst
-        for _ in 0..<decodeSteps {
-            baselineToken = baseline.decodeSync(tokenID: baselineToken)
-            specializedToken = specialized.decodeSync(tokenID: specializedToken)
-            baselineSequence.append(baselineToken)
-            specializedSequence.append(specializedToken)
-        }
-
-        guard let device = MTLCreateSystemDefaultDevice(),
-              let queue = device.makeCommandQueue() else {
-            throw BenchmarkSupport.BenchError.noDevice
-        }
-
         let iterations = 20
-        let baselineProfiles = try BenchmarkSupport.profileDecodeSteps(
-            model: &baseline,
-            queue: queue,
+        let baseline = try profileDecodeVariant(
+            promptTokens: promptTokens,
             iterations: iterations,
-            filter: { step in
-                BenchmarkSupport.isHotSquareGEMVKernel(step.pipeline.label ?? "")
-            })
-        let specializedProfiles = try BenchmarkSupport.profileDecodeSteps(
-            model: &specialized,
-            queue: queue,
+            filter: { BenchmarkSupport.isHotSquareGEMVKernel($0.pipeline.label ?? "") }
+        )
+        let specialized = try profileDecodeVariant(
+            weightAccessPolicyOverride: override,
+            promptTokens: promptTokens,
             iterations: iterations,
-            filter: { step in
-                BenchmarkSupport.isHotSquareGEMVKernel(step.pipeline.label ?? "")
-            })
+            filter: { BenchmarkSupport.isHotSquareGEMVKernel($0.pipeline.label ?? "") }
+        )
 
-        let baselineTotal = baselineProfiles.reduce(0.0) { $0 + $1.totalMicroseconds } / Double(iterations)
-        let specializedTotal = specializedProfiles.reduce(0.0) { $0 + $1.totalMicroseconds } / Double(iterations)
-        let baselinePerStep = baselineTotal / Double(baselineProfiles.count)
-        let specializedPerStep = specializedTotal / Double(specializedProfiles.count)
+        let baselineTotal = baseline.profiles.reduce(0.0) { $0 + $1.totalMicroseconds } / Double(iterations)
+        let specializedTotal = specialized.profiles.reduce(0.0) { $0 + $1.totalMicroseconds } / Double(iterations)
+        let baselinePerStep = baselineTotal / Double(baseline.profiles.count)
+        let specializedPerStep = specializedTotal / Double(specialized.profiles.count)
         let delta = specializedTotal - baselineTotal
         let deltaPct = baselineTotal > 0 ? delta / baselineTotal * 100 : 0
 
         print("\n=== Blocked 8x128 Layout Override: Square q_proj-only ===")
-        print("baseline tokens:    \(baselineSequence)")
-        print("specialized tokens: \(specializedSequence)")
-        print("baseline:    total=\(String(format: "%.0f", baselineTotal)) us step=\(String(format: "%.1f", baselinePerStep)) us count=\(baselineProfiles.count)")
-        print("specialized: total=\(String(format: "%.0f", specializedTotal)) us step=\(String(format: "%.1f", specializedPerStep)) us count=\(specializedProfiles.count)")
+        print("baseline tokens:    \(baseline.sequence)")
+        print("specialized tokens: \(specialized.sequence)")
+        print("baseline:    total=\(String(format: "%.0f", baselineTotal)) us step=\(String(format: "%.1f", baselinePerStep)) us count=\(baseline.profiles.count)")
+        print("specialized: total=\(String(format: "%.0f", specializedTotal)) us step=\(String(format: "%.1f", specializedPerStep)) us count=\(specialized.profiles.count)")
         print("delta:       \(String(format: "%+.0f", delta)) us (\(String(format: "%+.1f", deltaPct))%)")
     }
 
     @Test("Blocked 8x128 layout override: square q_proj prefix-3 diagnostic")
     func blocked8x128SquareQProjPrefix3Diagnostic() throws {
         let override = BenchmarkSupport.blocked8x128SquareQProjPrefix3DecodeOverride()
-        let (baselineModel, _) = try BenchmarkSupport.setupOrSkip()
-        let (overrideModel, _) = try BenchmarkSupport.setupOrSkip(weightAccessPolicyOverride: override)
-        var baseline = baselineModel
-        var specialized = overrideModel
-
         let promptTokens: [Int32] = [1, 1, 6, 6423, 708]
-        let baselineFirst = baseline.prefill(tokens: promptTokens)
-        let specializedFirst = specialized.prefill(tokens: promptTokens)
-        var baselineSequence: [Int32] = [baselineFirst]
-        var specializedSequence: [Int32] = [specializedFirst]
-
-        let decodeSteps = 3
-        var baselineToken = baselineFirst
-        var specializedToken = specializedFirst
-        for _ in 0..<decodeSteps {
-            baselineToken = baseline.decodeSync(tokenID: baselineToken)
-            specializedToken = specialized.decodeSync(tokenID: specializedToken)
-            baselineSequence.append(baselineToken)
-            specializedSequence.append(specializedToken)
-        }
-
-        guard let device = MTLCreateSystemDefaultDevice(),
-              let queue = device.makeCommandQueue() else {
-            throw BenchmarkSupport.BenchError.noDevice
-        }
-
         let iterations = 20
-        let baselineProfiles = try BenchmarkSupport.profileDecodeSteps(
-            model: &baseline,
-            queue: queue,
+        let baseline = try profileDecodeVariant(
+            promptTokens: promptTokens,
             iterations: iterations,
-            filter: { step in
-                BenchmarkSupport.isHotSquareGEMVKernel(step.pipeline.label ?? "")
-            })
-        let specializedProfiles = try BenchmarkSupport.profileDecodeSteps(
-            model: &specialized,
-            queue: queue,
+            filter: { BenchmarkSupport.isHotSquareGEMVKernel($0.pipeline.label ?? "") }
+        )
+        let specialized = try profileDecodeVariant(
+            weightAccessPolicyOverride: override,
+            promptTokens: promptTokens,
             iterations: iterations,
-            filter: { step in
-                BenchmarkSupport.isHotSquareGEMVKernel(step.pipeline.label ?? "")
-            })
+            filter: { BenchmarkSupport.isHotSquareGEMVKernel($0.pipeline.label ?? "") }
+        )
 
-        let baselineTotal = baselineProfiles.reduce(0.0) { $0 + $1.totalMicroseconds } / Double(iterations)
-        let specializedTotal = specializedProfiles.reduce(0.0) { $0 + $1.totalMicroseconds } / Double(iterations)
-        let baselinePerStep = baselineTotal / Double(baselineProfiles.count)
-        let specializedPerStep = specializedTotal / Double(specializedProfiles.count)
+        let baselineTotal = baseline.profiles.reduce(0.0) { $0 + $1.totalMicroseconds } / Double(iterations)
+        let specializedTotal = specialized.profiles.reduce(0.0) { $0 + $1.totalMicroseconds } / Double(iterations)
+        let baselinePerStep = baselineTotal / Double(baseline.profiles.count)
+        let specializedPerStep = specializedTotal / Double(specialized.profiles.count)
         let delta = specializedTotal - baselineTotal
         let deltaPct = baselineTotal > 0 ? delta / baselineTotal * 100 : 0
 
         print("\n=== Blocked 8x128 Layout Override: Square q_proj Prefix-3 ===")
         print("tensors:      \(Array(BenchmarkSupport.squareQProjBlockedSafePrefixTensorNames).sorted())")
-        print("baseline tokens:    \(baselineSequence)")
-        print("specialized tokens: \(specializedSequence)")
-        print("baseline:    total=\(String(format: "%.0f", baselineTotal)) us step=\(String(format: "%.1f", baselinePerStep)) us count=\(baselineProfiles.count)")
-        print("specialized: total=\(String(format: "%.0f", specializedTotal)) us step=\(String(format: "%.1f", specializedPerStep)) us count=\(specializedProfiles.count)")
+        print("baseline tokens:    \(baseline.sequence)")
+        print("specialized tokens: \(specialized.sequence)")
+        print("baseline:    total=\(String(format: "%.0f", baselineTotal)) us step=\(String(format: "%.1f", baselinePerStep)) us count=\(baseline.profiles.count)")
+        print("specialized: total=\(String(format: "%.0f", specializedTotal)) us step=\(String(format: "%.1f", specializedPerStep)) us count=\(specialized.profiles.count)")
         print("delta:       \(String(format: "%+.0f", delta)) us (\(String(format: "%+.1f", deltaPct))%)")
     }
 
     @Test("Blocked 8x128 layout override: square q_proj prefix-2 diagnostic")
     func blocked8x128SquareQProjPrefix2Diagnostic() throws {
         let override = BenchmarkSupport.blocked8x128SquareQProjPrefix2DecodeOverride()
-        let (baselineModel, _) = try BenchmarkSupport.setupOrSkip()
-        let (overrideModel, _) = try BenchmarkSupport.setupOrSkip(weightAccessPolicyOverride: override)
-        var baseline = baselineModel
-        var specialized = overrideModel
-
         let promptTokens: [Int32] = [1, 1, 6, 6423, 708]
-        let baselineFirst = baseline.prefill(tokens: promptTokens)
-        let specializedFirst = specialized.prefill(tokens: promptTokens)
-        var baselineSequence: [Int32] = [baselineFirst]
-        var specializedSequence: [Int32] = [specializedFirst]
-
-        let decodeSteps = 3
-        var baselineToken = baselineFirst
-        var specializedToken = specializedFirst
-        for _ in 0..<decodeSteps {
-            baselineToken = baseline.decodeSync(tokenID: baselineToken)
-            specializedToken = specialized.decodeSync(tokenID: specializedToken)
-            baselineSequence.append(baselineToken)
-            specializedSequence.append(specializedToken)
-        }
-
-        guard let device = MTLCreateSystemDefaultDevice(),
-              let queue = device.makeCommandQueue() else {
-            throw BenchmarkSupport.BenchError.noDevice
-        }
-
         let iterations = 20
-        let baselineProfiles = try BenchmarkSupport.profileDecodeSteps(
-            model: &baseline,
-            queue: queue,
+        let baseline = try profileDecodeVariant(
+            promptTokens: promptTokens,
             iterations: iterations,
-            filter: { step in
-                BenchmarkSupport.isHotSquareGEMVKernel(step.pipeline.label ?? "")
-            })
-        let specializedProfiles = try BenchmarkSupport.profileDecodeSteps(
-            model: &specialized,
-            queue: queue,
+            filter: { BenchmarkSupport.isHotSquareGEMVKernel($0.pipeline.label ?? "") }
+        )
+        let specialized = try profileDecodeVariant(
+            weightAccessPolicyOverride: override,
+            promptTokens: promptTokens,
             iterations: iterations,
-            filter: { step in
-                BenchmarkSupport.isHotSquareGEMVKernel(step.pipeline.label ?? "")
-            })
+            filter: { BenchmarkSupport.isHotSquareGEMVKernel($0.pipeline.label ?? "") }
+        )
 
-        let baselineTotal = baselineProfiles.reduce(0.0) { $0 + $1.totalMicroseconds } / Double(iterations)
-        let specializedTotal = specializedProfiles.reduce(0.0) { $0 + $1.totalMicroseconds } / Double(iterations)
-        let baselinePerStep = baselineTotal / Double(baselineProfiles.count)
-        let specializedPerStep = specializedTotal / Double(specializedProfiles.count)
+        let baselineTotal = baseline.profiles.reduce(0.0) { $0 + $1.totalMicroseconds } / Double(iterations)
+        let specializedTotal = specialized.profiles.reduce(0.0) { $0 + $1.totalMicroseconds } / Double(iterations)
+        let baselinePerStep = baselineTotal / Double(baseline.profiles.count)
+        let specializedPerStep = specializedTotal / Double(specialized.profiles.count)
         let delta = specializedTotal - baselineTotal
         let deltaPct = baselineTotal > 0 ? delta / baselineTotal * 100 : 0
 
         print("\n=== Blocked 8x128 Layout Override: Square q_proj Prefix-2 ===")
         print("tensors:      \(Array(BenchmarkSupport.squareQProjBlockedSafePrefix2TensorNames).sorted())")
-        print("baseline tokens:    \(baselineSequence)")
-        print("specialized tokens: \(specializedSequence)")
-        print("baseline:    total=\(String(format: "%.0f", baselineTotal)) us step=\(String(format: "%.1f", baselinePerStep)) us count=\(baselineProfiles.count)")
-        print("specialized: total=\(String(format: "%.0f", specializedTotal)) us step=\(String(format: "%.1f", specializedPerStep)) us count=\(specializedProfiles.count)")
+        print("baseline tokens:    \(baseline.sequence)")
+        print("specialized tokens: \(specialized.sequence)")
+        print("baseline:    total=\(String(format: "%.0f", baselineTotal)) us step=\(String(format: "%.1f", baselinePerStep)) us count=\(baseline.profiles.count)")
+        print("specialized: total=\(String(format: "%.0f", specializedTotal)) us step=\(String(format: "%.1f", specializedPerStep)) us count=\(specialized.profiles.count)")
         print("delta:       \(String(format: "%+.0f", delta)) us (\(String(format: "%+.1f", deltaPct))%)")
     }
 
     @Test("Blocked 8x128 layout override: single square q_proj multi-token diagnostic")
     func blocked8x128SquareSingleQProjMultiTokenDiagnostic() throws {
         let override = BenchmarkSupport.blocked8x128SquareSingleQProjDecodeOverride()
-        let (baselineModel, _) = try BenchmarkSupport.setupOrSkip()
-        let (overrideModel, _) = try BenchmarkSupport.setupOrSkip(weightAccessPolicyOverride: override)
-        var baseline = baselineModel
-        var specialized = overrideModel
-
         let promptTokens: [Int32] = [1, 1, 6, 6423, 708]
-        let baselineFirst = baseline.prefill(tokens: promptTokens)
-        let specializedFirst = specialized.prefill(tokens: promptTokens)
-        var baselineSequence: [Int32] = [baselineFirst]
-        var specializedSequence: [Int32] = [specializedFirst]
+        let iterations = 20
+        let baseline = try profileDecodeVariant(
+            promptTokens: promptTokens,
+            iterations: iterations,
+            filter: { BenchmarkSupport.isHotSquareGEMVKernel($0.pipeline.label ?? "") }
+        )
+        let specialized = try profileDecodeVariant(
+            weightAccessPolicyOverride: override,
+            promptTokens: promptTokens,
+            iterations: iterations,
+            filter: { BenchmarkSupport.isHotSquareGEMVKernel($0.pipeline.label ?? "") }
+        )
 
-        let decodeSteps = 3
-        var baselineToken = baselineFirst
-        var specializedToken = specializedFirst
+        let baselineTotal = baseline.profiles.reduce(0.0) { $0 + $1.totalMicroseconds } / Double(iterations)
+        let specializedTotal = specialized.profiles.reduce(0.0) { $0 + $1.totalMicroseconds } / Double(iterations)
+        let baselinePerStep = baselineTotal / Double(baseline.profiles.count)
+        let specializedPerStep = specializedTotal / Double(specialized.profiles.count)
+        let delta = specializedTotal - baselineTotal
+        let deltaPct = baselineTotal > 0 ? delta / baselineTotal * 100 : 0
+
+        print("\n=== Blocked 8x128 Layout Override: Single Square q_proj Multi-token ===")
+        print("tensor:       \(BenchmarkSupport.squareSingleQProjBlockedTensorName)")
+        print("baseline tokens:    \(baseline.sequence)")
+        print("specialized tokens: \(specialized.sequence)")
+        print("baseline:    total=\(String(format: "%.0f", baselineTotal)) us step=\(String(format: "%.1f", baselinePerStep)) us count=\(baseline.profiles.count)")
+        print("specialized: total=\(String(format: "%.0f", specializedTotal)) us step=\(String(format: "%.1f", specializedPerStep)) us count=\(specialized.profiles.count)")
+        print("delta:       \(String(format: "%+.0f", delta)) us (\(String(format: "%+.1f", deltaPct))%)")
+    }
+
+    private enum DecodeMode {
+        case sync
+        case pipelined
+    }
+
+    private struct DecodeThroughputResult {
+        let tokensPerSecond: Double
+        let millisecondsPerToken: Double
+    }
+
+    private struct ProfileVariantResult {
+        let sequence: [Int32]
+        let profiles: [BenchmarkSupport.StepProfile]
+    }
+
+    private func measureDecodeThroughput(
+        mode: DecodeMode,
+        optimizer: (any DispatchOptimizer)? = nil,
+        decodeSteps: Int,
+        promptTokens: [Int32]
+    ) throws -> DecodeThroughputResult {
+        let (model, _) = try BenchmarkSupport.setupOrSkip(optimizer: optimizer)
+        var inference = model
+        defer {
+            inference.resetCaches()
+            BenchmarkSupport.settleGPU()
+        }
+
+        switch mode {
+        case .sync:
+            var token = inference.prefill(tokens: promptTokens)
+            for _ in 0..<3 { token = inference.decodeSync(tokenID: token) }
+
+            let start = CFAbsoluteTimeGetCurrent()
+            for _ in 0..<decodeSteps {
+                token = inference.decodeSync(tokenID: token)
+            }
+            let elapsed = CFAbsoluteTimeGetCurrent() - start
+            return DecodeThroughputResult(
+                tokensPerSecond: Double(decodeSteps) / elapsed,
+                millisecondsPerToken: elapsed / Double(decodeSteps) * 1000
+            )
+
+        case .pipelined:
+            var token = inference.prefill(tokens: promptTokens)
+            for _ in 0..<3 {
+                _ = inference.decode(tokenID: token)
+                token = inference.flush()
+            }
+
+            let start = CFAbsoluteTimeGetCurrent()
+            _ = inference.decode(tokenID: token)
+            for step in 0..<decodeSteps {
+                token = inference.flush()
+                if step + 1 < decodeSteps {
+                    _ = inference.decode(tokenID: token)
+                }
+            }
+            let elapsed = CFAbsoluteTimeGetCurrent() - start
+            return DecodeThroughputResult(
+                tokensPerSecond: Double(decodeSteps) / elapsed,
+                millisecondsPerToken: elapsed / Double(decodeSteps) * 1000
+            )
+        }
+    }
+
+    private func profileDecodeVariant(
+        weightAccessPolicyOverride: ProjectionWeightAccessPolicyOverride? = nil,
+        promptTokens: [Int32],
+        decodeSteps: Int = 3,
+        iterations: Int,
+        filter: (MetalDispatchStep) -> Bool
+    ) throws -> ProfileVariantResult {
+        let (model, _) = try BenchmarkSupport.setupOrSkip(
+            weightAccessPolicyOverride: weightAccessPolicyOverride
+        )
+        var inference = model
+        defer {
+            inference.resetCaches()
+            BenchmarkSupport.settleGPU()
+        }
+
+        let first = inference.prefill(tokens: promptTokens)
+        var sequence: [Int32] = [first]
+        var token = first
         for _ in 0..<decodeSteps {
-            baselineToken = baseline.decodeSync(tokenID: baselineToken)
-            specializedToken = specialized.decodeSync(tokenID: specializedToken)
-            baselineSequence.append(baselineToken)
-            specializedSequence.append(specializedToken)
+            token = inference.decodeSync(tokenID: token)
+            sequence.append(token)
         }
 
         guard let device = MTLCreateSystemDefaultDevice(),
@@ -817,35 +726,12 @@ struct BenchmarkDiagnosticsTests {
             throw BenchmarkSupport.BenchError.noDevice
         }
 
-        let iterations = 20
-        let baselineProfiles = try BenchmarkSupport.profileDecodeSteps(
-            model: &baseline,
+        let profiles = try BenchmarkSupport.profileDecodeSteps(
+            model: &inference,
             queue: queue,
             iterations: iterations,
-            filter: { step in
-                BenchmarkSupport.isHotSquareGEMVKernel(step.pipeline.label ?? "")
-            })
-        let specializedProfiles = try BenchmarkSupport.profileDecodeSteps(
-            model: &specialized,
-            queue: queue,
-            iterations: iterations,
-            filter: { step in
-                BenchmarkSupport.isHotSquareGEMVKernel(step.pipeline.label ?? "")
-            })
-
-        let baselineTotal = baselineProfiles.reduce(0.0) { $0 + $1.totalMicroseconds } / Double(iterations)
-        let specializedTotal = specializedProfiles.reduce(0.0) { $0 + $1.totalMicroseconds } / Double(iterations)
-        let baselinePerStep = baselineTotal / Double(baselineProfiles.count)
-        let specializedPerStep = specializedTotal / Double(specializedProfiles.count)
-        let delta = specializedTotal - baselineTotal
-        let deltaPct = baselineTotal > 0 ? delta / baselineTotal * 100 : 0
-
-        print("\n=== Blocked 8x128 Layout Override: Single Square q_proj Multi-token ===")
-        print("tensor:       \(BenchmarkSupport.squareSingleQProjBlockedTensorName)")
-        print("baseline tokens:    \(baselineSequence)")
-        print("specialized tokens: \(specializedSequence)")
-        print("baseline:    total=\(String(format: "%.0f", baselineTotal)) us step=\(String(format: "%.1f", baselinePerStep)) us count=\(baselineProfiles.count)")
-        print("specialized: total=\(String(format: "%.0f", specializedTotal)) us step=\(String(format: "%.1f", specializedPerStep)) us count=\(specializedProfiles.count)")
-        print("delta:       \(String(format: "%+.0f", delta)) us (\(String(format: "%+.1f", deltaPct))%)")
+            filter: filter
+        )
+        return ProfileVariantResult(sequence: sequence, profiles: profiles)
     }
 }

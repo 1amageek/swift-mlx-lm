@@ -9,6 +9,16 @@ import LMIR
 struct STAFSpecializedLayoutTests {
     private static let realModelSTAFPath = "/Users/1amageek/Desktop/swift-lm/TestData/LFM2.5-1.2B-Thinking/model.staf"
 
+    private static func requireRealModelStore() throws -> STAFWeightStore {
+        guard let resources = try RealModelTestSupport.loadOrSkip(
+            skipMessage: "Missing STAF fixture at \(Self.realModelSTAFPath)"
+        ) else {
+            throw MetalCompilerError.deviceSetupFailed("Missing STAF fixture at \(Self.realModelSTAFPath)")
+        }
+        defer { resources.release() }
+        return resources.store
+    }
+
     @Test("blockedRows8Tiles128 packs row-major weights into 8x128 tiles")
     func blockedRows8Tiles128PackingMatchesExpectedOrder() throws {
         let fixture = try makeBlockedRowsFixture()
@@ -222,7 +232,7 @@ struct STAFSpecializedLayoutTests {
             return
         }
 
-        let store = try STAFLoader().load(at: stafURL, device: device)
+        let store = try Self.requireRealModelStore()
         guard let tensorName = store.entries.values
             .filter({ $0.shape == [6_144, 2_048] && $0.schemeIdentifier == .bf16RowMajor })
             .map(\.name)
@@ -287,7 +297,7 @@ struct STAFSpecializedLayoutTests {
         let outputDimension = 6_144
         let inputDimension = 2_048
 
-        let store = try STAFLoader().load(at: stafURL, device: device)
+        let store = try Self.requireRealModelStore()
         let builder = STAFSpecializedWeightStoreBuilder(device: device)
         let rowMajorAccess = try requireAccess(
             store.bufferAccess(for: tensorName, layout: .rowMajor),
@@ -413,7 +423,7 @@ struct STAFSpecializedLayoutTests {
         let inputDimension = 2_048
         let outputDimension = 6_144
 
-        let store = try STAFLoader().load(at: stafURL, device: device)
+        let store = try Self.requireRealModelStore()
         let builder = STAFSpecializedWeightStoreBuilder(device: device)
 
         let source = MetalSourceGenerator.commonHeader + "\n" + [
@@ -634,7 +644,7 @@ struct STAFSpecializedLayoutTests {
         let outProjOutputDimension = 2_048
         let outProjPolicy = Input2048GEMVSourcePolicy.square(weightFormat: .bfloat16)
 
-        let store = try STAFLoader().load(at: stafURL, device: device)
+        let store = try Self.requireRealModelStore()
         let builder = STAFSpecializedWeightStoreBuilder(device: device)
 
         let source = MetalSourceGenerator.commonHeader + "\n" + [
@@ -891,7 +901,7 @@ struct STAFSpecializedLayoutTests {
         let outProjOutputDimension = 2_048
         let outProjPolicy = Input2048GEMVSourcePolicy.square(weightFormat: .bfloat16)
 
-        let baseStore = try STAFLoader().load(at: stafURL, device: device)
+        let baseStore = try Self.requireRealModelStore()
         let builder = STAFSpecializedWeightStoreBuilder(device: device)
         let specializedStore = try Self.realHot2048To6144TensorNames.reduce(baseStore) { store, tensorName in
             let request = STAFWeightAccessRequest(
@@ -1134,7 +1144,7 @@ struct STAFSpecializedLayoutTests {
         }
 
         let tensorName = "model.layers.0.conv.in_proj.weight"
-        let store = try STAFLoader().load(at: stafURL, device: device)
+        let store = try Self.requireRealModelStore()
         let builder = STAFSpecializedWeightStoreBuilder(device: device)
         let blockedAccess = try builder.makeBlockedRows8Tiles128Access(for: tensorName, store: store)
         let probePairCount = 256
@@ -1245,7 +1255,7 @@ struct STAFSpecializedLayoutTests {
         }
 
         let tensorName = "model.layers.0.conv.in_proj.weight"
-        let store = try STAFLoader().load(at: stafURL, device: device)
+        let store = try Self.requireRealModelStore()
         let builder = STAFSpecializedWeightStoreBuilder(device: device)
         let blockedAccess = try builder.makeBlockedRows8Tiles128Access(for: tensorName, store: store)
         let probePairCount = 256
@@ -1327,7 +1337,7 @@ struct STAFSpecializedLayoutTests {
         }
 
         let tensorName = "model.layers.0.conv.in_proj.weight"
-        let store = try STAFLoader().load(at: stafURL, device: device)
+        let store = try Self.requireRealModelStore()
         let builder = STAFSpecializedWeightStoreBuilder(device: device)
         let blockedAccess = try builder.makeBlockedRows8Tiles128Access(for: tensorName, store: store)
         let specializedStore = store.registeringSpecializedBufferAccess(
@@ -1432,7 +1442,7 @@ struct STAFSpecializedLayoutTests {
             return
         }
 
-        let store = try STAFLoader().load(at: stafURL, device: device)
+        let store = try Self.requireRealModelStore()
         let compiler = MetalInferenceCompiler()
         let graph = try makeResolvedLFM2Graph()
         let summaries = try compiler.summarizeCompiledDecodeWeightBindings(
@@ -1480,7 +1490,7 @@ struct STAFSpecializedLayoutTests {
             return
         }
 
-        let store = try STAFLoader().load(at: stafURL, device: device)
+        let store = try Self.requireRealModelStore()
         let targetTensor = try requireAccess(
             Self.realHot2048To6144TensorNames.first,
             message: "Missing hot tensor name"
@@ -1540,7 +1550,7 @@ struct STAFSpecializedLayoutTests {
             return
         }
 
-        let store = try STAFLoader().load(at: stafURL, device: device)
+        let store = try Self.requireRealModelStore()
         let graph = try makeResolvedLFM2Graph()
         let targetTensor = try requireAccess(
             Self.realHot2048To6144TensorNames.first,
@@ -1617,7 +1627,7 @@ struct STAFSpecializedLayoutTests {
             return
         }
 
-        let store = try STAFLoader().load(at: stafURL, device: device)
+        let store = try Self.requireRealModelStore()
         let graph = try makeResolvedLFM2Graph()
         let targetTensor = try requireAccess(
             Self.realHot2048To2048TensorNames.first(where: { $0.contains(".self_attn.q_proj.weight") }),
@@ -1694,7 +1704,7 @@ struct STAFSpecializedLayoutTests {
             return
         }
 
-        let store = try STAFLoader().load(at: stafURL, device: device)
+        let store = try Self.requireRealModelStore()
         let graph = try makeResolvedLFM2Graph()
         let targetTensor = try requireAccess(
             Self.realHot2048To2048TensorNames.first(where: { $0.contains(".self_attn.q_proj.weight") }),
@@ -1782,7 +1792,7 @@ struct STAFSpecializedLayoutTests {
             return
         }
 
-        let store = try STAFLoader().load(at: stafURL, device: device)
+        let store = try Self.requireRealModelStore()
         let graph = try makeResolvedLFM2Graph()
         let targetTensor = try requireAccess(
             Self.realHot2048To2048TensorNames.first(where: { $0.contains(".self_attn.out_proj.weight") }),
@@ -1859,7 +1869,7 @@ struct STAFSpecializedLayoutTests {
             return
         }
 
-        let store = try STAFLoader().load(at: stafURL, device: device)
+        let store = try Self.requireRealModelStore()
         let graph = try makeResolvedLFM2Graph()
         let targetTensor = try requireAccess(
             Self.realHot2048To2048TensorNames.first(where: { $0.contains(".conv.out_proj.weight") }),
@@ -1936,7 +1946,7 @@ struct STAFSpecializedLayoutTests {
             return
         }
 
-        let store = try STAFLoader().load(at: stafURL, device: device)
+        let store = try Self.requireRealModelStore()
         let graph = try makeResolvedLFM2Graph()
         let targetTensors = Set(Self.realHot2048To2048TensorNames.filter { $0.contains(".self_attn.q_proj.weight") })
         #expect(!targetTensors.isEmpty)
@@ -2011,7 +2021,7 @@ struct STAFSpecializedLayoutTests {
             return
         }
 
-        let store = try STAFLoader().load(at: stafURL, device: device)
+        let store = try Self.requireRealModelStore()
         let graph = try makeResolvedLFM2Graph()
         let targetTensors = Set(
             Self.realHot2048To2048TensorNames
@@ -2102,7 +2112,7 @@ struct STAFSpecializedLayoutTests {
             return
         }
 
-        let store = try STAFLoader().load(at: stafURL, device: device)
+        let store = try Self.requireRealModelStore()
         let graph = try makeResolvedLFM2Graph()
         let qProjTensors = Self.realHot2048To2048TensorNames
             .filter { $0.contains(".self_attn.q_proj.weight") }
@@ -2187,7 +2197,7 @@ struct STAFSpecializedLayoutTests {
             return
         }
 
-        let store = try STAFLoader().load(at: stafURL, device: device)
+        let store = try Self.requireRealModelStore()
         let graph = try makeResolvedLFM2Graph()
         let hotTensors = Set(Self.realHot2048To6144TensorNames)
 

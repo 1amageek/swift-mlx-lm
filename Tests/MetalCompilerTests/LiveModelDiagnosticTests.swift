@@ -19,17 +19,13 @@ struct LiveModelDiagnosticTests {
 
     @Test("Single command buffer prefill with real STAF (matches app behavior)")
     func liveModelSingleCommandBuffer() throws {
-        guard let device = MTLCreateSystemDefaultDevice() else {
-            Issue.record("No Metal device")
+        guard let resources = try RealModelTestSupport.loadOrSkip(skipMessage: "[Live CB] STAF not found — skipping") else {
             return
         }
-        let stafURL = URL(fileURLWithPath: Self.stafPath)
-        guard FileManager.default.fileExists(atPath: Self.stafPath) else {
-            print("[Live CB] STAF not found — skipping")
-            return
-        }
+        defer { resources.release() }
 
-        let store = try STAFLoader().load(at: stafURL, device: device)
+        let device = resources.device
+        let store = resources.store
         let config = Self.makeConfig()
         let graph = try LFM2(config: config).makeModelGraph()
         let resolved = ParameterResolver().resolve(graph: graph, convention: .lfm2Family)
@@ -38,7 +34,7 @@ struct LiveModelDiagnosticTests {
         let prefillPlan = try MetalInferenceCompiler().compilePrefill(
             graph: resolved,
             hiddenSize: 2048, intermediateSize: 5632, vocabSize: 128256,
-            maximumSequenceLength: 4096,
+            maximumSequenceLength: seqLen,
             stafWeightStore: store, device: device)
 
         print("[Live CB] plan: \(prefillPlan.stepCount) steps, seqLen=\(seqLen)")
@@ -137,17 +133,20 @@ struct LiveModelDiagnosticTests {
 
     @Test("Compile prefill plan and dump projection details")
     func dumpProjectionDetails() throws {
-        guard let device = MTLCreateSystemDefaultDevice() else { Issue.record("No Metal device"); return }
-        let stafURL = URL(fileURLWithPath: Self.stafPath)
-        guard FileManager.default.fileExists(atPath: Self.stafPath) else { print("[Proj dump] STAF not found"); return }
+        guard let resources = try RealModelTestSupport.loadOrSkip(skipMessage: "[Proj dump] STAF not found") else {
+            return
+        }
+        defer { resources.release() }
 
-        let store = try STAFLoader().load(at: stafURL, device: device)
+        let device = resources.device
+        let store = resources.store
         let config = Self.makeConfig()
         let graph = try LFM2(config: config).makeModelGraph()
         let resolved = ParameterResolver().resolve(graph: graph, convention: .lfm2Family)
 
         // Print the same params the app uses
         print("[Proj dump] hidden=\(config.hiddenSize) intermediate=\(config.intermediateSize) vocab=\(config.vocabSize)")
+        let seqLen = 986
 
         // compilePrefill will print projection details via the logging we added
         let prefillPlan = try MetalInferenceCompiler().compilePrefill(
@@ -155,13 +154,12 @@ struct LiveModelDiagnosticTests {
             hiddenSize: config.hiddenSize,
             intermediateSize: config.intermediateSize,
             vocabSize: config.vocabSize,
-            maximumSequenceLength: 4096,
+            maximumSequenceLength: seqLen,
             stafWeightStore: store, device: device)
 
         print("[Proj dump] plan: \(prefillPlan.stepCount) steps, scratch=\(prefillPlan.buffers.scratch.length)")
 
         // Now run step-by-step and log step index alongside projection info
-        let seqLen = 986
         let tokenPtr = prefillPlan.buffers.tokenIDs.contents().bindMemory(to: Int32.self, capacity: seqLen)
         let posPtr = prefillPlan.buffers.positions.contents().bindMemory(to: UInt32.self, capacity: seqLen)
         for i in 0..<seqLen { tokenPtr[i] = Int32(i + 1); posPtr[i] = UInt32(i) }
@@ -213,7 +211,15 @@ struct LiveModelDiagnosticTests {
             let sp = prefillPlan.buffers.scratch.contents().bindMemory(to: Float.self, capacity: hiddenSize)
             let sNaN = (0..<hiddenSize).contains { sp[$0].isNaN }
             let hs = (0..<min(4, hiddenSize)).map { Float(hp[$0]) }
-            let m = step.mode == .batch ? "B" : step.mode == .perPosition ? "P" : "L"
+            let m: String
+            switch step.mode {
+            case .batch:
+                m = "B"
+            case .perPosition:
+                m = "P"
+            case .lastToken:
+                m = "L"
+            }
 
             if stepIndex < 20 || hNaN || sNaN {
                 // Dump bytes bindings to see inputDim/outputDim
@@ -271,9 +277,12 @@ struct LiveModelDiagnosticTests {
 
     @Test("Run prefill via MetalInferenceModel with REAL tokens from tokenizer")
     func prefillViaInferenceModel() async throws {
-        guard let device = MTLCreateSystemDefaultDevice() else { Issue.record("No Metal device"); return }
-        let stafURL = URL(fileURLWithPath: Self.stafPath)
-        guard FileManager.default.fileExists(atPath: Self.stafPath) else { print("STAF not found"); return }
+        guard let resources = try RealModelTestSupport.loadOrSkip(skipMessage: "STAF not found") else {
+            return
+        }
+        defer { resources.release() }
+
+        let device = resources.device
 
         // Load tokenizer from model directory (same as app's ModelBundleLoader)
         let modelDirURL = URL(fileURLWithPath: Self.modelDir)
@@ -303,26 +312,6 @@ struct LiveModelDiagnosticTests {
         print("[InfModel] tokens[0..<20]=\(Array(tokens.prefix(20)))")
         print("[InfModel] tokens[\(tokens.count-5)..<\(tokens.count)]=\(Array(tokens.suffix(5)))")
 
-        // Compile model (same as app)
-        let store = try STAFLoader().load(at: stafURL, device: device)
-        let config = Self.makeConfig()
-        let graph = try LFM2(config: config).makeModelGraph()
-        let resolved = ParameterResolver().resolve(graph: graph, convention: .lfm2Family)
-
-        let compiler = MetalInferenceCompiler()
-        let decodePlan = try compiler.compile(
-            graph: resolved, hiddenSize: 2048, intermediateSize: 8192,
-            vocabSize: 65536, stafWeightStore: store, device: device)
-        let prefillPlan = try compiler.compilePrefill(
-            graph: resolved, hiddenSize: 2048, intermediateSize: 8192,
-            vocabSize: 65536, maximumSequenceLength: 4096,
-            stafWeightStore: store, device: device)
-
-        print("[InfModel] decode=\(decodePlan.steps.count) prefill=\(prefillPlan.stepCount) scratch=\(prefillPlan.buffers.scratch.length) hidden=\(prefillPlan.buffers.hidden.length)")
-
-        var model = try MetalInferenceModel(plan: decodePlan, device: device)
-        model.prefillPlan = prefillPlan
-
         // Use exact app tokens from file (986 tokens from chat template)
         let tokenFileURL = URL(fileURLWithPath: "/tmp/lfm2_test_tokens.txt")
         let realTokens: [Int32]
@@ -334,6 +323,26 @@ struct LiveModelDiagnosticTests {
             realTokens = tokens
             print("[InfModel] token file not found, using tokenizer tokens (\(tokens.count))")
         }
+
+        // Compile model (same as app)
+        let config = Self.makeConfig()
+        let graph = try LFM2(config: config).makeModelGraph()
+        let resolved = ParameterResolver().resolve(graph: graph, convention: .lfm2Family)
+
+        let compiler = MetalInferenceCompiler()
+        let store = resources.store
+        let decodePlan = try compiler.compile(
+            graph: resolved, hiddenSize: 2048, intermediateSize: 8192,
+            vocabSize: 65536, stafWeightStore: store, device: device)
+        let prefillPlan = try compiler.compilePrefill(
+            graph: resolved, hiddenSize: 2048, intermediateSize: 8192,
+            vocabSize: 65536, maximumSequenceLength: max(1, realTokens.count),
+            stafWeightStore: store, device: device)
+
+        print("[InfModel] decode=\(decodePlan.steps.count) prefill=\(prefillPlan.stepCount) scratch=\(prefillPlan.buffers.scratch.length) hidden=\(prefillPlan.buffers.hidden.length)")
+
+        var model = try MetalInferenceModel(plan: decodePlan, device: device)
+        model.prefillPlan = prefillPlan
         model.prefill(tokens: realTokens)
 
         print("[InfModel] position=\(model.position)")
@@ -343,18 +352,13 @@ struct LiveModelDiagnosticTests {
 
     @Test("Step-by-step prefill with real STAF finds NaN source")
     func liveModelStepByStep() throws {
-        guard let device = MTLCreateSystemDefaultDevice() else {
-            Issue.record("No Metal device")
+        guard let resources = try RealModelTestSupport.loadOrSkip(skipMessage: "[Live diag] STAF file not found — skipping") else {
             return
         }
+        defer { resources.release() }
 
-        let stafURL = URL(fileURLWithPath: Self.stafPath)
-        guard FileManager.default.fileExists(atPath: Self.stafPath) else {
-            print("[Live diag] STAF file not found at \(Self.stafPath) — skipping")
-            return
-        }
-
-        let store = try STAFLoader().load(at: stafURL, device: device)
+        let device = resources.device
+        let store = resources.store
         print("[Live diag] STAF loaded: \(store.entries.count) tensors")
 
         let config = Self.makeConfig()
@@ -367,7 +371,7 @@ struct LiveModelDiagnosticTests {
         let prefillPlan = try MetalInferenceCompiler().compilePrefill(
             graph: resolved,
             hiddenSize: 2048, intermediateSize: 5632, vocabSize: 128256,
-            maximumSequenceLength: 4096,
+            maximumSequenceLength: seqLen,
             stafWeightStore: store,
             device: device)
 

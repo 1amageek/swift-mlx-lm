@@ -17,23 +17,18 @@ struct PrefillDiagnosticTest {
 
     @Test("Step-by-step prefill diagnostic with per-layer comparison")
     func stepByStepDiagnostic() throws {
-        guard let device = MTLCreateSystemDefaultDevice() else { throw DiagError.noDevice }
+        guard let resources = try RealModelTestSupport.loadOrSkip(skipMessage: "STAF not found — skipping") else {
+            return
+        }
+        defer { resources.release() }
+
+        let device = resources.device
 
         let refURL = URL(fileURLWithPath: Self.referencePath)
         guard FileManager.default.fileExists(atPath: refURL.path) else { throw DiagError.noFile }
 
-        let stafURL = URL(fileURLWithPath: Self.stafPath)
-        if !FileManager.default.fileExists(atPath: stafURL.path) {
-            let safetensorsURL = stafURL.deletingLastPathComponent()
-                .appendingPathComponent("model.safetensors")
-            guard FileManager.default.fileExists(atPath: safetensorsURL.path) else {
-                throw DiagError.noFile
-            }
-            try STAFConverter().convert(safetensorsURLs: [safetensorsURL], outputURL: stafURL)
-        }
-
         let ref = try SafetensorsLoader().load(at: refURL, device: device)
-        let store = try STAFLoader().load(at: stafURL, device: device)
+        let store = resources.store
 
         let config = ModelConfig(
             hiddenSize: 2048, layerCount: 16, intermediateSize: 8192,
