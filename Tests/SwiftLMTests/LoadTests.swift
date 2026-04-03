@@ -223,6 +223,30 @@ struct LoadTests {
     }
 
     private func findModelDirectory() throws -> URL? {
+        let directCandidates = [
+            "/Users/1amageek/Desktop/swift-lm/TestData/LFM2.5-1.2B-Thinking",
+        ]
+
+        for candidate in directCandidates {
+            let directory = URL(fileURLWithPath: candidate)
+            let configPath = directory.appendingPathComponent("config.json")
+            let tokenizerPath = directory.appendingPathComponent("tokenizer.json")
+            guard FileManager.default.fileExists(atPath: configPath.path),
+                  FileManager.default.fileExists(atPath: tokenizerPath.path) else {
+                continue
+            }
+
+            let contents = try FileManager.default.contentsOfDirectory(
+                at: directory,
+                includingPropertiesForKeys: nil
+            )
+            let hasSafetensors = contents.contains { $0.pathExtension == "safetensors" }
+            guard hasSafetensors else { continue }
+
+            print("[Model] Using local test bundle: \(candidate)")
+            return directory
+        }
+
         // Try common model cache locations
         let candidates = [
             "~/.cache/huggingface/hub/models--Qwen--Qwen2.5-0.5B-Instruct",

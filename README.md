@@ -16,6 +16,26 @@ for await generation in container.generate(input: try container.prepare(input: U
 }
 ```
 
+## Release Status
+
+`0.1.0` is the first public release candidate for application developers who want direct Metal inference from Swift.
+
+Supported in `0.1.0`:
+
+- Apple Silicon devices with Metal
+- HuggingFace snapshot directories containing `config.json`, `tokenizer.json`, and `.safetensors`
+- direct Metal decode/prefill execution through `SwiftLM`
+- text prompts and chat prompts through `UserInput`
+- the currently documented model families in this README and in `docs/using-swift-lm.md`
+
+Not part of `0.1.0`:
+
+- multimodal image or video input
+- tool calling or structured function-calling APIs
+- non-Metal backends
+- training or fine-tuning workflows
+- non-Apple-Silicon deployment targets
+
 ## Developer Quick Start
 
 Application developers should start with [`docs/using-swift-lm.md`](docs/using-swift-lm.md). It covers:
@@ -40,7 +60,7 @@ SwiftPM dependency example:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/1amageek/swift-lm.git", branch: "main")
+    .package(url: "https://github.com/1amageek/swift-lm.git", from: "0.1.0")
 ]
 ```
 
@@ -135,8 +155,8 @@ let compiler = MetalInferenceCompiler(optimizer: AggressiveOptimizer())
 | Optimizer | Dispatch Count | Strategy |
 |---|---|---|
 | `NoOptimizer` | 242 | No optimization (baseline) |
-| `StandardOptimizer` | 179 | Norm fusion only |
-| `AggressiveOptimizer` | 144 | + Projection batching + per-head batching |
+| `StandardOptimizer` | 179 | Exact-shape MLP front-half fusion + norm fusion |
+| `AggressiveOptimizer` | 144 | Standard optimization + projection batching + per-head batching |
 
 Optimization runs during the IR walk (collect → optimize → emit), not as a post-hoc pass on a flat list. This preserves structural information from the IR.
 
@@ -295,7 +315,7 @@ xcodebuild test -scheme swift-lm-Package -destination 'platform=macOS' \
 
 ## Requirements
 
-- macOS 15+ / iOS 18+ / visionOS 2+
+- macOS 26+ / iOS 26+ / visionOS 26+
 - Swift 6.2+
 - Apple Silicon (Metal GPU)
 
@@ -307,6 +327,7 @@ xcodebuild test -scheme swift-lm-Package -destination 'platform=macOS' \
 ## Documentation
 
 - `docs/using-swift-lm.md` — developer integration guide
+- `docs/releases/0.1.0.md` — release notes and support boundary for `0.1.0`
 - `Sources/SwiftLM/SwiftLM.docc` — DocC catalog for the `SwiftLM` module
 - `AGENTS.md` — repository architecture and contribution guidance
 - `DESIGN-Metal4.md` — forward-looking Metal 4 design work

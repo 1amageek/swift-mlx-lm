@@ -11,7 +11,7 @@
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/1amageek/swift-lm.git", branch: "main")
+    .package(url: "https://github.com/1amageek/swift-lm.git", from: "0.1.0")
 ],
 targets: [
     .target(
