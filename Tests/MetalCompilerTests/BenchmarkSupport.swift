@@ -4,6 +4,7 @@ import LMArchitecture
 import LMIR
 import ModelDeclarations
 @testable import MetalCompiler
+@testable import SwiftLM
 
 enum BenchmarkSupport {
     private struct LoadedStore {
@@ -390,6 +391,110 @@ enum BenchmarkSupport {
             trace.append(currentToken)
         }
         return trace
+    }
+
+    // MARK: - Generic Bundle Setup
+
+    private static let bundleStoreLock = NSLock()
+    nonisolated(unsafe) private static var bundleStoreCache: [String: LoadedStore] = [:]
+
+    /// Set up a model from a HuggingFace-format bundle directory.
+    ///
+    /// Reads config.json, resolves the model graph via `ModelGraphResolver`,
+    /// loads/converts STAF weights, and compiles decode + prefill plans.
+    static func setupFromBundle(
+        bundlePath: String,
+        optimizer: (any DispatchOptimizer)? = nil,
+        maximumPrefillLength: Int = 64
+    ) throws -> (MetalInferenceModel, STAFWeightStore, String) {
+        let (device, store) = try loadBundleStoreOrSkip(bundlePath: bundlePath)
+
+        let configURL = URL(fileURLWithPath: bundlePath).appendingPathComponent("config.json")
+        let configData = try Data(contentsOf: configURL)
+        let decoder = HFConfigDecoder()
+        let modelType = try decoder.modelType(from: configData)
+        let config = try decoder.decode(from: configData)
+
+        let resolver = ModelGraphResolver()
+        let graph = try resolver.resolveModelGraph(modelType: modelType, config: config)
+        let convention = resolver.namingConvention(for: modelType)
+        let resolved = ParameterResolver().resolve(graph: graph, convention: convention)
+
+        let compiler = MetalInferenceCompiler(optimizer: optimizer)
+        let compiled = try compiler.compile(
+            graph: resolved,
+            hiddenSize: config.hiddenSize,
+            intermediateSize: config.intermediateSize,
+            vocabSize: config.vocabSize,
+            stafWeightStore: store,
+            device: device
+        )
+        let prefillPlan = try compiler.compilePrefill(
+            graph: resolved,
+            hiddenSize: config.hiddenSize,
+            intermediateSize: config.intermediateSize,
+            vocabSize: config.vocabSize,
+            maximumSequenceLength: maximumPrefillLength,
+            stafWeightStore: store,
+            sharedKVCache: compiled.decodePlan.buffers.kvCache,
+            sharedConvState: compiled.decodePlan.buffers.convState,
+            sharedConvStateDimension: compiled.decodePlan.buffers.convStateDimension,
+            sharedConvStateKernelSize: compiled.decodePlan.buffers.convStateKernelSize,
+            sharedRecurrentState: compiled.decodePlan.buffers.recurrentState,
+            sharedRecurrentStateBytesPerLayer: compiled.decodePlan.buffers.recurrentStateBytesPerLayer,
+            device: device
+        )
+        let finalCompiled = compiled.withPrefillPlan(prefillPlan)
+        let model = try MetalInferenceModel(compiledModel: finalCompiled, device: device)
+
+        return (model, store, modelType)
+    }
+
+    static func loadBundleStoreOrSkip(bundlePath: String) throws -> (MTLDevice, STAFWeightStore) {
+        bundleStoreLock.lock()
+        defer { bundleStoreLock.unlock() }
+
+        if let cached = bundleStoreCache[bundlePath] {
+            return (cached.device, cached.store)
+        }
+
+        guard let device = MTLCreateSystemDefaultDevice() else { throw BenchError.noDevice }
+
+        let bundleURL = URL(fileURLWithPath: bundlePath)
+        let stafURL = bundleURL.appendingPathComponent("model.staf")
+
+        if !FileManager.default.fileExists(atPath: stafURL.path) {
+            let safetensorsURLs = try resolveSafetensorsFiles(in: bundleURL)
+            guard !safetensorsURLs.isEmpty else { throw BenchError.noModel }
+            try STAFConverter().convert(safetensorsURLs: safetensorsURLs, outputURL: stafURL)
+        }
+
+        let store = try STAFLoader().load(at: stafURL, device: device)
+        bundleStoreCache[bundlePath] = LoadedStore(device: device, store: store)
+        return (device, store)
+    }
+
+    /// Resolve safetensors files: single model.safetensors or sharded via index.
+    private static func resolveSafetensorsFiles(in bundleURL: URL) throws -> [URL] {
+        let singleURL = bundleURL.appendingPathComponent("model.safetensors")
+        if FileManager.default.fileExists(atPath: singleURL.path) {
+            return [singleURL]
+        }
+        let indexURL = bundleURL.appendingPathComponent("model.safetensors.index.json")
+        guard FileManager.default.fileExists(atPath: indexURL.path) else {
+            return []
+        }
+        let indexData = try Data(contentsOf: indexURL)
+        guard let indexJSON = try JSONSerialization.jsonObject(with: indexData) as? [String: Any],
+              let weightMap = indexJSON["weight_map"] as? [String: String] else {
+            return []
+        }
+        let shardFiles = Set(weightMap.values)
+        let shardURLs = shardFiles.sorted().map { bundleURL.appendingPathComponent($0) }
+        for url in shardURLs {
+            guard FileManager.default.fileExists(atPath: url.path) else { return [] }
+        }
+        return shardURLs
     }
 
     enum BenchError: Error {
