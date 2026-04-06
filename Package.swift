@@ -48,6 +48,9 @@ let package = Package(
                 .product(name: "OrderedCollections", package: "swift-collections"),
                 .product(name: "Tokenizers", package: "swift-transformers"),
                 .product(name: "Hub", package: "swift-transformers"),
+            ],
+            swiftSettings: [
+                .define("ACCELERATE_NEW_LAPACK"),
             ]
         ),
         .testTarget(name: "MetalCompilerTests", dependencies: [
@@ -64,6 +67,8 @@ let package = Package(
         .testTarget(name: "SwiftLMTests", dependencies: [
             "SwiftLM",
             .product(name: "TestHeartbeat", package: "swift-testing-heartbeat"),
-        ], exclude: ["DSLLoweringTests.swift", "IRInvariantTests.swift", "PerformanceTests.swift", "ModelGraphTests.swift", "DimensionValidatorTests.swift"]),
+        ], exclude: ["DSLLoweringTests.swift", "IRInvariantTests.swift", "PerformanceTests.swift", "ModelGraphTests.swift", "DimensionValidatorTests.swift"], resources: [
+            .process("TestData")
+        ]),
     ]
 )

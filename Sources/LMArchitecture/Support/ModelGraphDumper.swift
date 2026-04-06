@@ -156,6 +156,9 @@ public enum ModelGraphDumper {
             }
             return "tokenEmbedding(vocab=\(a.vocabSize), dim=\(a.embeddingSize))"
 
+        case let a as PerLayerInputAttributes:
+            return "perLayerInput(hidden=\(a.hiddenSize), layerInput=\(a.perLayerInputSize), vocab=\(a.vocabSize), activation=\(a.activation))"
+
         case let a as PositionalEmbeddingAttributes:
             return "positionalEmbedding(\(a.kind), dim=\(a.embeddingSize), maxPos=\(a.maxPositions))"
 

@@ -29,6 +29,7 @@ struct MetalEntryCollector {
         context: inout WalkContext,
         kernelContext: KernelContext
     ) {
+        var implicitLayerIndex = 0
         for (operationIndex, operation) in region.operations.enumerated() {
             let operationPath = pathComponents + [.operation(operationIndex)]
             let _ = StructuralPath(components: operationPath)
@@ -47,15 +48,19 @@ struct MetalEntryCollector {
                 context.emit(.structuralAdd(dimension: hiddenSize), layerIndex: layerIndex)
 
             case .repeating(let count, let body):
+                let baseLayerIndex = layerIndex == nil ? implicitLayerIndex : nil
                 for iteration in 0..<count {
                     walkRegion(
                         body,
                         pathComponents: operationPath + [.regionBody, .index(iteration)],
-                        layerIndex: iteration,
+                        layerIndex: baseLayerIndex.map { $0 + iteration } ?? iteration,
                         hiddenSize: hiddenSize,
                         context: &context,
                         kernelContext: kernelContext
                     )
+                }
+                if layerIndex == nil {
+                    implicitLayerIndex += count
                 }
 
             case .conditional(let condition, let thenBody, let elseBody):

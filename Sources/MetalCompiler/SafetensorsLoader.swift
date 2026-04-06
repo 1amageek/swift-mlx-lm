@@ -66,12 +66,17 @@ public struct SafetensorsLoader: Sendable {
 
     public init() {}
 
+    private func resolvedFileURL(for url: URL) -> URL {
+        url.resolvingSymlinksInPath()
+    }
+
     /// Parse the safetensors header without loading tensor data.
     ///
     /// - Parameter url: Path to the safetensors file.
     /// - Returns: Array of tensor metadata entries.
     public func parseHeader(at url: URL) throws -> [SafetensorsTensorInfo] {
-        let fileHandle = try FileHandle(forReadingFrom: url)
+        let resolvedURL = resolvedFileURL(for: url)
+        let fileHandle = try FileHandle(forReadingFrom: resolvedURL)
         defer { fileHandle.closeFile() }
 
         // Read 8-byte header size (little-endian u64)
@@ -152,9 +157,10 @@ public struct SafetensorsLoader: Sendable {
         at url: URL, device: MTLDevice
     ) throws -> MetalWeightFile {
         let tensors = try parseHeader(at: url)
+        let resolvedURL = resolvedFileURL(for: url)
 
         // Compute data section offset (8 bytes header size + header JSON)
-        let fileHandle = try FileHandle(forReadingFrom: url)
+        let fileHandle = try FileHandle(forReadingFrom: resolvedURL)
         defer { fileHandle.closeFile() }
 
         guard let sizeData2 = try fileHandle.read(upToCount: 8), sizeData2.count == 8 else {
@@ -164,7 +170,7 @@ public struct SafetensorsLoader: Sendable {
         let dataSectionOffset = 8 + headerSize
 
         // Get file size
-        let fileAttributes = try FileManager.default.attributesOfItem(atPath: url.path)
+        let fileAttributes = try FileManager.default.attributesOfItem(atPath: resolvedURL.path)
         guard let fileSize = fileAttributes[.size] as? Int else {
             throw SafetensorsError.invalidHeader("Cannot determine file size")
         }
@@ -175,9 +181,9 @@ public struct SafetensorsLoader: Sendable {
         }
 
         // mmap the entire file (read-only, private mapping)
-        let fileDescriptor = open(url.path, O_RDONLY)
+        let fileDescriptor = open(resolvedURL.path, O_RDONLY)
         guard fileDescriptor >= 0 else {
-            throw SafetensorsError.mmapFailed("Cannot open file: \(url.path)")
+            throw SafetensorsError.mmapFailed("Cannot open file: \(resolvedURL.path)")
         }
 
         let mmapPointer = mmap(nil, fileSize, PROT_READ, MAP_PRIVATE, fileDescriptor, 0)

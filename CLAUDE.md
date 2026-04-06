@@ -33,8 +33,8 @@ LMIR (IR モジュール — backend 非依存)
     └── SwiftLM (consumer API — depends: LMArchitecture, MetalCompiler, ModelDeclarations)
         ├── ModelBundleLoader (HF download → STAF → compile → ModelContainer)
         ├── ModelContainer (generate, encode, decode)
-        ├── LMInput, Generation, GenerateParameters
-        └── UserInput, ChatMessage, ModelConfiguration
+        ├── ModelInput, PreparedInput, ExecutablePrompt, Generation, GenerateParameters
+        └── InputMessage, InputImage, InputVideo, ModelConfiguration
 ```
 
 ## Metal Backend 設計原則

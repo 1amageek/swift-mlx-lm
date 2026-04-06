@@ -29,7 +29,7 @@ public struct ModelBundleLoader: Sendable {
         let directory = try await hubApi.snapshot(from: repoId, matching: [
             "config.json", "tokenizer.json", "tokenizer_config.json",
             "*.safetensors", "special_tokens_map.json",
-            "chat_template.jinja"
+            "chat_template.jinja", "preprocessor_config.json", "processor_config.json"
         ])
         return try await load(directory: directory)
     }
@@ -43,13 +43,18 @@ public struct ModelBundleLoader: Sendable {
         let startTime = CFAbsoluteTimeGetCurrent()
         let inspector = ModelBundleInspector()
         let resources = try inspector.inspect(directory: directory)
-
         // 2. Parallel: tokenizer + chat template + STAF
         async let tokenizerTask = AutoTokenizer.from(modelFolder: directory)
         async let weightStoreTask = STAFCacheLoader().load(resources: resources, device: device)
 
         let tokenizer = try await tokenizerTask
         let weightStore = try await weightStoreTask
+        let visionRuntime = try QwenVisionRuntime.makeIfSupported(resources: resources, device: device)
+        let gemma4Runtime = try Gemma4Runtime.makeIfSupported(
+            resources: resources,
+            tokenizer: tokenizer,
+            weights: weightStore
+        )
 
         let loadTime = CFAbsoluteTimeGetCurrent() - startTime
         print("[ModelBundleLoader] loaded: tokenizer + STAF [\(String(format: "%.3f", loadTime))s]")
@@ -89,6 +94,8 @@ public struct ModelBundleLoader: Sendable {
             sharedConvState: compiledModel.buffers.convState,
             sharedConvStateDimension: compiledModel.buffers.convStateDimension,
             sharedConvStateKernelSize: compiledModel.buffers.convStateKernelSize,
+            sharedRecurrentState: compiledModel.buffers.recurrentState,
+            sharedRecurrentStateBytesPerLayer: compiledModel.buffers.recurrentStateBytesPerLayer,
             device: device
         )
         compiledModel = compiledModel.withPrefillPlan(prefillPlan)
@@ -99,7 +106,51 @@ public struct ModelBundleLoader: Sendable {
         // 5. Assemble ModelContainer
         let inferenceModel = try MetalInferenceModel(plan: compiledModel, device: device)
 
-        var modelConfig = ModelConfiguration(name: resources.modelType)
+        var modelConfig = ModelConfiguration(
+            name: resources.modelType,
+            inputCapabilities: resources.inputCapabilities,
+            executionCapabilities: ModelExecutionCapabilities(
+                supportsTextGeneration: true,
+                supportsPromptStateReuse: true,
+                supportsImagePromptPreparation:
+                    resources.inputCapabilities.supportsImages &&
+                    (
+                        (visionRuntime != nil &&
+                         QwenVisionSupport.supportsImagePromptPreparation(
+                            vision: resources.visionConfiguration
+                         ))
+                        || (gemma4Runtime != nil &&
+                            Gemma4Support.supportsImagePromptPreparation(
+                                vision: resources.visionConfiguration
+                            ))
+                    ),
+                supportsImageExecution:
+                    resources.inputCapabilities.supportsImages &&
+                    (
+                        (visionRuntime != nil &&
+                         QwenVisionSupport.supportsImagePromptPreparation(
+                            vision: resources.visionConfiguration
+                         ))
+                        || (gemma4Runtime != nil &&
+                            Gemma4Support.supportsImagePromptPreparation(
+                                vision: resources.visionConfiguration
+                            ))
+                    ),
+                supportsVideoPromptPreparation:
+                    visionRuntime != nil &&
+                    resources.inputCapabilities.supportsVideo &&
+                    QwenVisionSupport.supportsVideoPromptPreparation(
+                        vision: resources.visionConfiguration
+                    ),
+                supportsVideoExecution:
+                    visionRuntime != nil &&
+                    resources.inputCapabilities.supportsVideo &&
+                    QwenVisionSupport.supportsVideoPromptPreparation(
+                        vision: resources.visionConfiguration
+                    )
+            ),
+            vision: resources.visionConfiguration
+        )
         if let eosId = tokenizer.eosTokenId {
             modelConfig.eosTokenIds.insert(eosId)
         }
@@ -111,7 +162,9 @@ public struct ModelBundleLoader: Sendable {
             inferenceModel: inferenceModel,
             tokenizer: tokenizer,
             configuration: modelConfig,
-            chatTemplate: resources.chatTemplate
+            chatTemplate: resources.chatTemplate,
+            visionRuntime: visionRuntime,
+            gemma4Runtime: gemma4Runtime
         )
     }
 }

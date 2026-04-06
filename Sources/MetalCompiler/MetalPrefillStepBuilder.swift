@@ -57,7 +57,8 @@ struct MetalPrefillStepBuilder {
                 mode: step.mode,
                 sequenceLengthPolicy: step.sequenceLengthPolicy,
                 positionBufferIndex: step.positionBufferIndex,
-                perPositionStrides: step.perPositionStrides
+                perPositionStrides: step.perPositionStrides,
+                metadata: step.metadata
             )
         }
     }
@@ -106,6 +107,26 @@ private struct PrefillStepPlanner {
         self.resolveDispatch = resolveDispatch
     }
 
+    private func annotate(
+        _ steps: [MetalPrefillStep],
+        layerIndex: Int?
+    ) -> [MetalPrefillStep] {
+        steps.map { step in
+            MetalPrefillStep(
+                descriptor: step.descriptor,
+                bindings: step.bindings,
+                mode: step.mode,
+                sequenceLengthPolicy: step.sequenceLengthPolicy,
+                positionBufferIndex: step.positionBufferIndex,
+                perPositionStrides: step.perPositionStrides,
+                metadata: MetalDispatchStepMetadata(
+                    kernelName: step.metadata.kernelName,
+                    layerIndex: layerIndex
+                )
+            )
+        }
+    }
+
     mutating func buildSteps(for entry: DispatchEntry) throws -> [MetalPrefillStep] {
         let weightResolver = WeightResolver(
             entry: entry,
@@ -124,8 +145,10 @@ private struct PrefillStepPlanner {
                 slotDimension: slotDimension,
                 scratchElementSize: scratchElementSize,
                 maximumSequenceLength: maximumSequenceLength,
+                layerIndex: entry.layerIndex,
                 kvCacheIndex: kvCacheIndex,
                 convLayerIndex: routingState.convLayerIndex,
+                recurrentLayerIndex: routingState.recurrentLayerIndex,
                 kernelContext: planBuildContext.kernelContext,
                 resolveWeight: weightResolver.resolve,
                 getPipeline: { name in
@@ -139,8 +162,9 @@ private struct PrefillStepPlanner {
             if result.resetsProjectionIndex { routingState.projectionIndex = 0 }
             if result.consumesKVCacheLayer { kvCacheIndex += 1 }
             if result.consumesConvLayer { routingState.convLayerIndex += 1 }
+            if result.consumesRecurrentLayer { routingState.recurrentLayerIndex += 1 }
             routingState.lastOutputIsHidden = result.outputIsHidden
-            return result.steps
+            return annotate(result.steps, layerIndex: entry.layerIndex)
 
         case .batchedProjection(let batched):
             var steps: [MetalPrefillStep] = []
@@ -159,7 +183,7 @@ private struct PrefillStepPlanner {
                 let projSteps = try buildSteps(for: singleEntry)
                 steps.append(contentsOf: projSteps)
             }
-            return steps
+            return annotate(steps, layerIndex: entry.layerIndex)
 
         case .batchedFragment(let batch):
             var steps: [MetalPrefillStep] = []
@@ -173,7 +197,7 @@ private struct PrefillStepPlanner {
                 let fragSteps = try buildSteps(for: singleEntry)
                 steps.append(contentsOf: fragSteps)
             }
-            return steps
+            return annotate(steps, layerIndex: entry.layerIndex)
 
         case .fusedResidualAddNorm(let fusedOp):
             let addEntry = DispatchEntry(
@@ -193,7 +217,7 @@ private struct PrefillStepPlanner {
                 let built = try buildSteps(for: decomposed)
                 steps.append(contentsOf: built)
             }
-            return steps
+            return annotate(steps, layerIndex: entry.layerIndex)
 
         case .fusedSwiGLUProjection(let fusedOp):
             let batchedEntry = DispatchEntry(
@@ -217,7 +241,7 @@ private struct PrefillStepPlanner {
                 let built = try buildSteps(for: decomposed)
                 steps.append(contentsOf: built)
             }
-            return steps
+            return annotate(steps, layerIndex: entry.layerIndex)
 
         case .fusedCopyNorm(let fusedOp):
             var steps: [MetalPrefillStep] = []
@@ -235,7 +259,7 @@ private struct PrefillStepPlanner {
             ))
             routingState.lastOutputIsHidden = false
             routingState.projectionIndex = 0
-            return steps
+            return annotate(steps, layerIndex: entry.layerIndex)
 
         case .fusedResidualAddCopyNorm(let fusedOp):
             var steps: [MetalPrefillStep] = []
@@ -260,7 +284,7 @@ private struct PrefillStepPlanner {
             ))
             routingState.lastOutputIsHidden = false
             routingState.projectionIndex = 0
-            return steps
+            return annotate(steps, layerIndex: entry.layerIndex)
 
         case .projection(let projection, let isOutput):
             let resolved = try resolveDispatch(entry)

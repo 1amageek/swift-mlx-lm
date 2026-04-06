@@ -109,6 +109,121 @@ struct ModelDeclarationTests {
         #expect(canonical1.dump() == canonical2.dump())
     }
 
+    // MARK: - Gemma 4
+
+    @Test("Gemma4 produces valid ModelGraph")
+    func gemma4Graph() throws {
+        let model = try Gemma4(config: TestConfigs.gemma4E2B)
+
+        let graph = try model.makeModelGraph()
+        #expect(graph.rootRegion.operations.isEmpty == false)
+        #expect(graph.rootRegion.results.count == 1)
+    }
+
+    @Test("Gemma4 sliding/full attention schedule is preserved")
+    func gemma4LayerSchedule() throws {
+        let graph = try Gemma4(config: TestConfigs.gemma4E2B).makeModelGraph()
+
+        var slidingAttentionCount = 0
+        var fullAttentionCount = 0
+        traverse(graph.rootRegion) { operation in
+            guard case .primitive(let rawAttributes) = operation.kind,
+                  let attributes = rawAttributes as? AttentionAttributes else {
+                return
+            }
+            if attributes.window == nil {
+                fullAttentionCount += 1
+            } else {
+                slidingAttentionCount += 1
+            }
+        }
+
+        #expect(slidingAttentionCount == 28, "Expected 28 sliding attention layers")
+        #expect(fullAttentionCount == 7, "Expected 7 full attention layers")
+    }
+
+    @Test("Gemma4 emits one per-layer input residual per decoder layer")
+    func gemma4PerLayerInput() throws {
+        let graph = try Gemma4(config: TestConfigs.gemma4E2B).makeModelGraph()
+
+        let perLayerInputCount = countOperations(in: graph.rootRegion) { kind in
+            if kind is PerLayerInputAttributes { return true }
+            return false
+        }
+
+        #expect(perLayerInputCount == 35, "Expected 35 per-layer input residuals")
+    }
+
+    @Test("Gemma4 preserves per-layer templates as repeating blocks")
+    func gemma4RepeatingLayerTemplates() throws {
+        let graph = try Gemma4(config: TestConfigs.gemma4E2B).makeModelGraph()
+        let repeatingOps = graph.rootRegion.operations.filter {
+            if case .repeating(count: 1, _) = $0.kind { return true }
+            return false
+        }
+        #expect(repeatingOps.count == 35, "Expected 35 repeating(count: 1) layer templates")
+    }
+
+    @Test("Gemma4 doubles MLP width on KV-shared layers")
+    func gemma4DoubleWideMLP() throws {
+        let graph = try Gemma4(config: TestConfigs.gemma4E2B).makeModelGraph()
+
+        var regularMLPCount = 0
+        var doubleWideMLPCount = 0
+        traverse(graph.rootRegion) { operation in
+            guard case .primitive(let rawAttributes) = operation.kind,
+                  let attributes = rawAttributes as? MLPAttributes else {
+                return
+            }
+            if attributes.intermediateSize == 6144 {
+                regularMLPCount += 1
+            } else if attributes.intermediateSize == 12_288 {
+                doubleWideMLPCount += 1
+            }
+        }
+
+        #expect(regularMLPCount == 15, "Expected 15 regular-width MLP layers")
+        #expect(doubleWideMLPCount == 20, "Expected 20 double-width MLP layers")
+    }
+
+    @Test("Gemma4 declaration is deterministic")
+    func gemma4Deterministic() throws {
+        let graph1 = try Gemma4(config: TestConfigs.gemma4E2B).makeModelGraph()
+        let graph2 = try Gemma4(config: TestConfigs.gemma4E2B).makeModelGraph()
+
+        let canonical1 = canonicalize(graph1)
+        let canonical2 = canonicalize(graph2)
+        #expect(canonical1.dump() == canonical2.dump())
+    }
+
+    @Test("Gemma4 validate rejects missing per-layer input metadata")
+    func gemma4ValidateMissingMetadata() throws {
+        let invalidConfig = ModelConfig(
+            hiddenSize: 1536, layerCount: 35, intermediateSize: 6144, vocabSize: 262144,
+            attentionHeads: 8, kvHeads: 1, headDim: 256,
+            attentionBias: false, mlpBias: false,
+            normEps: 1e-6, normKind: .rmsNorm,
+            ropeTheta: 10_000.0, ropeDimension: 256, ropeScaling: nil,
+            tiedEmbeddings: true,
+            expertCount: nil, expertsPerToken: nil,
+            qkNorm: true,
+            fullAttentionInterval: nil,
+            ssmNumHeads: nil, ssmKeyHeadDim: nil, ssmValueHeadDim: nil,
+            convKernelSize: nil, partialRotaryFactor: nil, slidingWindow: 512,
+            layerTypes: TestConfigs.gemma4E2B.layerTypes,
+            globalHeadDim: 512,
+            numKVSharedLayers: 20,
+            useDoubleWideMLP: true,
+            fullAttentionRopeTheta: 1_000_000.0,
+            fullAttentionPartialRotaryFactor: 0.25,
+            fullAttentionRoPEScaling: RoPEScaling(kind: .custom("proportional"), factor: 1.0)
+        )
+
+        #expect(throws: ModelGraphBuildError.self) {
+            try Gemma4.validate(invalidConfig)
+        }
+    }
+
     // MARK: - Cohere
 
     @Test("Cohere produces valid ModelGraph")
@@ -483,6 +598,49 @@ private enum TestConfigs {
         convKernelSize: 4, partialRotaryFactor: 0.25, slidingWindow: nil
     )
 
+    // MARK: - Gemma 4 Presets
+
+    /// Gemma 4 E2B-it text backbone preset from the public HF config.
+    static let gemma4E2B = ModelConfig(
+        hiddenSize: 1536, layerCount: 35, intermediateSize: 6144, vocabSize: 262144,
+        attentionHeads: 8, kvHeads: 1, headDim: 256,
+        attentionBias: false, mlpBias: false,
+        normEps: 1e-6, normKind: .rmsNorm,
+        ropeTheta: 10_000.0, ropeDimension: 256, ropeScaling: nil,
+        tiedEmbeddings: true,
+        expertCount: nil, expertsPerToken: nil,
+        qkNorm: true,
+        fullAttentionInterval: nil,
+        ssmNumHeads: nil, ssmKeyHeadDim: nil, ssmValueHeadDim: nil,
+        convKernelSize: nil, partialRotaryFactor: nil, slidingWindow: 512,
+        layerTypes: [
+            "sliding_attention", "sliding_attention", "sliding_attention", "sliding_attention",
+            "full_attention",
+            "sliding_attention", "sliding_attention", "sliding_attention", "sliding_attention",
+            "full_attention",
+            "sliding_attention", "sliding_attention", "sliding_attention", "sliding_attention",
+            "full_attention",
+            "sliding_attention", "sliding_attention", "sliding_attention", "sliding_attention",
+            "full_attention",
+            "sliding_attention", "sliding_attention", "sliding_attention", "sliding_attention",
+            "full_attention",
+            "sliding_attention", "sliding_attention", "sliding_attention", "sliding_attention",
+            "full_attention",
+            "sliding_attention", "sliding_attention", "sliding_attention", "sliding_attention",
+            "full_attention",
+        ],
+        hiddenSizePerLayerInput: 256,
+        vocabSizePerLayerInput: 262144,
+        globalHeadDim: 512,
+        globalKVHeads: nil,
+        numKVSharedLayers: 20,
+        useDoubleWideMLP: true,
+        attentionKEqualsV: false,
+        fullAttentionRopeTheta: 1_000_000.0,
+        fullAttentionPartialRotaryFactor: 0.25,
+        fullAttentionRoPEScaling: RoPEScaling(kind: .custom("proportional"), factor: 1.0)
+    )
+
     // MARK: - LFM2 Presets
 
     /// LFM2 350M: (conv*2+attn)*3, (conv+attn)*3, conv*1 = 16 layers
@@ -742,4 +900,26 @@ private func countOperations(
         }
     }
     return 0
+}
+
+/// Traverse all operations depth-first, including nested structural regions.
+private func traverse(_ region: Region, visit: (Operation) -> Void) {
+    for operation in region.operations {
+        visit(operation)
+        switch operation.kind {
+        case .residual(_, let body):
+            traverse(body, visit: visit)
+        case .parallel(_, let branches):
+            for branch in branches {
+                traverse(branch, visit: visit)
+            }
+        case .repeating(_, let body):
+            traverse(body, visit: visit)
+        case .conditional(_, let thenBody, let elseBody):
+            traverse(thenBody, visit: visit)
+            traverse(elseBody, visit: visit)
+        default:
+            break
+        }
+    }
 }

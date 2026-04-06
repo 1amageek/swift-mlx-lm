@@ -42,6 +42,7 @@ public struct MetalPrefillStep: @unchecked Sendable {
     public let sequenceLengthPolicy: PrefillSequenceLengthPolicy
     public let positionBufferIndex: Int?
     public let perPositionStrides: [Int: Int]
+    public let metadata: MetalDispatchStepMetadata
 
     public var pipeline: MTLComputePipelineState { descriptor.pipeline }
     public var gridSize: MTLSize { descriptor.gridSize }
@@ -67,7 +68,8 @@ public struct MetalPrefillStep: @unchecked Sendable {
         mode: PrefillStepMode,
         sequenceLengthPolicy: PrefillSequenceLengthPolicy,
         positionBufferIndex: Int?,
-        perPositionStrides: [Int : Int]
+        perPositionStrides: [Int : Int],
+        metadata: MetalDispatchStepMetadata = .init()
     ) {
         self.descriptor = MetalDispatchDescriptor(
             pipeline: pipeline,
@@ -82,6 +84,7 @@ public struct MetalPrefillStep: @unchecked Sendable {
         self.sequenceLengthPolicy = sequenceLengthPolicy
         self.positionBufferIndex = positionBufferIndex
         self.perPositionStrides = perPositionStrides
+        self.metadata = metadata
     }
 
     public init(
@@ -90,7 +93,8 @@ public struct MetalPrefillStep: @unchecked Sendable {
         mode: PrefillStepMode,
         sequenceLengthPolicy: PrefillSequenceLengthPolicy,
         positionBufferIndex: Int?,
-        perPositionStrides: [Int: Int]
+        perPositionStrides: [Int: Int],
+        metadata: MetalDispatchStepMetadata = .init()
     ) {
         self.descriptor = descriptor
         self.bindings = bindings
@@ -98,6 +102,7 @@ public struct MetalPrefillStep: @unchecked Sendable {
         self.sequenceLengthPolicy = sequenceLengthPolicy
         self.positionBufferIndex = positionBufferIndex
         self.perPositionStrides = perPositionStrides
+        self.metadata = metadata
     }
 
     public func bindRuntimeArguments(
@@ -153,10 +158,16 @@ public struct PrefillBufferSet: @unchecked Sendable {
     public let weights: [MTLBuffer]
     public let kvCache: MetalKVCache?
     public let convState: MTLBuffer?
+    public let recurrentState: MTLBuffer?
     public let convStateDimension: Int
     public let convStateKernelSize: Int
+    public let recurrentStateBytesPerLayer: Int
+    public let perLayerInputs: MTLBuffer?
+    public let perLayerInputDimension: Int
+    public let perLayerInputLayerCount: Int
     public let logits: MTLBuffer
     public let tokenIDs: MTLBuffer
     public let positions: MTLBuffer
+    public let ropePositionAxes: MTLBuffer
     public let tokenOut: MTLBuffer
 }

@@ -11,7 +11,7 @@
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/1amageek/swift-lm.git", from: "0.1.0")
+    .package(url: "https://github.com/1amageek/swift-lm.git", from: "0.2.0")
 ],
 targets: [
     .target(
@@ -50,12 +50,13 @@ let container = try await ModelBundleLoader().load(directory: directory)
 ## Generate from Text
 
 ```swift
-let input = try container.prepare(
-    input: UserInput(prompt: "Write a haiku about Metal shaders.")
+let input = try await container.prepare(
+    input: ModelInput(prompt: "Write a haiku about Metal shaders.")
 )
+let executable = try container.makeExecutablePrompt(from: input)
 
-let stream = container.generate(
-    input: input,
+let stream = try container.generate(
+    prompt: executable,
     parameters: GenerateParameters(
         maxTokens: 128,
         streamChunkTokenCount: 8,
@@ -74,7 +75,11 @@ for await event in stream {
 }
 ```
 
-`ModelContainer/generate(input:parameters:)` returns an `AsyncStream` of ``Generation`` values.
+`ModelContainer/generate(prompt:parameters:)` returns an `AsyncStream` of ``Generation`` values. `ModelContainer/generate(input:parameters:)` is the async convenience API that prepares and executes in one step. The public generation entry points throw when the prompt cannot be executed.
+
+`ModelInput` is the primary prompt type. It now supports Qwen3-VL style image-bearing and video-bearing chat prompts during preparation and execution when the loaded bundle includes compatible vision weights.
+
+When a bundle declares multimodal markers, inspect ``ModelConfiguration/vision``, ``ModelConfiguration/inputCapabilities``, and ``ModelConfiguration/executionCapabilities`` before deciding whether to surface image/video UI affordances.
 
 ## Supported Model Families
 
@@ -83,7 +88,7 @@ The current loader resolves these families from `config.json["model_type"]`:
 | Family | `model_type` examples |
 |---|---|
 | Transformer | `llama`, `qwen2`, `qwen3`, `mistral`, `gemma`, `phi`, `mixtral`, `deepseek` |
-| Qwen 3.5 hybrid | `qwen3_5` |
+| Qwen 3.5 hybrid / Qwen3-VL text backbone | `qwen3_5`, `qwen3_vl` |
 | LFM2 / LFM2.5 hybrid | `lfm2`, `lfm2_moe` |
 | Cohere | `cohere`, `command-r` |
 

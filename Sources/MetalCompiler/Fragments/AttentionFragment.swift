@@ -13,7 +13,9 @@ extension AttentionAttributes: MetalKernelFragment, _FragmentBodyAccessor {
         if let ropeAttrs = rope {
             RoPEFragment(headCount: headCount, kvHeadCount: kvHeadCount,
                          headDimension: headDimension,
-                         ropeDimension: ropeAttrs.dimension, base: ropeAttrs.base)
+                         ropeDimension: ropeAttrs.dimension,
+                         base: ropeAttrs.base,
+                         mropeAxes: ropeAttrs.mropeAxes)
         }
         FlashAttentionFragment(headCount: headCount, kvHeadCount: kvHeadCount, headDimension: headDimension)
         LinearFragment(field: "o_proj", inputDimension: headCount * headDimension, outputDimension: hiddenSize)

@@ -65,7 +65,8 @@ struct STAFValidator: Sendable {
         }
 
         for url in safetensorsURLs {
-            let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
+            let resolvedURL = url.resolvingSymlinksInPath()
+            let attributes = try FileManager.default.attributesOfItem(atPath: resolvedURL.path)
             if let sourceModificationDate = attributes[.modificationDate] as? Date,
                sourceModificationDate > stafModificationDate {
                 return false

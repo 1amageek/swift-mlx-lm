@@ -11,26 +11,63 @@ import SwiftLM
 
 let container = try await ModelBundleLoader().load(repo: "LiquidAI/LFM2.5-1.2B-Instruct")
 
-for await generation in container.generate(input: try container.prepare(input: UserInput("Hello"))) {
+let prepared = try await container.prepare(input: ModelInput("Hello"))
+let executable = try container.makeExecutablePrompt(from: prepared)
+
+for await generation in try container.generate(prompt: executable) {
     if let text = generation.chunk { print(text, terminator: "") }
+}
+
+if container.configuration.inputCapabilities.supportsImages {
+    print("This bundle declares image input support.")
+}
+
+if container.configuration.executionCapabilities.supportsImagePromptPreparation {
+    print("The current runtime can prepare Qwen-style image prompts.")
+}
+
+if container.configuration.executionCapabilities.supportsVideoPromptPreparation {
+    print("The current runtime can prepare Qwen-style video prompts.")
+}
+
+if let vision = container.configuration.vision {
+    print("image_token_id =", vision.imageTokenID as Any)
+}
+
+if container.configuration.executionCapabilities.supportsImagePromptPreparation {
+    let visualInput = ModelInput(chat: [
+        .user([
+            .text("Describe this image."),
+            .image(InputImage(fileURL: URL(fileURLWithPath: "/path/to/image.jpg")))
+        ])
+    ])
+
+    let prepared = try await container.prepare(input: visualInput)
+    let executable = try container.makeExecutablePrompt(from: prepared)
+
+    for await generation in try container.generate(prompt: executable) {
+        if let chunk = generation.chunk { print(chunk, terminator: "") }
+    }
 }
 ```
 
 ## Release Status
 
-`0.1.0` is the first public release candidate for application developers who want direct Metal inference from Swift.
+The current branch is targeting `0.2.0`.
 
-Supported in `0.1.0`:
+Supported in the `0.2.0` line:
 
 - Apple Silicon devices with Metal
 - HuggingFace snapshot directories containing `config.json`, `tokenizer.json`, and `.safetensors`
 - direct Metal decode/prefill execution through `SwiftLM`
-- text prompts and chat prompts through `UserInput`
+- text prompts and chat prompts through `ModelInput`
+- model-declared input capabilities through `ModelConfiguration.inputCapabilities`
+- runtime execution capabilities through `ModelConfiguration.executionCapabilities`
+- Qwen3-VL style vision metadata inspection and prompt preparation for image-bearing and video-bearing chat input
+- Qwen3-VL style image and video execution through the bundled vision encoder path
 - the currently documented model families in this README and in `docs/using-swift-lm.md`
 
-Not part of `0.1.0`:
-
-- multimodal image or video input
+Not part of the `0.2.0` line:
 - tool calling or structured function-calling APIs
 - non-Metal backends
 - training or fine-tuning workflows
@@ -60,8 +97,44 @@ SwiftPM dependency example:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/1amageek/swift-lm.git", from: "0.1.0")
+    .package(url: "https://github.com/1amageek/swift-lm.git", from: "0.2.0")
 ]
+```
+
+## Test Matrix
+
+The Qwen3.5+ multimodal path is exercised in four layers:
+
+- unit suites for capability decode, prompt preparation, execution layout, and vision encoding
+- component suites for `PreparedInput -> ExecutablePrompt -> generate`
+- synthetic integration suites for `load -> prepare -> generate`
+- optional local real-bundle suites for `Qwen3-VL` snapshots when they exist on the machine
+
+The suites added for this path live under [`Tests/SwiftLMTests`](/Users/1amageek/Desktop/swift-lm/Tests/SwiftLMTests):
+
+- [`QwenVisionCapabilityTests.swift`](/Users/1amageek/Desktop/swift-lm/Tests/SwiftLMTests/QwenVisionCapabilityTests.swift)
+- [`QwenVisionPromptProcessorTests.swift`](/Users/1amageek/Desktop/swift-lm/Tests/SwiftLMTests/QwenVisionPromptProcessorTests.swift)
+- [`QwenVisionExecutionLayoutTests.swift`](/Users/1amageek/Desktop/swift-lm/Tests/SwiftLMTests/QwenVisionExecutionLayoutTests.swift)
+- [`QwenVisionEncoderTests.swift`](/Users/1amageek/Desktop/swift-lm/Tests/SwiftLMTests/QwenVisionEncoderTests.swift)
+- [`QwenVisionExecutionTests.swift`](/Users/1amageek/Desktop/swift-lm/Tests/SwiftLMTests/QwenVisionExecutionTests.swift)
+- [`QwenVisionIntegrationTests.swift`](/Users/1amageek/Desktop/swift-lm/Tests/SwiftLMTests/QwenVisionIntegrationTests.swift)
+- [`QwenVisionRealBundleImageTests.swift`](/Users/1amageek/Desktop/swift-lm/Tests/SwiftLMTests/QwenVisionRealBundleImageTests.swift)
+- [`QwenVisionRealBundleVideoTests.swift`](/Users/1amageek/Desktop/swift-lm/Tests/SwiftLMTests/QwenVisionRealBundleVideoTests.swift)
+- [`QwenVisionRealBundleMixedTests.swift`](/Users/1amageek/Desktop/swift-lm/Tests/SwiftLMTests/QwenVisionRealBundleMixedTests.swift)
+- [`QwenVisionRealBundlePromptStateTests.swift`](/Users/1amageek/Desktop/swift-lm/Tests/SwiftLMTests/QwenVisionRealBundlePromptStateTests.swift)
+
+Release-facing validation should include:
+
+```bash
+scripts/run-qwen35-vision-tests.sh
+```
+
+For low-memory machines, do not run the full Qwen3.5+ multimodal matrix in one `xcodebuild test` process. Use `build-for-testing` once and then `test-without-building` suite-by-suite through [`run-qwen35-vision-tests.sh`](/Users/1amageek/Desktop/swift-lm/scripts/run-qwen35-vision-tests.sh). Add `--include-real` only when you want the optional local real-bundle suite.
+
+To run only one suite while keeping the same low-memory flow:
+
+```bash
+scripts/run-qwen35-vision-tests.sh --suite SwiftLMTests/QwenVisionCapabilityTests
 ```
 
 ## Architecture
@@ -90,7 +163,7 @@ LMIR (IR — no dependencies)
     └── SwiftLM (consumer API)
         ├── ModelBundleLoader (HF download → STAF → compile)
         ├── ModelContainer (generate, encode, decode)
-        └── UserInput, ChatMessage, GenerateParameters
+        └── ModelInput, InputMessage, InputImage, GenerateParameters
 ```
 
 ## Declarative Model DSL
@@ -179,6 +252,8 @@ This is the intended mental model for contributors:
 - `LMArchitecture` describes the model semantically with `TokenEmbedding`, `Residual`, `Attention`, `MLP`, `MoE`, `ShortConv`, and `OutputHead`
 - `LMIR` holds the normalized backend-independent graph
 - `MetalCompiler` decides how that graph turns into kernels, pipelines, buffers, and dispatch steps
+
+For Qwen3-VL style bundles, `SwiftLM` also reads the official vision markers from `config.json` and `preprocessor_config.json`. `ModelContainer.prepare(input:)` expands image and video placeholders into the token layout expected by the official Qwen processor, and `makeExecutablePrompt(from:)` / `generate(prompt:)` execute the resulting visual prompt when the loaded bundle provides a compatible Qwen vision encoder.
 
 If you want to inspect the real declarations, start with `Sources/Models/Transformer.swift` and `Sources/Models/LFM2.swift`.
 
@@ -372,7 +447,7 @@ Weights are converted from safetensors to STAF for zero-copy GPU loading:
 | Model | Type | Architecture |
 |-------|------|-------------|
 | Transformer | Dense / MoE | Llama, Qwen 2/3, Mistral, Gemma, Phi, Mixtral, DeepSeek |
-| Qwen 3.5 | Hybrid | Gated DeltaNet + Full Attention |
+| Qwen 3.5 / Qwen3-VL text backbone | Hybrid | Gated DeltaNet + Full Attention |
 | LFM2 / LFM2.5 | Hybrid | ShortConv + GQA Attention (dense and MoE) |
 | Cohere | Dense | LayerNorm + QK normalization (Command-R) |
 

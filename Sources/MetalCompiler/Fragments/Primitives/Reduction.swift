@@ -5,10 +5,12 @@ import Metal
 public struct Reduction: PrimitiveMetalKernelFragment {
     public let dimension: Int
     public let epsilon: Float
+    public let weightRole: String
 
-    public init(dimension: Int, epsilon: Float = 0) {
+    public init(dimension: Int, epsilon: Float = 0, weightRole: String = "scale") {
         self.dimension = dimension
         self.epsilon = epsilon
+        self.weightRole = weightRole
     }
 
     public var isFusable: Bool { true }
@@ -21,7 +23,7 @@ public struct Reduction: PrimitiveMetalKernelFragment {
         return bf16 ? "rms_norm_bf16" : "rms_norm"
     }
     public var dispatchDimension: MetalDispatchDimension { .reduction(dimension: dimension) }
-    public var weightSlots: [MetalWeightSlot] { [MetalWeightSlot(field: nil, role: .weight)] }
+    public var weightSlots: [MetalWeightSlot] { [MetalWeightSlot(field: weightRole, role: .weight)] }
 
     public func kernelSource(name: String, bufferPrecision: BufferPrecision, weightFormat: WeightFormat) -> String {
         MetalSourceGenerator.generateReduction(name: name, dimension: 0, epsilon: 0,
@@ -29,7 +31,7 @@ public struct Reduction: PrimitiveMetalKernelFragment {
     }
 
     public func decodeBindings(context: BufferBindingContext) -> FragmentBindings {
-        let (weightBuffer, weightOffset) = context.resolveWeight("scale")
+        let (weightBuffer, weightOffset) = context.resolveWeight(weightRole)
         return FragmentBindings(
             buffers: [
                 (0, context.bufferSet.hidden, 0),
@@ -45,7 +47,7 @@ public struct Reduction: PrimitiveMetalKernelFragment {
     }
 
     public func prefillSteps(context: PrefillBindingContext) throws -> FragmentPrefillSteps {
-        let (weightBuffer, weightOffset) = context.resolveWeight("scale")
+        let (weightBuffer, weightOffset) = context.resolveWeight(weightRole)
         let kernelName = kernelName(context: context.kernelContext)
         let pipeline = try context.getPipeline(kernelName)
         let simdWidth = pipeline.threadExecutionWidth

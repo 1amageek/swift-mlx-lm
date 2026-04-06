@@ -257,6 +257,11 @@ struct ConvStateRequirements {
     let kernelSize: Int
 }
 
+struct RecurrentStateRequirements {
+    let layerCount: Int
+    let bytesPerLayer: Int
+}
+
 struct DecodeBufferAllocation {
     let bufferSet: MetalBufferSet
     let slotDimension: Int
@@ -331,4 +336,5 @@ struct BufferRoutingState {
     var projectionIndex: Int = 0
     var lastOutputIsHidden: Bool = true
     var convLayerIndex: Int = 0
+    var recurrentLayerIndex: Int = 0
 }

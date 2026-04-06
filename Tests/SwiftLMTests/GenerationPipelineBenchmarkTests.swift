@@ -269,7 +269,9 @@ struct GenerationPipelineBenchmarkTests {
             maximumSequenceLength: promptTokens.count
         )
         defer { resources.release() }
-        let promptState = try resources.container.makePromptState(input: LMInput(tokens: promptTokens))
+        let promptState = try resources.container.makePromptState(
+            prompt: ExecutablePrompt(tokenIDs: promptTokens)
+        )
 
         let baseline = try await measureStreamMedian(iterations: 3, warmup: 1) {
             try await runContainerGenerateMeasured(
@@ -464,8 +466,8 @@ struct GenerationPipelineBenchmarkTests {
         generateCount: Int
     ) async throws -> Int {
         container.resetCaches()
-        let stream = container.generate(
-            input: LMInput(tokens: promptTokens),
+        let stream = try container.generate(
+            prompt: ExecutablePrompt(tokenIDs: promptTokens),
             parameters: GenerateParameters(maxTokens: generateCount)
         )
 
@@ -483,7 +485,7 @@ struct GenerationPipelineBenchmarkTests {
         promptState: PromptState,
         generateCount: Int
     ) async throws -> Int {
-        let stream = container.generate(
+        let stream = try container.generate(
             from: promptState,
             parameters: GenerateParameters(maxTokens: generateCount)
         )
@@ -505,8 +507,8 @@ struct GenerationPipelineBenchmarkTests {
     ) async throws -> StreamResult {
         container.resetCaches()
         let start = CFAbsoluteTimeGetCurrent()
-        let stream = container.generate(
-            input: LMInput(tokens: promptTokens),
+        let stream = try container.generate(
+            prompt: ExecutablePrompt(tokenIDs: promptTokens),
             parameters: GenerateParameters(
                 maxTokens: generateCount,
                 streamChunkTokenCount: chunkTokenCount
@@ -545,7 +547,7 @@ struct GenerationPipelineBenchmarkTests {
         chunkTokenCount: Int
     ) async throws -> StreamResult {
         let start = CFAbsoluteTimeGetCurrent()
-        let stream = container.generate(
+        let stream = try container.generate(
             from: promptState,
             parameters: GenerateParameters(
                 maxTokens: generateCount,

@@ -7,6 +7,7 @@ public struct MetalDispatchStep: @unchecked Sendable {
     public let descriptor: MetalDispatchDescriptor
     public let bindings: MetalBindingTable
     public let bufferAccesses: MetalBufferAccesses
+    public let metadata: MetalDispatchStepMetadata
 
     public var pipeline: MTLComputePipelineState { descriptor.pipeline }
     public var gridSize: MTLSize { descriptor.gridSize }
@@ -29,7 +30,8 @@ public struct MetalDispatchStep: @unchecked Sendable {
         bytesBindings: [(index: Int, value: [UInt8])],
         threadgroupMemoryLength: Int,
         sync: SynchronizationKind,
-        bufferAccesses: MetalBufferAccesses? = nil
+        bufferAccesses: MetalBufferAccesses? = nil,
+        metadata: MetalDispatchStepMetadata = .init()
     ) {
         let mappedBindings = bufferBindings.map { MetalBufferBinding(index: $0.index, buffer: $0.buffer, offset: $0.offset) }
         self.descriptor = MetalDispatchDescriptor(
@@ -42,16 +44,29 @@ public struct MetalDispatchStep: @unchecked Sendable {
             bufferBindings: bufferBindings,
             bytesBindings: bytesBindings)
         self.bufferAccesses = bufferAccesses ?? MetalBufferAccesses.conservative(mappedBindings)
+        self.metadata = metadata
     }
 
     public init(
         descriptor: MetalDispatchDescriptor,
         bindings: MetalBindingTable,
-        bufferAccesses: MetalBufferAccesses? = nil
+        bufferAccesses: MetalBufferAccesses? = nil,
+        metadata: MetalDispatchStepMetadata = .init()
     ) {
         self.descriptor = descriptor
         self.bindings = bindings
         self.bufferAccesses = bufferAccesses ?? MetalBufferAccesses.conservative(bindings.buffers)
+        self.metadata = metadata
+    }
+}
+
+public struct MetalDispatchStepMetadata: Sendable, Equatable {
+    public let kernelName: String?
+    public let layerIndex: Int?
+
+    public init(kernelName: String? = nil, layerIndex: Int? = nil) {
+        self.kernelName = kernelName
+        self.layerIndex = layerIndex
     }
 }
 
@@ -72,10 +87,16 @@ public struct MetalBufferSet: @unchecked Sendable {
     public let weights: [MTLBuffer]
     public let kvCache: MetalKVCache?
     public let convState: MTLBuffer?
+    public let recurrentState: MTLBuffer?
     public let convStateDimension: Int
     public let convStateKernelSize: Int
+    public let recurrentStateBytesPerLayer: Int
+    public let perLayerInputs: MTLBuffer?
+    public let perLayerInputDimension: Int
+    public let perLayerInputLayerCount: Int
     public let logits: MTLBuffer
     public let position: MTLBuffer
+    public let ropePositionAxes: MTLBuffer
     public let tokenIn: MTLBuffer
     public let tokenOut: MTLBuffer
 }

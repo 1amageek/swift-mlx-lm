@@ -8,22 +8,30 @@ struct ReleaseSmokeTests {
         fileURLWithPath: "/Users/1amageek/Desktop/swift-lm/TestData/LFM2.5-1.2B-Thinking"
     )
 
+    private func readableLocalModelDirectoryOrSkip() -> URL? {
+        let configURL = Self.localModelDirectory.appendingPathComponent("config.json")
+        do {
+            _ = try Data(contentsOf: configURL)
+            return Self.localModelDirectory
+        } catch {
+            print("[Skip] Local release smoke bundle is not readable at \(Self.localModelDirectory.path): \(error)")
+            return nil
+        }
+    }
+
     @Test("Local model bundle loads and generates", .timeLimit(.minutes(2)))
     func localBundleLoadPrefillDecodeSmoke() async throws {
-        let configURL = Self.localModelDirectory.appendingPathComponent("config.json")
-        guard FileManager.default.fileExists(atPath: configURL.path) else {
-            print("[Skip] Local release smoke bundle not found at \(Self.localModelDirectory.path)")
-            return
-        }
+        guard let localModelDirectory = readableLocalModelDirectoryOrSkip() else { return }
 
         let loader = ModelBundleLoader()
-        let container = try await loader.load(directory: Self.localModelDirectory)
-        let input = try container.prepare(input: UserInput(prompt: "Hello"))
-        let promptState = try container.makePromptState(input: input)
+        let container = try await loader.load(directory: localModelDirectory)
+        let input = try await container.prepare(input: ModelInput(prompt: "Hello"))
+        let executable = try container.makeExecutablePrompt(from: input)
+        let promptState = try container.makePromptState(prompt: executable)
 
         var chunks: [String] = []
         var completion: CompletionInfo?
-        for await generation in container.generate(
+        for await generation in try container.generate(
             from: promptState,
             parameters: GenerateParameters(maxTokens: 4, streamChunkTokenCount: 1)
         ) {
@@ -38,5 +46,59 @@ struct ReleaseSmokeTests {
         let info = try #require(completion)
         #expect(info.tokenCount > 0)
         #expect(!chunks.joined().isEmpty)
+    }
+
+    @Test("Text-only bundle rejects multimodal input", .timeLimit(.minutes(2)))
+    func textOnlyBundleRejectsMultimodalInput() async throws {
+        guard let localModelDirectory = readableLocalModelDirectoryOrSkip() else { return }
+
+        let loader = ModelBundleLoader()
+        let container = try await loader.load(directory: localModelDirectory)
+        let supportsImages = container.configuration.inputCapabilities.supportsImages
+
+        if !supportsImages {
+            do {
+                _ = try await container.prepare(input: ModelInput(chat: [
+                    .user([
+                        .text("Describe this image."),
+                        .image(InputImage(data: try TestImageFixtures.makeOnePixelPNGData(), mimeType: "image/png")),
+                    ])
+                ]))
+                Issue.record("Expected text-only bundle to reject image-bearing input")
+            } catch ModelContainerError.unsupportedInputForModel {
+                return
+            }
+            return
+        }
+
+        let prepared = try await container.prepare(input: ModelInput(chat: [
+            .user([
+                .text("Describe this image."),
+                .image(InputImage(data: try TestImageFixtures.makeOnePixelPNGData(), mimeType: "image/png")),
+            ])
+        ]))
+        #expect(prepared.multimodalMetadata != nil)
+        #expect(container.configuration.executionCapabilities.supportsImagePromptPreparation)
+        #expect(!container.configuration.executionCapabilities.supportsImageExecution)
+
+        do {
+            _ = try await container.generate(input: ModelInput(chat: [
+                .user([
+                    .text("Describe this image."),
+                    .image(InputImage(data: try TestImageFixtures.makeOnePixelPNGData(), mimeType: "image/png")),
+                ])
+            ]))
+            Issue.record("Expected multimodal generate(input: ModelInput) to throw")
+        } catch ModelContainerError.multimodalInputNotSupported {
+            // Text-only bundles must still reject multimodal execution.
+        }
+
+        do {
+            _ = try container.makeExecutablePrompt(from: prepared)
+            Issue.record("Expected multimodal prepared input to remain non-executable")
+        } catch ModelContainerError.multimodalInputNotSupported {
+            // Text-only bundles must still reject multimodal execution.
+        }
+
     }
 }

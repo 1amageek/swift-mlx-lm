@@ -107,7 +107,8 @@ public struct STAFModelBundleMetadataBuilder: Sendable {
     private func hashSafetensorsManifest(urls: [URL]) throws -> UInt64 {
         var hash = STAFStableHash64()
         for url in urls.sorted(by: { $0.lastPathComponent < $1.lastPathComponent }) {
-            let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
+            let resolvedURL = url.resolvingSymlinksInPath()
+            let attributes = try FileManager.default.attributesOfItem(atPath: resolvedURL.path)
             let size = attributes[.size] as? UInt64 ?? 0
             let modificationDate = attributes[.modificationDate] as? Date
             let modifiedAtNanoseconds: UInt64

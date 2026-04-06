@@ -167,22 +167,53 @@ public static func generateRoPE(
     let bt = bufferPrecision.metalType
 
     return """
+    inline uint \(name)_mrope_axis(
+        uint halfDimIndex,
+        uint temporalSections,
+        uint heightSections,
+        uint widthSections,
+        bool interleaved
+    ) {
+        if (temporalSections == 0 && heightSections == 0 && widthSections == 0) {
+            return 0;
+        }
+        if (!interleaved) {
+            if (halfDimIndex < temporalSections) return 0;
+            if (halfDimIndex < temporalSections + heightSections) return 1;
+            return 2;
+        }
+        if (halfDimIndex < heightSections * 3 && halfDimIndex % 3 == 1) return 1;
+        if (halfDimIndex < widthSections * 3 && halfDimIndex % 3 == 2) return 2;
+        return 0;
+    }
+
     kernel void \(name)(
         device \(bt)* query                  [[buffer(0)]],
         device \(bt)* key                    [[buffer(1)]],
-        device const uint* positionBuffer    [[buffer(2)]],
+        device const uint* positionAxesBuffer [[buffer(2)]],
         constant uint& headCount             [[buffer(3)]],
         constant uint& kvHeadCount           [[buffer(4)]],
         constant uint& headDimension         [[buffer(5)]],
         constant uint& ropeDimension         [[buffer(6)]],
         constant float& ropeBase             [[buffer(7)]],
+        constant uint& temporalSections      [[buffer(8)]],
+        constant uint& heightSections        [[buffer(9)]],
+        constant uint& widthSections         [[buffer(10)]],
+        constant uint& mropeInterleaved      [[buffer(11)]],
         uint headIndex                       [[threadgroup_position_in_grid]],
         uint tid                             [[thread_index_in_threadgroup]]
     ) {
         const uint halfRopeDim = ropeDimension / 2;
         if (tid >= halfRopeDim) return;
 
-        const uint position = positionBuffer[0];
+        const uint axis = \(name)_mrope_axis(
+            tid,
+            temporalSections,
+            heightSections,
+            widthSections,
+            mropeInterleaved != 0
+        );
+        const uint position = positionAxesBuffer[axis];
         const float theta = float(position) * pow(ropeBase, -2.0f * float(tid) / float(ropeDimension));
         const float cosTheta = cos(theta);
         const float sinTheta = sin(theta);
@@ -218,8 +249,28 @@ public static func generateRoPEArgumentTableVariant(
     struct \(inputStructName) {
         device \(bt)* query [[id(0)]];
         device \(bt)* key [[id(1)]];
-        device const uint* positionBuffer [[id(2)]];
+        device const uint* positionAxesBuffer [[id(2)]];
     };
+
+    inline uint \(name)_mrope_axis(
+        uint halfDimIndex,
+        uint temporalSections,
+        uint heightSections,
+        uint widthSections,
+        bool interleaved
+    ) {
+        if (temporalSections == 0 && heightSections == 0 && widthSections == 0) {
+            return 0;
+        }
+        if (!interleaved) {
+            if (halfDimIndex < temporalSections) return 0;
+            if (halfDimIndex < temporalSections + heightSections) return 1;
+            return 2;
+        }
+        if (halfDimIndex < heightSections * 3 && halfDimIndex % 3 == 1) return 1;
+        if (halfDimIndex < widthSections * 3 && halfDimIndex % 3 == 2) return 2;
+        return 0;
+    }
 
     kernel void \(name)(
         constant \(inputStructName)& args         [[buffer(\(argumentBufferIndex))]],
@@ -228,13 +279,24 @@ public static func generateRoPEArgumentTableVariant(
         constant uint& headDimension              [[buffer(5)]],
         constant uint& ropeDimension              [[buffer(6)]],
         constant float& ropeBase                  [[buffer(7)]],
+        constant uint& temporalSections           [[buffer(8)]],
+        constant uint& heightSections             [[buffer(9)]],
+        constant uint& widthSections              [[buffer(10)]],
+        constant uint& mropeInterleaved           [[buffer(11)]],
         uint headIndex                            [[threadgroup_position_in_grid]],
         uint tid                                  [[thread_index_in_threadgroup]]
     ) {
         const uint halfRopeDim = ropeDimension / 2;
         if (tid >= halfRopeDim) return;
 
-        const uint position = args.positionBuffer[0];
+        const uint axis = \(name)_mrope_axis(
+            tid,
+            temporalSections,
+            heightSections,
+            widthSections,
+            mropeInterleaved != 0
+        );
+        const uint position = args.positionAxesBuffer[axis];
         const float theta = float(position) * pow(ropeBase, -2.0f * float(tid) / float(ropeDimension));
         const float cosTheta = cos(theta);
         const float sinTheta = sin(theta);
@@ -266,23 +328,46 @@ public static func generateRoPESeq(
     let bt = bufferPrecision.metalType
 
     return """
+    inline uint \(name)_mrope_axis(
+        uint halfDimIndex,
+        uint temporalSections,
+        uint heightSections,
+        uint widthSections,
+        bool interleaved
+    ) {
+        if (temporalSections == 0 && heightSections == 0 && widthSections == 0) {
+            return 0;
+        }
+        if (!interleaved) {
+            if (halfDimIndex < temporalSections) return 0;
+            if (halfDimIndex < temporalSections + heightSections) return 1;
+            return 2;
+        }
+        if (halfDimIndex < heightSections * 3 && halfDimIndex % 3 == 1) return 1;
+        if (halfDimIndex < widthSections * 3 && halfDimIndex % 3 == 2) return 2;
+        return 0;
+    }
+
     kernel void \(name)(
         device \(bt)* Q              [[buffer(0)]],
         device \(bt)* K              [[buffer(1)]],
-        device const uint* positions [[buffer(2)]],
+        device const uint* positionAxesBuffer [[buffer(2)]],
         constant uint& headCount     [[buffer(3)]],
         constant uint& kvHeadCount   [[buffer(4)]],
         constant uint& headDimension [[buffer(5)]],
         constant uint& ropeDimension [[buffer(6)]],
         constant float& base         [[buffer(7)]],
-        constant uint& sequenceLength [[buffer(8)]],
+        constant uint& temporalSections [[buffer(8)]],
+        constant uint& heightSections [[buffer(9)]],
+        constant uint& widthSections [[buffer(10)]],
+        constant uint& mropeInterleaved [[buffer(11)]],
+        constant uint& sequenceLength [[buffer(12)]],
         uint2 gid                    [[threadgroup_position_in_grid]],
         uint tid                     [[thread_index_in_threadgroup]]
     ) {
         uint head = gid.x;
         uint seqPos = gid.y;
         if (seqPos >= sequenceLength) return;
-        uint position = positions[seqPos];
         uint totalHeads = headCount + kvHeadCount;
         if (head >= totalHeads) return;
         uint qkvDimension = (head < headCount) ? headCount * headDimension : kvHeadCount * headDimension;
@@ -291,6 +376,14 @@ public static func generateRoPESeq(
         uint offset = seqPos * qkvDimension + localHead * headDimension;
         uint halfRope = ropeDimension / 2;
         for (uint i = tid; i < halfRope; i += SIMD_WIDTH) {
+            const uint axis = \(name)_mrope_axis(
+                i,
+                temporalSections,
+                heightSections,
+                widthSections,
+                mropeInterleaved != 0
+            );
+            uint position = positionAxesBuffer[seqPos * 3 + axis];
             float theta = float(position) / pow(base, float(2 * i) / float(ropeDimension));
             float cosTheta = cos(theta);
             float sinTheta = sin(theta);

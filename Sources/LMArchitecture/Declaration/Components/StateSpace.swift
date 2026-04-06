@@ -15,12 +15,14 @@ public struct StateSpace: ModelComponent {
     public let groupCount: Int
     public let keyHeadDim: Int
     public let valueHeadDim: Int
+    public let convKernelSize: Int
     public let variant: String
 
     public init(
         hiddenSize: Int, numHeads: Int,
         groupCount: Int? = nil,
         keyHeadDim: Int, valueHeadDim: Int,
+        convKernelSize: Int = 1,
         variant: String
     ) {
         precondition(hiddenSize > 0, "hiddenSize must be positive")
@@ -33,6 +35,7 @@ public struct StateSpace: ModelComponent {
         self.groupCount = groupCount ?? numHeads
         self.keyHeadDim = keyHeadDim
         self.valueHeadDim = valueHeadDim
+        self.convKernelSize = convKernelSize
         self.variant = variant
     }
 }
@@ -46,6 +49,7 @@ extension StateSpace: PrimitiveComponent {
             groupCount: groupCount,
             keyHeadDim: keyHeadDim,
             valueHeadDim: valueHeadDim,
+            convKernelSize: convKernelSize,
             variant: variant
         ))
     }

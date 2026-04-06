@@ -108,6 +108,14 @@ public struct MetalInferenceCompiler: Sendable {
             kernelContext: context.kernelContext
         )
         guard let pipeline = context.pipelineCache[resolvedKernelName] else {
+            let relatedKernelNames = context.pipelineCache.keys
+                .filter { $0.contains("embedding_lookup") || $0.contains("gather") }
+                .sorted()
+            if !relatedKernelNames.isEmpty {
+                print("[Compiler] missing kernel '\(resolvedKernelName)'; related compiled kernels: \(relatedKernelNames)")
+            } else {
+                print("[Compiler] missing kernel '\(resolvedKernelName)'; no embedding-related kernels compiled")
+            }
             throw MetalCompilerError.kernelNotFound(resolvedKernelName)
         }
         return (resolvedKernelName, pipeline)
@@ -495,7 +503,11 @@ public struct MetalInferenceCompiler: Sendable {
             argumentEncoders: argumentEncoderCache,
             resolveDispatch: { try resolvedDispatch(for: $0, using: planBuildContext) }
         )
-        return MetalCompiledModel(decodePlan: decodePlan, prefillPlan: nil)
+        return MetalCompiledModel(
+            decodePlan: decodePlan,
+            prefillPlan: nil,
+            auxiliaryPipelines: pipelineCache
+        )
     }
 
     // MARK: - Prefill Compilation
@@ -520,6 +532,8 @@ public struct MetalInferenceCompiler: Sendable {
         sharedConvState: MTLBuffer? = nil,
         sharedConvStateDimension: Int = 0,
         sharedConvStateKernelSize: Int = 0,
+        sharedRecurrentState: MTLBuffer? = nil,
+        sharedRecurrentStateBytesPerLayer: Int = 0,
         device: MTLDevice
     ) throws -> MetalPrefillPlan {
         let context = makeCompileContext(
@@ -550,7 +564,9 @@ public struct MetalInferenceCompiler: Sendable {
             sharedKVCache: sharedKVCache,
             sharedConvState: sharedConvState,
             sharedConvStateDimension: sharedConvStateDimension,
-            sharedConvStateKernelSize: sharedConvStateKernelSize)
+            sharedConvStateKernelSize: sharedConvStateKernelSize,
+            sharedRecurrentState: sharedRecurrentState,
+            sharedRecurrentStateBytesPerLayer: sharedRecurrentStateBytesPerLayer)
         let prefillBuffers = allocation.bufferSet
         let slotDimension = allocation.slotDimension
         let maxSeq = allocation.maximumSequenceLength

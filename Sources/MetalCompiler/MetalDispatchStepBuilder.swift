@@ -43,7 +43,11 @@ struct MetalDispatchStepBuilder {
                 sync: .bufferBarrier,
                 bufferAccesses: Self.decodeBufferAccesses(
                     for: entry,
-                    buffers: bindings.buffers)
+                    buffers: bindings.buffers),
+                metadata: MetalDispatchStepMetadata(
+                    kernelName: resolved.name,
+                    layerIndex: entry.layerIndex
+                )
             ))
         }
 
@@ -78,7 +82,8 @@ struct MetalDispatchStepBuilder {
             MetalDispatchStep(
                 descriptor: step.descriptor,
                 bindings: bindings,
-                bufferAccesses: step.bufferAccesses
+                bufferAccesses: step.bufferAccesses,
+                metadata: step.metadata
             )
         }
     }
@@ -93,7 +98,8 @@ struct MetalDispatchStepBuilder {
             MetalDispatchStep(
                 descriptor: step.descriptor,
                 bindings: bindings,
-                bufferAccesses: step.bufferAccesses
+                bufferAccesses: step.bufferAccesses,
+                metadata: step.metadata
             )
         }
     }
@@ -108,7 +114,8 @@ struct MetalDispatchStepBuilder {
             MetalDispatchStep(
                 descriptor: step.descriptor,
                 bindings: bindings,
-                bufferAccesses: step.bufferAccesses
+                bufferAccesses: step.bufferAccesses,
+                metadata: step.metadata
             )
         }
     }
@@ -174,7 +181,11 @@ struct MetalDispatchStepBuilder {
             return MetalDispatchStep(
                 descriptor: encodedDescriptor,
                 bindings: encodedBindings,
-                bufferAccesses: step.bufferAccesses
+                bufferAccesses: step.bufferAccesses,
+                metadata: MetalDispatchStepMetadata(
+                    kernelName: variantKernelName,
+                    layerIndex: step.metadata.layerIndex
+                )
             )
         }
     }
@@ -267,7 +278,8 @@ struct MetalDispatchStepBuilder {
             return MetalDispatchStep(
                 descriptor: descriptor,
                 bindings: step.bindings,
-                bufferAccesses: step.bufferAccesses
+                bufferAccesses: step.bufferAccesses,
+                metadata: step.metadata
             )
         }
     }
@@ -346,6 +358,14 @@ struct MetalDispatchStepBuilder {
                 case "flash_attn_decode":
                     return MetalKernelNameResolver.argumentTableVariantKernelName(for: kernelName)
                 case "batched_gemv3", "batched_gemv3_bf16":
+                    return MetalKernelNameResolver.argumentTableVariantKernelName(for: kernelName)
+                default:
+                    return nil
+                }
+            }
+            if table.layout.indices == [0, 1, 2, 3, 4, 5, 6, 7, 8] {
+                switch kernelName {
+                case "batched_gemv4", "batched_gemv4_bf16":
                     return MetalKernelNameResolver.argumentTableVariantKernelName(for: kernelName)
                 default:
                     return nil
@@ -549,8 +569,10 @@ struct DecodeRoutingPlanner {
                 bufferSet: bufferSet,
                 slotDimension: slotDimension,
                 elementSize: elementSize,
+                layerIndex: entry.layerIndex,
                 kvCacheIndex: kvCacheIndex,
                 convLayerIndex: routingState.convLayerIndex,
+                recurrentLayerIndex: routingState.recurrentLayerIndex,
                 resolveWeight: weightResolver.resolve
             )
             let bindings = fragment.decodeBindings(context: bindingContext)
@@ -562,6 +584,7 @@ struct DecodeRoutingPlanner {
             }
             if bindings.consumesKVCacheLayer { kvCacheIndex += 1 }
             if bindings.consumesConvLayer { routingState.convLayerIndex += 1 }
+            if bindings.consumesRecurrentLayer { routingState.recurrentLayerIndex += 1 }
             routingState.lastOutputIsHidden = bindings.outputIsHidden
             return (buffers: bindings.buffers, bytes: bindings.bytes)
 

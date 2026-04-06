@@ -50,12 +50,22 @@ struct MetalPrefillTransferPlanner: Sendable {
             convCopySize = 0
         }
 
+        let recurrentCopySize: Int
+        if let prefillRecurrentState = prefillPlan.buffers.recurrentState,
+           let decodeRecurrentState = decodePlan.buffers.recurrentState,
+           prefillRecurrentState !== decodeRecurrentState {
+            recurrentCopySize = min(decodeRecurrentState.length, prefillRecurrentState.length)
+        } else {
+            recurrentCopySize = 0
+        }
+
         return PostPrefillTransferPlan(
             hiddenSourceOffset: hiddenSourceOffset,
             hiddenCopySize: hiddenCopySize,
             kvCopySize: kvCopySize,
             valueCopySize: valueCopySize,
             convCopySize: convCopySize,
+            recurrentCopySize: recurrentCopySize,
             requiresCPUHiddenConversion: requiresCPUHiddenConversion,
             usesSharedDecodeHidden: usesSharedDecodeHidden
         )
@@ -68,11 +78,12 @@ struct PostPrefillTransferPlan: Sendable {
     let kvCopySize: Int
     let valueCopySize: Int
     let convCopySize: Int
+    let recurrentCopySize: Int
     let requiresCPUHiddenConversion: Bool
     let usesSharedDecodeHidden: Bool
 
     var needsBlit: Bool {
-        hiddenCopySize > 0 || kvCopySize > 0 || valueCopySize > 0 || convCopySize > 0
+        hiddenCopySize > 0 || kvCopySize > 0 || valueCopySize > 0 || convCopySize > 0 || recurrentCopySize > 0
     }
 
     var canEncodeInSameTransaction: Bool {
@@ -94,6 +105,7 @@ struct PostPrefillTransferPlan: Sendable {
             kvCopySize: 0,
             valueCopySize: 0,
             convCopySize: 0,
+            recurrentCopySize: 0,
             requiresCPUHiddenConversion: requiresCPUHiddenConversion,
             usesSharedDecodeHidden: usesSharedDecodeHidden
         )
@@ -106,6 +118,7 @@ struct PostPrefillTransferPlan: Sendable {
             kvCopySize: kvCopySize,
             valueCopySize: valueCopySize,
             convCopySize: convCopySize,
+            recurrentCopySize: recurrentCopySize,
             requiresCPUHiddenConversion: false,
             usesSharedDecodeHidden: false
         )

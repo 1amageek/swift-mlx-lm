@@ -13,7 +13,7 @@ This guide is for application developers integrating `SwiftLM` as a library.
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/1amageek/swift-lm.git", from: "0.1.0")
+    .package(url: "https://github.com/1amageek/swift-lm.git", from: "0.2.0")
 ],
 targets: [
     .target(
@@ -38,6 +38,7 @@ These files are also used when present:
 - `tokenizer_config.json`
 - `special_tokens_map.json`
 - `chat_template.jinja`
+- `preprocessor_config.json`
 
 `swift-lm` generates `model.staf` next to the source weights as an execution cache. `safetensors` remains the source of truth, and `model.staf` can be deleted and regenerated.
 
@@ -60,6 +61,18 @@ import SwiftLM
 
 let directory = URL(fileURLWithPath: "/path/to/model-snapshot")
 let container = try await ModelBundleLoader().load(directory: directory)
+
+if container.configuration.inputCapabilities.supportsImages {
+    print("This model bundle declares image input support.")
+}
+
+if container.configuration.executionCapabilities.supportsImagePromptPreparation {
+    print("This runtime can prepare Qwen-style image prompts.")
+}
+
+if let vision = container.configuration.vision {
+    print("vision_start_token_id =", vision.visionStartTokenID as Any)
+}
 ```
 
 ## Supported Model Families
@@ -69,7 +82,7 @@ The current loader resolves these model families from `config.json["model_type"]
 | Family | `model_type` examples |
 |---|---|
 | Transformer | `llama`, `qwen2`, `qwen3`, `mistral`, `gemma`, `phi`, `mixtral`, `deepseek` |
-| Qwen 3.5 hybrid | `qwen3_5` |
+| Qwen 3.5 hybrid / Qwen3-VL text backbone | `qwen3_5`, `qwen3_vl` |
 | LFM2 / LFM2.5 hybrid | `lfm2`, `lfm2_moe` |
 | Cohere | `cohere`, `command-r` |
 
@@ -80,9 +93,10 @@ Unsupported or incomplete families currently fail during loading or graph constr
 ```swift
 import SwiftLM
 
-let input = try container.prepare(input: UserInput(prompt: "Write a haiku about Metal shaders."))
-let stream = container.generate(
-    input: input,
+let prepared = try await container.prepare(input: ModelInput(prompt: "Write a haiku about Metal shaders."))
+let executable = try container.makeExecutablePrompt(from: prepared)
+let stream = try container.generate(
+    prompt: executable,
     parameters: GenerateParameters(
         maxTokens: 128,
         streamChunkTokenCount: 8,
@@ -101,20 +115,23 @@ for await event in stream {
 }
 ```
 
-`generate(input:)` returns `AsyncStream<Generation>`. The stream yields:
+`generate(prompt:)` returns `AsyncStream<Generation>`. The stream yields:
 
 - `.chunk(String)` for decoded text
 - `.info(CompletionInfo)` once at the end
 
+Use `PreparedInput` as the result of prompt preparation and `ExecutablePrompt` as the runtime execution shape. `generate(input: ModelInput, parameters:)` is the async convenience entry point; `generate(prompt: ExecutablePrompt, parameters:)` is the low-level execution API.
+
 ## Generate from Chat Messages
 
 ```swift
-let input = try container.prepare(input: UserInput(chat: [
+let prepared = try await container.prepare(input: ModelInput(chat: [
     .system("You are a concise assistant."),
     .user("Summarize the benefits of zero-copy model loading.")
 ]))
+let executable = try container.makeExecutablePrompt(from: prepared)
 
-for await event in container.generate(input: input) {
+for await event in try container.generate(prompt: executable) {
     if let chunk = event.chunk {
         print(chunk, terminator: "")
     }
@@ -123,17 +140,46 @@ for await event in container.generate(input: input) {
 
 When `chat_template.jinja` or `tokenizer_config.json["chat_template"]` is available, `prepare(input:)` renders the model's template. Otherwise, `swift-lm` falls back to a simple role-prefixed transcript.
 
+## Prepare a Qwen3-VL Style Visual Prompt
+
+`swift-lm` now understands the official Qwen3-VL marker tokens and processor metadata well enough to prepare and execute image-bearing and video-bearing prompts.
+
+```swift
+let input = ModelInput(chat: [
+    .user([
+        .text("Describe the attached image."),
+        .image(InputImage(fileURL: URL(fileURLWithPath: "/path/to/image.jpg")))
+    ])
+])
+
+let prepared = try await container.prepare(input: input)
+
+if let multimodal = prepared.multimodalMetadata {
+    print("image items =", multimodal.images.count)
+    print("mm token types =", Array(multimodal.mmTokenTypeIDs.prefix(8)))
+}
+
+let executable = try container.makeExecutablePrompt(from: prepared)
+for await event in try container.generate(prompt: executable) {
+    if let chunk = event.chunk {
+        print(chunk, terminator: "")
+    }
+}
+```
+
+For Qwen3-VL bundles, `prepare(input:)` expands the image and video placeholder counts from the bundle's `preprocessor_config.json` so the token stream matches the processor contract. `makeExecutablePrompt(from:)` builds the executable visual payload, and generation uses the bundled Qwen vision encoder plus the text backbone decode path.
+
 ## Reuse a Prompt Prefix
 
 If many requests share the same prompt prefix, build a `PromptState` once and reuse it.
 
 ```swift
-let promptState = try container.makePromptState(input: UserInput(chat: [
+let promptState = try await container.makePromptState(input: ModelInput(chat: [
     .system("You are a helpful code review assistant."),
     .user("Review this patch carefully.")
 ]))
 
-for await event in container.generate(
+for await event in try container.generate(
     from: promptState,
     parameters: GenerateParameters(maxTokens: 64)
 ) {
@@ -174,8 +220,13 @@ For predictable behavior, set `maxTokens` explicitly. If `maxTokens` is `nil`, t
 
 ## Supported Inputs and Current Limits
 
-- Public input is text-only or chat-only through `UserInput`
-- Multimodal image or video input is not part of the current public API
+- Public input is represented by `ModelInput`
+- `ModelConfiguration.inputCapabilities` tells you whether the model bundle declares image or video inputs
+- `ModelConfiguration.executionCapabilities` tells you what the current runtime can actually execute or prepare
+- `ModelConfiguration.vision` exposes image/video placeholder token IDs, processor names, and Qwen-style patch sizing metadata when the bundle provides them
+- Image content can be expressed through `ModelInput`, and Qwen3-VL style prompt preparation now expands the correct placeholder count before tokenization
+- `makeExecutablePrompt(from:)` converts prepared input into an executable prompt, while `makePromptState(input: ModelInput)` and `generate(input: ModelInput, parameters:)` are async convenience APIs for the same Qwen3-VL image/video path
+- Other multimodal model families still throw `multimodalInputNotSupported` until a matching processor + vision runtime is implemented
 - Tool calling and structured function-calling APIs are not part of the current public API
 - Generation is stream-based; collect `.chunk` values yourself if you need a single final string
 
@@ -199,3 +250,31 @@ Common causes:
 - `../README.md` for project overview and architecture
 - `../Sources/MetalCompiler/STAF/README.md` for STAF cache details
 - `../DESIGN-Metal4.md` for forward-looking backend design notes
+
+## Validation Notes
+
+The current `Qwen3.5+` multimodal path is covered by focused suites under [`Tests/SwiftLMTests`](/Users/1amageek/Desktop/swift-lm/Tests/SwiftLMTests). The release-facing set is:
+
+- [`LoadTests.swift`](/Users/1amageek/Desktop/swift-lm/Tests/SwiftLMTests/LoadTests.swift)
+- [`ReleaseSmokeTests.swift`](/Users/1amageek/Desktop/swift-lm/Tests/SwiftLMTests/ReleaseSmokeTests.swift)
+- [`QwenVisionCapabilityTests.swift`](/Users/1amageek/Desktop/swift-lm/Tests/SwiftLMTests/QwenVisionCapabilityTests.swift)
+- [`QwenVisionPromptProcessorTests.swift`](/Users/1amageek/Desktop/swift-lm/Tests/SwiftLMTests/QwenVisionPromptProcessorTests.swift)
+- [`QwenVisionExecutionLayoutTests.swift`](/Users/1amageek/Desktop/swift-lm/Tests/SwiftLMTests/QwenVisionExecutionLayoutTests.swift)
+- [`QwenVisionEncoderTests.swift`](/Users/1amageek/Desktop/swift-lm/Tests/SwiftLMTests/QwenVisionEncoderTests.swift)
+- [`QwenVisionExecutionTests.swift`](/Users/1amageek/Desktop/swift-lm/Tests/SwiftLMTests/QwenVisionExecutionTests.swift)
+- [`QwenVisionIntegrationTests.swift`](/Users/1amageek/Desktop/swift-lm/Tests/SwiftLMTests/QwenVisionIntegrationTests.swift)
+
+The real-bundle suites are optional-local:
+[`QwenVisionRealBundleImageTests.swift`](/Users/1amageek/Desktop/swift-lm/Tests/SwiftLMTests/QwenVisionRealBundleImageTests.swift),
+[`QwenVisionRealBundleVideoTests.swift`](/Users/1amageek/Desktop/swift-lm/Tests/SwiftLMTests/QwenVisionRealBundleVideoTests.swift),
+[`QwenVisionRealBundleMixedTests.swift`](/Users/1amageek/Desktop/swift-lm/Tests/SwiftLMTests/QwenVisionRealBundleMixedTests.swift),
+[`QwenVisionRealBundlePromptStateTests.swift`](/Users/1amageek/Desktop/swift-lm/Tests/SwiftLMTests/QwenVisionRealBundlePromptStateTests.swift).
+Each skips cleanly when no local `Qwen3.5/VL` snapshot is available.
+
+When running the Qwen3.5+ multimodal matrix on a developer machine, prefer [`run-qwen35-vision-tests.sh`](/Users/1amageek/Desktop/swift-lm/scripts/run-qwen35-vision-tests.sh). It builds once and executes each suite with `test-without-building`, which reduces peak memory usage compared to one large `xcodebuild test` process.
+
+Use `--suite` to narrow the run when you only need one area:
+
+```bash
+scripts/run-qwen35-vision-tests.sh --suite SwiftLMTests/QwenVisionCapabilityTests
+```

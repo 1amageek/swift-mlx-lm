@@ -10,7 +10,7 @@ import LMArchitecture
 /// - `ssmNumHeads`, `ssmKeyHeadDim`, `ssmValueHeadDim` (DeltaNet heads)
 /// - `partialRotaryFactor` (partial RoPE)
 /// - `fullAttentionInterval` (hybrid routing)
-/// - `convKernelSize` (DeltaNet conv kernel, currently unused in DSL but required for validation)
+/// - `convKernelSize` (DeltaNet conv kernel)
 ///
 /// Call `Qwen35.validate(_:)` before constructing to ensure all required fields are present.
 public struct Qwen35: ModelComponent {
@@ -40,6 +40,9 @@ public struct Qwen35: ModelComponent {
         }
         guard config.fullAttentionInterval != nil else {
             throw ModelGraphBuildError.missingMetadata("full_attention_interval required for Qwen3.5")
+        }
+        guard config.convKernelSize != nil else {
+            throw ModelGraphBuildError.missingMetadata("conv_kernel_size required for Qwen3.5")
         }
     }
 
@@ -102,6 +105,7 @@ struct Qwen35DeltaNetDecoderLayer: ModelComponent {
                 groupCount: config.ssmGroupCount ?? config.ssmNumHeads ?? config.attentionHeads,
                 keyHeadDim: config.ssmKeyHeadDim ?? 128,
                 valueHeadDim: config.ssmValueHeadDim ?? 128,
+                convKernelSize: config.convKernelSize ?? 1,
                 variant: .gated
             )
         }

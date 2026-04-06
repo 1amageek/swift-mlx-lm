@@ -10,13 +10,26 @@ struct ModelBundleInspector {
         let modelType = try decoder.modelType(from: configData)
         let safetensorsURLs = try findSafetensorsFiles(in: directory)
         let chatTemplate = try loadChatTemplate(from: directory)
+        let preprocessorConfigData = try loadProcessorConfigData(from: directory)
+        let visionConfiguration = try decoder.visionConfiguration(
+            from: configData,
+            preprocessorConfigData: preprocessorConfigData
+        )
+        let inputCapabilities = try decoder.inputCapabilities(
+            from: configData,
+            preprocessorConfigData: preprocessorConfigData,
+            visionConfiguration: visionConfiguration
+        )
         return ModelBundleResources(
             directory: directory,
             configData: configData,
             config: config,
             modelType: modelType,
             safetensorsURLs: safetensorsURLs,
-            chatTemplate: chatTemplate
+            chatTemplate: chatTemplate,
+            preprocessorConfigData: preprocessorConfigData,
+            inputCapabilities: inputCapabilities,
+            visionConfiguration: visionConfiguration
         )
     }
 
@@ -64,6 +77,26 @@ struct ModelBundleInspector {
             }
         }
 
+        return nil
+    }
+
+    func loadOptionalData(from url: URL) throws -> Data? {
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            return nil
+        }
+        return try Data(contentsOf: url)
+    }
+
+    func loadProcessorConfigData(from directory: URL) throws -> Data? {
+        let candidates = [
+            directory.appendingPathComponent("preprocessor_config.json"),
+            directory.appendingPathComponent("processor_config.json"),
+        ]
+        for candidate in candidates {
+            if let data = try loadOptionalData(from: candidate) {
+                return data
+            }
+        }
         return nil
     }
 }

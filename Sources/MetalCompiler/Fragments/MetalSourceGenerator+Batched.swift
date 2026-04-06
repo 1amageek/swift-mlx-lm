@@ -271,6 +271,161 @@ public static func generateBatchedGEMV3ArgumentTableVariant(
     """
 }
 
+/// Generate batched GEMV kernel for 4 projections sharing the same input.
+public static func generateBatchedGEMV4(
+    name: String,
+    bufferPrecision: BufferPrecision,
+    weightFormat: WeightFormat
+) -> String {
+    let bt = bufferPrecision.metalType
+    let wt = weightFormat.bufferType
+    let readWeight = { (expr: String) in weightFormat.readExpression(expr) }
+
+    return """
+    kernel void \(name)(
+        device const \(bt)* input          [[buffer(0)]],
+        device const \(wt)* weight0        [[buffer(1)]],
+        device const \(wt)* weight1        [[buffer(2)]],
+        device const \(wt)* weight2        [[buffer(3)]],
+        device const \(wt)* weight3        [[buffer(4)]],
+        device \(bt)* output0              [[buffer(5)]],
+        device \(bt)* output1              [[buffer(6)]],
+        device \(bt)* output2              [[buffer(7)]],
+        device \(bt)* output3              [[buffer(8)]],
+        constant uint& inputDimension      [[buffer(9)]],
+        constant uint& outputDim0          [[buffer(10)]],
+        constant uint& outputDim1          [[buffer(11)]],
+        constant uint& outputDim2          [[buffer(12)]],
+        constant uint& outputDim3          [[buffer(13)]],
+        uint gid                           [[threadgroup_position_in_grid]],
+        uint tid                           [[thread_index_in_threadgroup]],
+        uint tiisg                         [[thread_index_in_simdgroup]],
+        uint sgitg                         [[simdgroup_index_in_threadgroup]],
+        uint threadsPerThreadgroup         [[threads_per_threadgroup]]
+    ) {
+        const uint tileElements = 256;
+        const uint rowsPerThreadgroup = max(1u, threadsPerThreadgroup / SIMD_WIDTH);
+        const uint globalRow = gid * rowsPerThreadgroup + sgitg;
+        const uint totalRows = outputDim0 + outputDim1 + outputDim2 + outputDim3;
+        if (globalRow >= totalRows) return;
+
+        device const \(wt)* weight;
+        device \(bt)* output;
+        uint localRow;
+        if (globalRow < outputDim0) {
+            weight = weight0; output = output0; localRow = globalRow;
+        } else if (globalRow < outputDim0 + outputDim1) {
+            weight = weight1; output = output1; localRow = globalRow - outputDim0;
+        } else if (globalRow < outputDim0 + outputDim1 + outputDim2) {
+            weight = weight2; output = output2; localRow = globalRow - outputDim0 - outputDim1;
+        } else {
+            weight = weight3; output = output3; localRow = globalRow - outputDim0 - outputDim1 - outputDim2;
+        }
+
+        threadgroup \(bt) inputTile[tileElements];
+        float sum = 0.0f;
+        device const \(wt)* weightRow = weight + localRow * inputDimension;
+        for (uint base = 0; base < inputDimension; base += tileElements) {
+            for (uint j = tid; j < tileElements; j += threadsPerThreadgroup) {
+                const uint inputIndex = base + j;
+                inputTile[j] = inputIndex < inputDimension ? input[inputIndex] : \(bt)(0.0f);
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+
+            const uint tileCount = min(tileElements, inputDimension - base);
+            for (uint j = tiisg; j < tileCount; j += SIMD_WIDTH) {
+                sum += \(readWeight("weightRow[base + j]")) * float(inputTile[j]);
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+        }
+        sum = simd_sum(sum);
+        if (tiisg == 0) {
+            output[localRow] = \(bt)(sum);
+        }
+    }
+    """
+}
+
+public static func generateBatchedGEMV4ArgumentTableVariant(
+    name: String,
+    argumentBufferIndex: Int,
+    bufferPrecision: BufferPrecision,
+    weightFormat: WeightFormat
+) -> String {
+    let bt = bufferPrecision.metalType
+    let wt = weightFormat.bufferType
+    let readWeight = { (expr: String) in weightFormat.readExpression(expr) }
+    let inputStructName = "\(name)_args"
+
+    return """
+    struct \(inputStructName) {
+        device const \(bt)* input [[id(0)]];
+        device const \(wt)* weight0 [[id(1)]];
+        device const \(wt)* weight1 [[id(2)]];
+        device const \(wt)* weight2 [[id(3)]];
+        device const \(wt)* weight3 [[id(4)]];
+        device \(bt)* output0 [[id(5)]];
+        device \(bt)* output1 [[id(6)]];
+        device \(bt)* output2 [[id(7)]];
+        device \(bt)* output3 [[id(8)]];
+    };
+
+    kernel void \(name)(
+        constant \(inputStructName)& args        [[buffer(\(argumentBufferIndex))]],
+        constant uint& inputDimension            [[buffer(9)]],
+        constant uint& outputDim0                [[buffer(10)]],
+        constant uint& outputDim1                [[buffer(11)]],
+        constant uint& outputDim2                [[buffer(12)]],
+        constant uint& outputDim3                [[buffer(13)]],
+        uint gid                                 [[threadgroup_position_in_grid]],
+        uint tid                                 [[thread_index_in_threadgroup]],
+        uint tiisg                               [[thread_index_in_simdgroup]],
+        uint sgitg                               [[simdgroup_index_in_threadgroup]],
+        uint threadsPerThreadgroup               [[threads_per_threadgroup]]
+    ) {
+        const uint tileElements = 256;
+        const uint rowsPerThreadgroup = max(1u, threadsPerThreadgroup / SIMD_WIDTH);
+        const uint globalRow = gid * rowsPerThreadgroup + sgitg;
+        const uint totalRows = outputDim0 + outputDim1 + outputDim2 + outputDim3;
+        if (globalRow >= totalRows) return;
+
+        device const \(wt)* weight;
+        device \(bt)* output;
+        uint localRow;
+        if (globalRow < outputDim0) {
+            weight = args.weight0; output = args.output0; localRow = globalRow;
+        } else if (globalRow < outputDim0 + outputDim1) {
+            weight = args.weight1; output = args.output1; localRow = globalRow - outputDim0;
+        } else if (globalRow < outputDim0 + outputDim1 + outputDim2) {
+            weight = args.weight2; output = args.output2; localRow = globalRow - outputDim0 - outputDim1;
+        } else {
+            weight = args.weight3; output = args.output3; localRow = globalRow - outputDim0 - outputDim1 - outputDim2;
+        }
+
+        threadgroup \(bt) inputTile[tileElements];
+        float sum = 0.0f;
+        device const \(wt)* weightRow = weight + localRow * inputDimension;
+        for (uint base = 0; base < inputDimension; base += tileElements) {
+            for (uint j = tid; j < tileElements; j += threadsPerThreadgroup) {
+                const uint inputIndex = base + j;
+                inputTile[j] = inputIndex < inputDimension ? args.input[inputIndex] : \(bt)(0.0f);
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+
+            const uint tileCount = min(tileElements, inputDimension - base);
+            for (uint j = tiisg; j < tileCount; j += SIMD_WIDTH) {
+                sum += \(readWeight("weightRow[base + j]")) * float(inputTile[j]);
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+        }
+        sum = simd_sum(sum);
+        if (tiisg == 0) {
+            output[localRow] = \(bt)(sum);
+        }
+    }
+    """
+}
+
 // MARK: - Batched Per-Head Fragment
 
 /// Generate batched per-head kernel for 2 independent in-place operations.

@@ -1,3 +1,5 @@
+import Metal
+
 /// Opaque compiled runtime artifact produced by `MetalInferenceCompiler`.
 ///
 /// This bundles the decode plan together with the optional prefill plan so
@@ -5,13 +7,16 @@
 public struct MetalCompiledModel: @unchecked Sendable {
     public let decodePlan: MetalDispatchPlan
     public let prefillPlan: MetalPrefillPlan?
+    public let auxiliaryPipelines: [String: MTLComputePipelineState]
 
     public init(
         decodePlan: MetalDispatchPlan,
-        prefillPlan: MetalPrefillPlan? = nil
+        prefillPlan: MetalPrefillPlan? = nil,
+        auxiliaryPipelines: [String: MTLComputePipelineState] = [:]
     ) {
         self.decodePlan = decodePlan
         self.prefillPlan = prefillPlan
+        self.auxiliaryPipelines = auxiliaryPipelines
     }
 
     public var steps: [MetalDispatchStep] { decodePlan.steps }
@@ -20,6 +25,10 @@ public struct MetalCompiledModel: @unchecked Sendable {
     public var fusedEntryCount: Int { decodePlan.fusedEntryCount }
 
     public func withPrefillPlan(_ prefillPlan: MetalPrefillPlan?) -> Self {
-        Self(decodePlan: decodePlan, prefillPlan: prefillPlan)
+        Self(
+            decodePlan: decodePlan,
+            prefillPlan: prefillPlan,
+            auxiliaryPipelines: auxiliaryPipelines
+        )
     }
 }

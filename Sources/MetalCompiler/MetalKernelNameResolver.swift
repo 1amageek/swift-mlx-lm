@@ -128,14 +128,31 @@ struct MetalKernelNameResolver {
             return isPrefill ? (isBF16 ? "gemm_bf16_f32s" : "gemm_f32s") : "gemv"
 
         case .fragment(let fragment):
-            return fragment.kernelName(context: kernelContext)
+            let fragmentWeightFormat = weightFormatResolver.resolve(
+                forFragment: fragment,
+                entry: entry
+            )
+            let fragmentContext = KernelContext(
+                bufferPrecision: kernelContext.bufferPrecision,
+                weightFormat: fragmentWeightFormat
+            )
+            return fragment.kernelName(context: fragmentContext)
 
         case .fusedCopyNorm:
-            return "fused_copy_rms_norm" + bf16Suffix
+            let weightFormat = weightFormatResolver.resolve(role: "scale", entry: entry)
+            return weightFormat == .bfloat16
+                ? "fused_copy_rms_norm_bf16"
+                : "fused_copy_rms_norm"
         case .fusedResidualAddCopyNorm:
-            return "fused_residual_add_copy_rms_norm" + bf16Suffix
+            let weightFormat = weightFormatResolver.resolve(role: "scale", entry: entry)
+            return weightFormat == .bfloat16
+                ? "fused_residual_add_copy_rms_norm_bf16"
+                : "fused_residual_add_copy_rms_norm"
         case .fusedResidualAddNorm:
-            return "fused_residual_add_rms_norm" + bf16Suffix
+            let weightFormat = weightFormatResolver.resolve(role: "scale", entry: entry)
+            return weightFormat == .bfloat16
+                ? "fused_residual_add_rms_norm_bf16"
+                : "fused_residual_add_rms_norm"
 
         case .fusedSwiGLUProjection(let fused):
             let weightFormat = weightFormatResolver.resolve(role: fused.gateField, entry: entry)
@@ -149,7 +166,15 @@ struct MetalKernelNameResolver {
             return "batched_gemv\(batched.projections.count)" + bf16Suffix
 
         case .batchedFragment(let batch):
-            let baseName = batch.fragments[0].kernelName(context: kernelContext)
+            let fragmentWeightFormat = weightFormatResolver.resolve(
+                forFragment: batch.fragments[0],
+                entry: entry
+            )
+            let fragmentContext = KernelContext(
+                bufferPrecision: kernelContext.bufferPrecision,
+                weightFormat: fragmentWeightFormat
+            )
+            let baseName = batch.fragments[0].kernelName(context: fragmentContext)
             return "batched_\(baseName)_\(batch.fragments.count)"
 
         case .structuralCopy:

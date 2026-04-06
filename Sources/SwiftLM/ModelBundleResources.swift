@@ -9,4 +9,7 @@ struct ModelBundleResources {
     let modelType: String
     let safetensorsURLs: [URL]
     let chatTemplate: Template?
+    let preprocessorConfigData: Data?
+    let inputCapabilities: ModelInputCapabilities
+    let visionConfiguration: ModelVisionConfiguration?
 }

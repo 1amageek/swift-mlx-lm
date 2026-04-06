@@ -1,3 +1,5 @@
+import LMIR
+
 extension MetalSourceGenerator {
 
     /// Generate complete MSL source for ALL kernels (decode + prefill).
@@ -18,6 +20,12 @@ extension MetalSourceGenerator {
         // === Decode kernels (F16 buffers, single token) ===
         sources.append(generateReduction(name: "rms_norm", dimension: 0, epsilon: 0, bufferPrecision: decode, weightFormat: .float16, isSequence: false))
         sources.append(generateReduction(name: "rms_norm_bf16", dimension: 0, epsilon: 0, bufferPrecision: decode, weightFormat: .bfloat16, isSequence: false))
+        sources.append(generatePerLayerInputModulation(
+            name: "per_layer_input_modulation",
+            bufferPrecision: decode,
+            activation: .custom("gelu_pytorch_tanh"),
+            isSequence: false
+        ))
         sources.append(generateSwiGLU(name: "swiglu", bufferPrecision: decode, isSequence: false))
         sources.append(generateCopy(name: "copy_buffer", bufferPrecision: decode, isSequence: false))
         sources.append(generateResidualAdd(name: "residual_add", bufferPrecision: decode, isSequence: false))
@@ -80,6 +88,10 @@ extension MetalSourceGenerator {
         sources.append(generateBatchedGEMV3(name: "batched_gemv3_bf16", bufferPrecision: decode, weightFormat: .bfloat16))
         sources.append(generateBatchedGEMV3ArgumentTableVariant(name: "batched_gemv3_argbuf", argumentBufferIndex: 30, bufferPrecision: decode, weightFormat: .float16))
         sources.append(generateBatchedGEMV3ArgumentTableVariant(name: "batched_gemv3_bf16_argbuf", argumentBufferIndex: 30, bufferPrecision: decode, weightFormat: .bfloat16))
+        sources.append(generateBatchedGEMV4(name: "batched_gemv4", bufferPrecision: decode, weightFormat: .float16))
+        sources.append(generateBatchedGEMV4(name: "batched_gemv4_bf16", bufferPrecision: decode, weightFormat: .bfloat16))
+        sources.append(generateBatchedGEMV4ArgumentTableVariant(name: "batched_gemv4_argbuf", argumentBufferIndex: 30, bufferPrecision: decode, weightFormat: .float16))
+        sources.append(generateBatchedGEMV4ArgumentTableVariant(name: "batched_gemv4_bf16_argbuf", argumentBufferIndex: 30, bufferPrecision: decode, weightFormat: .bfloat16))
         sources.append(generateBatchedPerHead2(name: "batched_qk_rms_norm_2", bufferPrecision: decode, weightFormat: .float16))
         sources.append(generateBatchedPerHead2(name: "batched_qk_rms_norm_bf16_2", bufferPrecision: decode, weightFormat: .bfloat16))
         sources.append(generateBatchedPerHead2ArgumentTableVariant(name: "batched_qk_rms_norm_2_argbuf", argumentBufferIndex: 30, bufferPrecision: decode, weightFormat: .float16))
@@ -106,6 +118,12 @@ extension MetalSourceGenerator {
         sources.append(generateReduction(name: "rms_norm_seq_bf16_f32_inplace", dimension: 0, epsilon: 0, bufferPrecision: prefill, weightFormat: .bfloat16))
         sources.append(generateReduction(name: "rms_norm_seq_f32s", dimension: 0, epsilon: 0, bufferPrecision: prefill, weightFormat: .float16))
         sources.append(generateReduction(name: "rms_norm_seq_bf16_f32s", dimension: 0, epsilon: 0, bufferPrecision: prefill, weightFormat: .bfloat16))
+        sources.append(generatePerLayerInputModulation(
+            name: "per_layer_input_modulation_seq_f32",
+            bufferPrecision: prefill,
+            activation: .custom("gelu_pytorch_tanh"),
+            isSequence: true
+        ))
         sources.append(generateSwiGLU(name: "swiglu_seq_f32", bufferPrecision: prefill))
         sources.append(generateCopy(name: "copy_buffer_seq_f32", bufferPrecision: prefill))
         sources.append(generateResidualAdd(name: "residual_add_seq_f32", bufferPrecision: prefill))
@@ -168,7 +186,11 @@ extension MetalSourceGenerator {
         // These are transitional — will be replaced by F32 prefill path
 
         // === SSM recurrence (DeltaNet/Mamba) ===
-        sources.append(ssmRecurrenceSource)
+        sources.append(generateSSMHelperSource(weightFormat: .float16))
+        sources.append(generateSSMRecurrence(name: "ssm_recurrence", bufferPrecision: decode, weightFormat: .float16))
+        sources.append(generateSSMRecurrence(name: "ssm_recurrence_f32", bufferPrecision: prefill, weightFormat: .float16))
+        sources.append(generateSSMRecurrenceSequence(name: "ssm_recurrence_seq", bufferPrecision: decode, weightFormat: .float16))
+        sources.append(generateSSMRecurrenceSequence(name: "ssm_recurrence_seq_f32", bufferPrecision: prefill, weightFormat: .float16))
 
         // === KV cache quantization ===
         sources.append(kvQuantizationSource)

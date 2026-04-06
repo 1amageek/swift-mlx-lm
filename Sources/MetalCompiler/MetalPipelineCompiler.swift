@@ -26,6 +26,10 @@ struct MetalPipelineCompiler {
         usesMPP: Bool
     ) {
         let baseLibrary = try makeLibrary(source: generated.baseSource, options: baseCompileOptions())
+        emitKernelDiagnosticsIfRequested(
+            generated: generated,
+            library: baseLibrary
+        )
         var pipelineCache = try makeBasePipelineCache(
             from: baseLibrary,
             mppKernelNames: generated.mppKernelNames)
@@ -51,6 +55,26 @@ struct MetalPipelineCompiler {
 
     private func makeLibrary(source: String, options: MTLCompileOptions) throws -> MTLLibrary {
         try device.makeLibrary(source: source, options: options)
+    }
+
+    private func emitKernelDiagnosticsIfRequested(
+        generated: GeneratedKernelSources,
+        library: MTLLibrary
+    ) {
+        guard ProcessInfo.processInfo.environment["SWIFTLM_DEBUG_KERNELS"] == "1" else {
+            return
+        }
+        let interestingNames = [
+            "embedding_lookup",
+            "embedding_lookup_bf16",
+            "embedding_lookup_argbuf",
+            "embedding_lookup_bf16_argbuf",
+        ]
+        let available = Set(library.functionNames)
+        let emitted = interestingNames.filter { generated.baseSource.contains("kernel void \($0)(") }
+        let compiled = interestingNames.filter { available.contains($0) }
+        print("[MetalPipelineCompiler] emitted embedding kernels: \(emitted)")
+        print("[MetalPipelineCompiler] compiled embedding kernels: \(compiled)")
     }
 
     private func baseCompileOptions() -> MTLCompileOptions {

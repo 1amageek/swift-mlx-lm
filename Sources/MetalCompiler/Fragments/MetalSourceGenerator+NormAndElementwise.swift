@@ -1,3 +1,5 @@
+import LMIR
+
 extension MetalSourceGenerator {
     /// Generate MSL source for a reduction kernel such as RMSNorm or LayerNorm.
     ///
@@ -207,6 +209,59 @@ extension MetalSourceGenerator {
         }
     }
 
+    public static func generatePerLayerInputModulation(
+        name: String,
+        bufferPrecision: BufferPrecision,
+        activation: ActivationKind,
+        isSequence: Bool
+    ) -> String {
+        let bt = bufferPrecision.metalType
+        let activated = switch activation {
+        case .custom(let kind) where kind == "gelu_pytorch_tanh" || kind == "gelu_new" || kind == "gelu_fast":
+            "0.5f * gateValue * (1.0f + tanh(0.7978845608f * (gateValue + 0.044715f * gateValue * gateValue * gateValue)))"
+        case .gelu:
+            "0.5f * gateValue * (1.0f + erf(gateValue * 0.70710678118f))"
+        default:
+            "gateValue"
+        }
+
+        if isSequence {
+            return """
+            kernel void \(name)(
+                device const \(bt)* gate         [[buffer(0)]],
+                device const float* perLayer     [[buffer(1)]],
+                device \(bt)* output             [[buffer(2)]],
+                constant uint& dimension         [[buffer(3)]],
+                constant uint& sequenceLength    [[buffer(4)]],
+                uint2 gid                        [[thread_position_in_grid]]
+            ) {
+                uint i = gid.x;
+                uint seqPos = gid.y;
+                if (i >= dimension || seqPos >= sequenceLength) return;
+                uint idx = seqPos * dimension + i;
+                float gateValue = float(gate[idx]);
+                float activatedGate = \(activated);
+                output[idx] = \(bt)(activatedGate * perLayer[idx]);
+            }
+            """
+        }
+
+        return """
+        kernel void \(name)(
+            device const \(bt)* gate         [[buffer(0)]],
+            device const float* perLayer     [[buffer(1)]],
+            device \(bt)* output             [[buffer(2)]],
+            constant uint& dimension         [[buffer(3)]],
+            uint gid                         [[thread_position_in_grid]]
+        ) {
+            if (gid >= dimension) return;
+            float gateValue = float(gate[gid]);
+            float activatedGate = \(activated);
+            output[gid] = \(bt)(activatedGate * perLayer[gid]);
+        }
+        """
+    }
+
     /// Generate MSL source for buffer copy.
     public static func generateCopy(
         name: String,
@@ -243,6 +298,42 @@ extension MetalSourceGenerator {
             }
             """
         }
+    }
+
+    public static func generateHiddenCopyFromFloat(
+        name: String,
+        bufferPrecision: BufferPrecision
+    ) -> String {
+        let bt = bufferPrecision.metalType
+        return """
+        kernel void \(name)(
+            device \(bt)* hidden               [[buffer(0)]],
+            device const float* source         [[buffer(1)]],
+            constant uint& count               [[buffer(2)]],
+            uint gid                           [[thread_position_in_grid]]
+        ) {
+            if (gid >= count) return;
+            hidden[gid] = \(bt)(source[gid]);
+        }
+        """
+    }
+
+    public static func generateHiddenAddFromFloat(
+        name: String,
+        bufferPrecision: BufferPrecision
+    ) -> String {
+        let bt = bufferPrecision.metalType
+        return """
+        kernel void \(name)(
+            device \(bt)* hidden               [[buffer(0)]],
+            device const float* delta          [[buffer(1)]],
+            constant uint& count               [[buffer(2)]],
+            uint gid                           [[thread_position_in_grid]]
+        ) {
+            if (gid >= count) return;
+            hidden[gid] = \(bt)(float(hidden[gid]) + delta[gid]);
+        }
+        """
     }
 
     /// Generate MSL source for residual add.

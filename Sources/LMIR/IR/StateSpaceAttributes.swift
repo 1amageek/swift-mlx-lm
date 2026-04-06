@@ -49,6 +49,9 @@ public struct StateSpaceAttributes: OperationAttributes, Codable, Equatable {
     /// Per-head value dimension (dv). Controls the "memory content" width.
     public let valueHeadDim: Int
 
+    /// Convolution kernel size used by the projected state prefilter.
+    public let convKernelSize: Int
+
     /// SSM variant identifier (e.g., "mamba", "deltanet").
     public let variant: String
 
@@ -82,6 +85,7 @@ public struct StateSpaceAttributes: OperationAttributes, Codable, Equatable {
 
     public init(
         hiddenSize: Int, numHeads: Int, groupCount: Int? = nil, keyHeadDim: Int, valueHeadDim: Int,
+        convKernelSize: Int = 1,
         variant: String, computeDType: ComputeDType = .float32
     ) {
         self.hiddenSize = hiddenSize
@@ -89,6 +93,7 @@ public struct StateSpaceAttributes: OperationAttributes, Codable, Equatable {
         self.groupCount = groupCount ?? numHeads
         self.keyHeadDim = keyHeadDim
         self.valueHeadDim = valueHeadDim
+        self.convKernelSize = convKernelSize
         self.variant = variant
         self.computeDType = computeDType
     }

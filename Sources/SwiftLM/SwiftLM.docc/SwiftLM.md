@@ -10,7 +10,8 @@ The public entry points are:
 
 - ``ModelBundleLoader`` to load and compile a model
 - ``ModelContainer`` to prepare prompts and stream generations
-- ``UserInput`` and ``ChatMessage`` for text and chat prompts
+- ``ModelInput`` and ``InputMessage`` for text, chat, and Qwen-style multimodal prompt preparation
+- ``PreparedInput`` and ``ExecutablePrompt`` for the explicit prepare/execute boundary
 - ``GenerateParameters`` to control decoding behavior
 - ``PromptState`` to reuse prompt prefixes efficiently
 
@@ -26,8 +27,12 @@ The public entry points are:
 
 - ``ModelBundleLoader``
 - ``ModelContainer``
-- ``UserInput``
-- ``ChatMessage``
+- ``ModelInput``
+- ``PreparedInput``
+- ``ExecutablePrompt``
+- ``InputMessage``
+- ``InputImage``
+- ``InputVideo``
 - ``GenerateParameters``
 - ``Generation``
 - ``CompletionInfo``
@@ -35,7 +40,6 @@ The public entry points are:
 
 ### Supporting Types
 
-- ``LMInput``
 - ``ModelConfiguration``
 - ``ModelBundleLoaderError``
 - ``ModelContainerError``

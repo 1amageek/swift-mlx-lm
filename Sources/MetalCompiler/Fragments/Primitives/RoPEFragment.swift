@@ -1,4 +1,5 @@
 import Metal
+import LMIR
 
 /// Rotary position embedding (in-place on Q and K).
 public struct RoPEFragment: PrimitiveMetalKernelFragment {
@@ -7,14 +8,16 @@ public struct RoPEFragment: PrimitiveMetalKernelFragment {
     public let headDimension: Int
     public let ropeDimension: Int
     public let base: Float
+    public let mropeAxes: MRoPEAxes?
 
     public init(headCount: Int, kvHeadCount: Int, headDimension: Int,
-                ropeDimension: Int, base: Float) {
+                ropeDimension: Int, base: Float, mropeAxes: MRoPEAxes? = nil) {
         self.headCount = headCount
         self.kvHeadCount = kvHeadCount
         self.headDimension = headDimension
         self.ropeDimension = ropeDimension
         self.base = base
+        self.mropeAxes = mropeAxes
     }
 
     public var isFusable: Bool { false }
@@ -38,7 +41,7 @@ public struct RoPEFragment: PrimitiveMetalKernelFragment {
             buffers: [
                 (0, context.bufferSet.scratch, 1 * slotBytes),
                 (1, context.bufferSet.scratch, 2 * slotBytes),
-                (2, context.bufferSet.position, 0),
+                (2, context.bufferSet.ropePositionAxes, 0),
             ],
             bytes: [
                 uint32Binding(3, UInt32(headCount)),
@@ -46,6 +49,10 @@ public struct RoPEFragment: PrimitiveMetalKernelFragment {
                 uint32Binding(5, UInt32(headDimension)),
                 uint32Binding(6, UInt32(ropeDimension)),
                 floatBinding(7, base),
+                uint32Binding(8, UInt32(sectionCount(at: 0))),
+                uint32Binding(9, UInt32(sectionCount(at: 1))),
+                uint32Binding(10, UInt32(sectionCount(at: 2))),
+                uint32Binding(11, UInt32(mropeAxes?.interleaved == true ? 1 : 0)),
             ],
             outputIsHidden: false
         )
@@ -65,7 +72,7 @@ public struct RoPEFragment: PrimitiveMetalKernelFragment {
                 bufferBindings: [
                     (0, context.buffers.scratch, 1 * scratchSlotSize),
                     (1, context.buffers.scratch, 2 * scratchSlotSize),
-                    (2, context.buffers.positions, 0),
+                    (2, context.buffers.ropePositionAxes, 0),
                 ],
                 bytesBindings: [
                     uint32Binding(3, UInt32(headCount)),
@@ -73,16 +80,27 @@ public struct RoPEFragment: PrimitiveMetalKernelFragment {
                     uint32Binding(5, UInt32(headDimension)),
                     uint32Binding(6, UInt32(ropeDimension)),
                     floatBinding(7, base),
-                    uint32Binding(8, UInt32(context.maximumSequenceLength)),
+                    uint32Binding(8, UInt32(sectionCount(at: 0))),
+                    uint32Binding(9, UInt32(sectionCount(at: 1))),
+                    uint32Binding(10, UInt32(sectionCount(at: 2))),
+                    uint32Binding(11, UInt32(mropeAxes?.interleaved == true ? 1 : 0)),
+                    uint32Binding(12, UInt32(context.maximumSequenceLength)),
                 ],
                 threadgroupMemoryLength: 0,
                 sync: .bufferBarrier,
                 mode: .batch,
-                sequenceLengthPolicy: .bindAndAdjustGridHeight(index: 8),
+                sequenceLengthPolicy: .bindAndAdjustGridHeight(index: 12),
                 positionBufferIndex: nil,
                 perPositionStrides: [:]
             )],
             outputIsHidden: false
         )
+    }
+
+    private func sectionCount(at index: Int) -> Int {
+        guard let mropeAxes, index < mropeAxes.sections.count else {
+            return 0
+        }
+        return mropeAxes.sections[index]
     }
 }

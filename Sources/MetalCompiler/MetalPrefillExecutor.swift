@@ -14,12 +14,12 @@ struct MetalPrefillExecutor: Sendable {
         guard tokens.count <= prefillPlan.maximumSequenceLength else { return -1 }
 
         let sequenceLength = tokens.count
-        let tokenPointer = prefillPlan.buffers.tokenIDs.contents().bindMemory(to: Int32.self, capacity: sequenceLength)
-        let positionPointer = prefillPlan.buffers.positions.contents().bindMemory(to: UInt32.self, capacity: sequenceLength)
-        for index in 0..<sequenceLength {
-            tokenPointer[index] = tokens[index]
-            positionPointer[index] = UInt32(position + index)
-        }
+        populatePrefillInputs(
+            prefillPlan: prefillPlan,
+            position: position,
+            tokens: tokens,
+            ropePositionAxesByTokenIndex: nil
+        )
 
         var transferPlan = transferPlanner.makeTransferPlan(
             prefillPlan: prefillPlan,
@@ -100,6 +100,124 @@ struct MetalPrefillExecutor: Sendable {
         return prefillPlan.buffers.tokenOut.contents().bindMemory(to: Int32.self, capacity: 1).pointee
     }
 
+    func prefill(
+        prefillPlan: MetalPrefillPlan,
+        decodePlan: MetalDispatchPlan,
+        submission: MetalSubmissionContext,
+        position: inout Int,
+        tokens: [Int32],
+        ropePositionAxesByTokenIndex: [(UInt32, UInt32, UInt32)],
+        hiddenOverridesByTokenIndex: [Int: [Float]],
+        deepstackFeaturesByLayerAndTokenIndex: [Int: [Int: [Float]]]
+    ) throws -> Int32 {
+        guard !tokens.isEmpty else { return -1 }
+        guard tokens.count <= prefillPlan.maximumSequenceLength else { return -1 }
+
+        let sequenceLength = tokens.count
+        populatePrefillInputs(
+            prefillPlan: prefillPlan,
+            position: position,
+            tokens: tokens,
+            ropePositionAxesByTokenIndex: ropePositionAxesByTokenIndex
+        )
+
+        let layerStepIndices = firstStepIndicesByLayer(in: prefillPlan.steps)
+        let embeddingPrefixEnd = firstLayerStepIndex(in: prefillPlan.steps) ?? prefillPlan.steps.count
+
+        if embeddingPrefixEnd > 0 {
+            _ = try submission.withCompute(label: "prefill.embedding") { encoder in
+                encodePrefillSteps(
+                    encoder: encoder,
+                    prefillPlan: prefillPlan,
+                    basePosition: position,
+                    sequenceLength: sequenceLength,
+                    range: 0..<embeddingPrefixEnd
+                )
+            }
+        }
+
+        try overwriteHiddenRows(
+            overridesByTokenIndex: hiddenOverridesByTokenIndex,
+            prefillPlan: prefillPlan,
+            sequenceLength: sequenceLength
+        )
+
+        var currentStepIndex = embeddingPrefixEnd
+        for layerIndex in deepstackFeaturesByLayerAndTokenIndex.keys.sorted() {
+            guard let layerStepIndex = layerStepIndices[layerIndex] else {
+                throw MetalCompilerError.deviceSetupFailed(
+                    "Missing prefill step range for deepstack layer \(layerIndex)"
+                )
+            }
+            if currentStepIndex < layerStepIndex {
+                _ = try submission.withCompute(label: "prefill.range.\(currentStepIndex)") { encoder in
+                    encodePrefillSteps(
+                        encoder: encoder,
+                        prefillPlan: prefillPlan,
+                        basePosition: position,
+                        sequenceLength: sequenceLength,
+                        range: currentStepIndex..<layerStepIndex
+                    )
+                }
+            }
+            try addDeepstackRows(
+                featuresByTokenIndex: deepstackFeaturesByLayerAndTokenIndex[layerIndex] ?? [:],
+                prefillPlan: prefillPlan,
+                sequenceLength: sequenceLength
+            )
+            currentStepIndex = layerStepIndex
+        }
+
+        if currentStepIndex < prefillPlan.steps.count {
+            _ = try submission.withCompute(label: "prefill.tail") { encoder in
+                encodePrefillSteps(
+                    encoder: encoder,
+                    prefillPlan: prefillPlan,
+                    basePosition: position,
+                    sequenceLength: sequenceLength,
+                    range: currentStepIndex..<prefillPlan.steps.count
+                )
+            }
+        }
+
+        let transferPlan = transferPlanner.makeTransferPlan(
+            prefillPlan: prefillPlan,
+            decodePlan: decodePlan,
+            sequenceLength: sequenceLength
+        )
+
+        stageHiddenIfNeeded(
+            transferPlan: transferPlan,
+            prefillPlan: prefillPlan,
+            decodePlan: decodePlan
+        )
+
+        if transferPlan.needsStandaloneBlit {
+            try submission.withBlit(label: "prefill.postprocess") { blit in
+                if transferPlan.shouldStageHiddenOnCPU {
+                    blit.copy(
+                        from: prefillPlan.buffers.scratch,
+                        sourceOffset: 0,
+                        to: decodePlan.buffers.hidden,
+                        destinationOffset: 0,
+                        size: transferPlan.hiddenCopySize
+                    )
+                }
+                encodePostPrefillCopies(
+                    blit: blit,
+                    prefillPlan: prefillPlan,
+                    decodePlan: decodePlan,
+                    transferPlan: transferPlan.shouldStageHiddenOnCPU
+                        ? transferPlan.withoutHiddenCopy()
+                        : transferPlan
+                )
+            }
+        }
+
+        position += sequenceLength
+        return prefillPlan.buffers.tokenOut.contents().bindMemory(to: Int32.self, capacity: 1).pointee
+    }
+
     private func stageHiddenIfNeeded(
         transferPlan: PostPrefillTransferPlan,
         prefillPlan: MetalPrefillPlan,
@@ -164,9 +282,16 @@ struct MetalPrefillExecutor: Sendable {
         encoder: MTLComputeCommandEncoder,
         prefillPlan: MetalPrefillPlan,
         basePosition: Int,
-        sequenceLength: Int
+        sequenceLength: Int,
+        range: Range<Int>? = nil
     ) {
-        for step in prefillPlan.steps {
+        let steps: ArraySlice<MetalPrefillStep>
+        if let range {
+            steps = prefillPlan.steps[range]
+        } else {
+            steps = prefillPlan.steps[...]
+        }
+        for step in steps {
             switch step.mode {
             case .batch:
                 encodeBatchStep(
@@ -193,6 +318,87 @@ struct MetalPrefillExecutor: Sendable {
                     }
                     encoder.dispatchThreadgroups(step.gridSize, threadsPerThreadgroup: step.threadgroupSize)
                 }
+            }
+        }
+    }
+
+    private func populatePrefillInputs(
+        prefillPlan: MetalPrefillPlan,
+        position: Int,
+        tokens: [Int32],
+        ropePositionAxesByTokenIndex: [(UInt32, UInt32, UInt32)]?
+    ) {
+        let sequenceLength = tokens.count
+        let tokenPointer = prefillPlan.buffers.tokenIDs.contents().bindMemory(to: Int32.self, capacity: sequenceLength)
+        let positionPointer = prefillPlan.buffers.positions.contents().bindMemory(to: UInt32.self, capacity: sequenceLength)
+        let ropeAxesPointer = prefillPlan.buffers.ropePositionAxes.contents()
+            .bindMemory(to: UInt32.self, capacity: sequenceLength * 3)
+        for index in 0..<sequenceLength {
+            tokenPointer[index] = tokens[index]
+            let absolutePosition = UInt32(position + index)
+            positionPointer[index] = absolutePosition
+            let axes = ropePositionAxesByTokenIndex?[index] ?? (absolutePosition, absolutePosition, absolutePosition)
+            ropeAxesPointer[index * 3] = axes.0
+            ropeAxesPointer[index * 3 + 1] = axes.1
+            ropeAxesPointer[index * 3 + 2] = axes.2
+        }
+    }
+
+    private func firstLayerStepIndex(in steps: [MetalPrefillStep]) -> Int? {
+        steps.firstIndex { $0.metadata.layerIndex != nil }
+    }
+
+    private func firstStepIndicesByLayer(in steps: [MetalPrefillStep]) -> [Int: Int] {
+        var indices: [Int: Int] = [:]
+        for (index, step) in steps.enumerated() {
+            if let layerIndex = step.metadata.layerIndex, indices[layerIndex] == nil {
+                indices[layerIndex] = index
+            }
+        }
+        return indices
+    }
+
+    private func overwriteHiddenRows(
+        overridesByTokenIndex: [Int: [Float]],
+        prefillPlan: MetalPrefillPlan,
+        sequenceLength: Int
+    ) throws {
+        guard !overridesByTokenIndex.isEmpty else { return }
+        let hiddenStride = prefillPlan.buffers.hidden.length
+            / MemoryLayout<Float>.stride
+            / prefillPlan.maximumSequenceLength
+        let hiddenPointer = prefillPlan.buffers.hidden.contents().bindMemory(to: Float.self, capacity: hiddenStride * sequenceLength)
+        for (tokenIndex, values) in overridesByTokenIndex {
+            guard tokenIndex >= 0, tokenIndex < sequenceLength else {
+                throw MetalCompilerError.deviceSetupFailed("Hidden override token index out of range")
+            }
+            guard values.count == hiddenStride else {
+                throw MetalCompilerError.deviceSetupFailed("Hidden override dimension mismatch")
+            }
+            (hiddenPointer + tokenIndex * hiddenStride).update(from: values, count: hiddenStride)
+        }
+    }
+
+    private func addDeepstackRows(
+        featuresByTokenIndex: [Int: [Float]],
+        prefillPlan: MetalPrefillPlan,
+        sequenceLength: Int
+    ) throws {
+        guard !featuresByTokenIndex.isEmpty else { return }
+        let hiddenStride = prefillPlan.buffers.hidden.length
+            / MemoryLayout<Float>.stride
+            / prefillPlan.maximumSequenceLength
+        let hiddenPointer = prefillPlan.buffers.hidden.contents().bindMemory(to: Float.self, capacity: hiddenStride * sequenceLength)
+        for (tokenIndex, values) in featuresByTokenIndex {
+            guard tokenIndex >= 0, tokenIndex < sequenceLength else {
+                throw MetalCompilerError.deviceSetupFailed("Deepstack token index out of range")
+            }
+            guard values.count == hiddenStride else {
+                throw MetalCompilerError.deviceSetupFailed("Deepstack feature dimension mismatch")
+            }
+            let rowPointer = hiddenPointer + tokenIndex * hiddenStride
+            for elementIndex in 0..<hiddenStride {
+                rowPointer[elementIndex] += values[elementIndex]
             }
         }
     }
@@ -237,6 +443,17 @@ struct MetalPrefillExecutor: Sendable {
            let prefillConvState = prefillPlan.buffers.convState,
            let decodeConvState = decodePlan.buffers.convState {
             blit.copy(from: prefillConvState, sourceOffset: 0, to: decodeConvState, destinationOffset: 0, size: transferPlan.convCopySize)
+        }
+        if transferPlan.recurrentCopySize > 0,
+           let prefillRecurrentState = prefillPlan.buffers.recurrentState,
+           let decodeRecurrentState = decodePlan.buffers.recurrentState {
+            blit.copy(
+                from: prefillRecurrentState,
+                sourceOffset: 0,
+                to: decodeRecurrentState,
+                destinationOffset: 0,
+                size: transferPlan.recurrentCopySize
+            )
         }
     }
 }

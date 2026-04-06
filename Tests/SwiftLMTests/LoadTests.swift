@@ -33,7 +33,7 @@ struct LoadTests {
     func convertToSTAF() throws {
         guard let directory = try findModelDirectoryOrSkip() else { return }
         let safetensorsURLs = try findSafetensorsFiles(in: directory)
-        let stafURL = try makeTemporarySTAFURL(testName: "convert")
+        guard let stafURL = try makeTemporarySTAFURLOrSkip(testName: "convert") else { return }
         defer {
             do {
                 try removeIfExists(stafURL)
@@ -101,7 +101,7 @@ struct LoadTests {
 
         guard let directory = try findModelDirectoryOrSkip() else { return }
         let safetensorsURLs = try findSafetensorsFiles(in: directory)
-        let stafURL = try makeTemporarySTAFURL(testName: "load")
+        guard let stafURL = try makeTemporarySTAFURLOrSkip(testName: "load") else { return }
         defer {
             do {
                 try removeIfExists(stafURL)
@@ -137,6 +137,112 @@ struct LoadTests {
         #expect(config.vocabSize > 0)
     }
 
+    @Test("Parse Gemma4 nested text_config")
+    func parseGemma4Config() throws {
+        let configJSON = """
+        {
+          "model_type": "gemma4",
+          "text_config": {
+            "model_type": "gemma4_text",
+            "hidden_size": 1536,
+            "num_hidden_layers": 35,
+            "intermediate_size": 6144,
+            "vocab_size": 262144,
+            "num_attention_heads": 8,
+            "num_key_value_heads": 1,
+            "head_dim": 256,
+            "rms_norm_eps": 1.0e-6,
+            "tie_word_embeddings": true,
+            "attention_bias": false,
+            "mlp_bias": false,
+            "sliding_window": 512,
+            "layer_types": ["sliding_attention", "full_attention"],
+            "hidden_size_per_layer_input": 256,
+            "vocab_size_per_layer_input": 262144,
+            "global_head_dim": 512,
+            "num_kv_shared_layers": 20,
+            "use_double_wide_mlp": true,
+            "attention_k_eq_v": false,
+            "rope_parameters": {
+              "sliding_attention": {
+                "rope_theta": 10000.0,
+                "rope_type": "default"
+              },
+              "full_attention": {
+                "rope_theta": 1000000.0,
+                "partial_rotary_factor": 0.25,
+                "rope_type": "proportional"
+              }
+            }
+          }
+        }
+        """
+
+        let configData = try #require(configJSON.data(using: .utf8))
+        let config = try HFConfigDecoder().decode(from: configData)
+        let modelType = try HFConfigDecoder().modelType(from: configData)
+
+        #expect(modelType == "gemma4")
+        #expect(config.hiddenSize == 1536)
+        #expect(config.layerCount == 35)
+        #expect(config.hiddenSizePerLayerInput == 256)
+        #expect(config.vocabSizePerLayerInput == 262144)
+        #expect(config.globalHeadDim == 512)
+        #expect(config.numKVSharedLayers == 20)
+        #expect(config.useDoubleWideMLP == true)
+        #expect(config.fullAttentionRopeTheta == 1_000_000.0)
+        #expect(config.fullAttentionPartialRotaryFactor == 0.25)
+        #expect(config.fullAttentionRoPEScaling?.kind == .custom("proportional"))
+    }
+
+    @Test("Resolve Gemma4 parameter bindings")
+    func resolveGemma4Parameters() throws {
+        let config = ModelConfig(
+            hiddenSize: 1536, layerCount: 2, intermediateSize: 6144, vocabSize: 262144,
+            attentionHeads: 8, kvHeads: 1, headDim: 256,
+            attentionBias: false, mlpBias: false,
+            normEps: 1e-6, normKind: .rmsNorm,
+            ropeTheta: 10_000.0, ropeDimension: 256, ropeScaling: nil,
+            tiedEmbeddings: true,
+            expertCount: nil, expertsPerToken: nil,
+            qkNorm: true,
+            fullAttentionInterval: nil,
+            ssmNumHeads: nil, ssmKeyHeadDim: nil, ssmValueHeadDim: nil,
+            convKernelSize: nil, partialRotaryFactor: nil, slidingWindow: 512,
+            layerTypes: ["sliding_attention", "full_attention"],
+            hiddenSizePerLayerInput: 256,
+            vocabSizePerLayerInput: 262144,
+            globalHeadDim: 512,
+            globalKVHeads: nil,
+            numKVSharedLayers: 1,
+            useDoubleWideMLP: true,
+            attentionKEqualsV: false,
+            fullAttentionRopeTheta: 1_000_000.0,
+            fullAttentionPartialRotaryFactor: 0.25,
+            fullAttentionRoPEScaling: RoPEScaling(kind: .custom("proportional"), factor: 1.0)
+        )
+
+        let graph = try Gemma4(config: config).makeModelGraph()
+        let resolved = ParameterResolver().resolve(graph: graph, convention: .gemma4Family)
+
+        let repeatingLayers = resolved.rootRegion.operations.compactMap { operation -> Region? in
+            guard case .repeating(count: 1, let body) = operation.kind else { return nil }
+            return body
+        }
+        #expect(repeatingLayers.count == 2)
+
+        let firstLayerBindings = collectTensorNames(in: repeatingLayers[0])
+        #expect(firstLayerBindings.contains("model.language_model.layers.0.input_layernorm.weight"))
+        #expect(firstLayerBindings.contains("model.language_model.layers.0.pre_feedforward_layernorm.weight"))
+        #expect(firstLayerBindings.contains("model.language_model.layers.0.self_attn.q_proj.weight"))
+        #expect(firstLayerBindings.contains("model.language_model.layers.0.self_attn.k_norm.weight"))
+        #expect(firstLayerBindings.contains("model.language_model.layers.0.mlp.gate_proj.weight"))
+        #expect(firstLayerBindings.contains("model.language_model.layers.0.per_layer_input_gate.weight"))
+        #expect(firstLayerBindings.contains("model.language_model.embed_tokens_per_layer.weight"))
+        #expect(firstLayerBindings.contains("model.language_model.per_layer_model_projection.weight"))
+        #expect(firstLayerBindings.contains("model.language_model.per_layer_projection_norm.weight"))
+    }
+
     // MARK: - Step 5: IR Build
 
     @Test("Build ModelGraph from config")
@@ -150,7 +256,7 @@ struct LoadTests {
         switch modelType.lowercased() {
         case "lfm2":
             graph = try LFM2(config: config).makeModelGraph()
-        case "qwen3_5":
+        case "qwen3_5", "qwen3_vl", "qwen2_5_vl", "qwen2_vl":
             graph = try Qwen35(config: config).makeModelGraph()
         default:
             graph = try Transformer(config: config).makeModelGraph()
@@ -236,10 +342,16 @@ struct LoadTests {
                 continue
             }
 
-            let contents = try FileManager.default.contentsOfDirectory(
-                at: directory,
-                includingPropertiesForKeys: nil
-            )
+            let contents: [URL]
+            do {
+                contents = try FileManager.default.contentsOfDirectory(
+                    at: directory,
+                    includingPropertiesForKeys: nil
+                )
+            } catch {
+                print("[LoadTests] Skip inaccessible local test bundle candidate: \(candidate) (\(error))")
+                continue
+            }
             let hasSafetensors = contents.contains { $0.pathExtension == "safetensors" }
             guard hasSafetensors else { continue }
 
@@ -272,10 +384,15 @@ struct LoadTests {
             let configPath = snapshot.appendingPathComponent("config.json")
             guard FileManager.default.fileExists(atPath: configPath.path) else { continue }
 
-            let contents = try FileManager.default.contentsOfDirectory(
-                at: snapshot,
-                includingPropertiesForKeys: nil
-            )
+            let contents: [URL]
+            do {
+                contents = try FileManager.default.contentsOfDirectory(
+                    at: snapshot,
+                    includingPropertiesForKeys: nil
+                )
+            } catch {
+                continue
+            }
             let hasSafetensors = contents.contains { $0.pathExtension == "safetensors" }
             guard hasSafetensors else { continue }
 
@@ -326,13 +443,35 @@ struct LoadTests {
         }
     }
 
-    private func makeTemporarySTAFURL(testName: String) throws -> URL {
+    private func makeTemporarySTAFURLOrSkip(testName: String) throws -> URL? {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("swift-lm-load-tests", isDirectory: true)
+        if !hasSufficientTemporaryDiskSpace(for: directory, minimumBytes: 4 * 1024 * 1024 * 1024) {
+            print("[Skip] Not enough temporary disk space for STAF conversion test")
+            return nil
+        }
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         return directory
             .appendingPathComponent("\(testName)-\(UUID().uuidString)")
             .appendingPathExtension("staf")
+    }
+
+    private func hasSufficientTemporaryDiskSpace(for directory: URL, minimumBytes: Int64) -> Bool {
+        do {
+            let resourceValues = try directory.resourceValues(forKeys: [
+                .volumeAvailableCapacityForImportantUsageKey,
+                .volumeAvailableCapacityKey,
+            ])
+            if let available = resourceValues.volumeAvailableCapacityForImportantUsage {
+                return available >= minimumBytes
+            }
+            if let available = resourceValues.volumeAvailableCapacity {
+                return Int64(available) >= minimumBytes
+            }
+            return true
+        } catch {
+            return true
+        }
     }
 
     private func removeIfExists(_ url: URL) throws {
@@ -340,4 +479,27 @@ struct LoadTests {
             try FileManager.default.removeItem(at: url)
         }
     }
+}
+
+private func collectTensorNames(in region: Region) -> Set<String> {
+    var tensorNames = Set<String>()
+    for operation in region.operations {
+        for binding in operation.parameterBindings {
+            tensorNames.insert(binding.tensorName)
+        }
+        switch operation.kind {
+        case .residual(_, let body), .repeating(_, let body):
+            tensorNames.formUnion(collectTensorNames(in: body))
+        case .conditional(_, let thenBody, let elseBody):
+            tensorNames.formUnion(collectTensorNames(in: thenBody))
+            tensorNames.formUnion(collectTensorNames(in: elseBody))
+        case .parallel(_, let branches):
+            for branch in branches {
+                tensorNames.formUnion(collectTensorNames(in: branch))
+            }
+        case .primitive:
+            break
+        }
+    }
+    return tensorNames
 }

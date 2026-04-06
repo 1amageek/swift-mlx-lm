@@ -34,6 +34,7 @@ xcodebuild test -scheme swift-lm-Package -destination 'platform=macOS' -only-tes
 Important:
 
 - Prefer `xcodebuild test` over `swift test` for this repository.
+- For the Qwen3.5+ multimodal suites, prefer [`scripts/run-qwen35-vision-tests.sh`](/Users/1amageek/Desktop/swift-lm/scripts/run-qwen35-vision-tests.sh) over a single large `xcodebuild test` invocation. It uses `build-for-testing` once and then runs `test-without-building` suite-by-suite to reduce peak memory pressure.
 - Metal-dependent tests and generated libraries are exercised via the package Xcode scheme.
 - Repository targets currently declare Swift tools `6.2` and platforms `.macOS(.v26)`, `.iOS(.v26)`, `.visionOS(.v26)` in [Package.swift](/Users/1amageek/Desktop/swift-lm/Package.swift).
 
@@ -101,9 +102,10 @@ HF repo or local directory
 Generation path:
 
 ```text
-UserInput
-  ├─ prepare(input:)            → text prompt or chat-template rendering
-  ├─ tokenizer.encode(...)      → LMInput(tokens:)
+ModelInput
+  ├─ await prepare(input:)      → text prompt or chat-template rendering
+  ├─ tokenizer.encode(...)      → PreparedInput(tokenIDs:)
+  ├─ makeExecutablePrompt(...)  → ExecutablePrompt(tokenIDs:)
   ├─ prefill(tokens:)           → fill KV/conv cache, emit first token
   └─ decodeSync(tokenID:)       → iterative token generation
 ```
@@ -227,15 +229,15 @@ These are the major declaration paths visible in the repository today.
 Current `SwiftLM` public API is intentionally thin.
 
 - `ModelBundleLoader.load(repo:)` downloads a HuggingFace snapshot and delegates to `load(directory:)`.
-- `ModelContainer.prepare(input:)` is synchronous and currently text-only/chat-only prompt preparation.
+- `ModelContainer.prepare(input:)` is async and now prepares text/chat prompts plus Qwen-style image-bearing and video-bearing chat prompts.
 - `ModelContainer.generate(input:parameters:)` returns `AsyncStream<Generation>`.
-- `LMInput` currently carries tokenized text input only.
+- `PreparedInput` carries rendered prompt text, token IDs, and optional multimodal prompt metadata.
+- `ExecutablePrompt` carries the validated runtime input accepted by the current Metal execution path, including Qwen-style multimodal execution payloads when supported by the loaded bundle.
 
 Do not reintroduce stale assumptions from older designs:
 
 - no GGUF loader types
 - no MLX execution engine
-- no VLM image/video input pipeline in the current public API
 - no async `preparePrefix`
 - no `perform(values:operation:)`
 
@@ -267,6 +269,17 @@ Use tests appropriate to the layer being changed.
   - config decoding
   - safetensors/STAF integration
   - end-to-end graph construction and compile entry points
+  - Qwen3.5+ multimodal coverage is split into focused suites:
+    - `QwenVisionCapabilityTests`
+    - `QwenVisionPromptProcessorTests`
+    - `QwenVisionExecutionLayoutTests`
+    - `QwenVisionEncoderTests`
+    - `QwenVisionExecutionTests`
+    - `QwenVisionIntegrationTests`
+    - `QwenVisionRealBundleImageTests`
+    - `QwenVisionRealBundleVideoTests`
+    - `QwenVisionRealBundleMixedTests`
+    - `QwenVisionRealBundlePromptStateTests` for optional local snapshot coverage
 
 - `MetalCompilerTests`
   - lowering
@@ -278,6 +291,7 @@ Use tests appropriate to the layer being changed.
 For performance or correctness work on Metal execution:
 
 - prefer focused target/test execution over full-suite runs
+- for the Qwen3.5+ multimodal path, prefer the focused `SwiftLMTests` suites above over `-only-testing:SwiftLMTests`
 - keep timeouts in mind
 - when a test hangs, suspect cache/state completion, synchronization, or unfinished stream/state transitions before assuming the compiler is wrong
 

@@ -74,6 +74,38 @@ public struct ModelConfig: Sendable {
     /// When present, takes precedence over `fullAttentionInterval`.
     public let layerTypes: [String]?
 
+    // MARK: Gemma 4 Hybrid Text (optional)
+
+    /// Hidden width of Gemma 4 per-layer input embeddings.
+    public let hiddenSizePerLayerInput: Int?
+
+    /// Vocabulary size of Gemma 4 per-layer input embeddings.
+    public let vocabSizePerLayerInput: Int?
+
+    /// Head dimension used by Gemma 4 full-attention layers.
+    public let globalHeadDim: Int?
+
+    /// KV head count used by Gemma 4 full-attention layers when different from `kvHeads`.
+    public let globalKVHeads: Int?
+
+    /// Number of trailing Gemma 4 layers that share KV cache state.
+    public let numKVSharedLayers: Int?
+
+    /// Whether Gemma 4 doubles MLP width on KV-shared layers.
+    public let useDoubleWideMLP: Bool
+
+    /// Whether Gemma 4 full-attention layers use alternative K=V attention.
+    public let attentionKEqualsV: Bool
+
+    /// RoPE theta for Gemma 4 full-attention layers.
+    public let fullAttentionRopeTheta: Float?
+
+    /// Partial rotary factor for Gemma 4 full-attention layers.
+    public let fullAttentionPartialRotaryFactor: Float?
+
+    /// RoPE scaling metadata for Gemma 4 full-attention layers.
+    public let fullAttentionRoPEScaling: RoPEScaling?
+
     // MARK: Dense/MoE Layer Boundary
 
     /// Number of leading layers that use dense MLP instead of MoE.
@@ -111,6 +143,16 @@ public struct ModelConfig: Sendable {
             convKernelSize: convKernelSize, convLCache: convLCache,
             partialRotaryFactor: partialRotaryFactor,
             slidingWindow: slidingWindow, layerTypes: layerTypes,
+            hiddenSizePerLayerInput: hiddenSizePerLayerInput,
+            vocabSizePerLayerInput: vocabSizePerLayerInput,
+            globalHeadDim: globalHeadDim,
+            globalKVHeads: globalKVHeads,
+            numKVSharedLayers: numKVSharedLayers,
+            useDoubleWideMLP: useDoubleWideMLP,
+            attentionKEqualsV: attentionKEqualsV,
+            fullAttentionRopeTheta: fullAttentionRopeTheta,
+            fullAttentionPartialRotaryFactor: fullAttentionPartialRotaryFactor,
+            fullAttentionRoPEScaling: fullAttentionRoPEScaling,
             numDenseLayers: numDenseLayers,
             mropeAxes: axes
         )
@@ -146,6 +188,16 @@ public struct ModelConfig: Sendable {
         partialRotaryFactor: Float?,
         slidingWindow: Int?,
         layerTypes: [String]? = nil,
+        hiddenSizePerLayerInput: Int? = nil,
+        vocabSizePerLayerInput: Int? = nil,
+        globalHeadDim: Int? = nil,
+        globalKVHeads: Int? = nil,
+        numKVSharedLayers: Int? = nil,
+        useDoubleWideMLP: Bool = false,
+        attentionKEqualsV: Bool = false,
+        fullAttentionRopeTheta: Float? = nil,
+        fullAttentionPartialRotaryFactor: Float? = nil,
+        fullAttentionRoPEScaling: RoPEScaling? = nil,
         numDenseLayers: Int = 0,
         mropeAxes: MRoPEAxes? = nil
     ) {
@@ -178,6 +230,16 @@ public struct ModelConfig: Sendable {
         self.partialRotaryFactor = partialRotaryFactor
         self.slidingWindow = slidingWindow
         self.layerTypes = layerTypes
+        self.hiddenSizePerLayerInput = hiddenSizePerLayerInput
+        self.vocabSizePerLayerInput = vocabSizePerLayerInput
+        self.globalHeadDim = globalHeadDim
+        self.globalKVHeads = globalKVHeads
+        self.numKVSharedLayers = numKVSharedLayers
+        self.useDoubleWideMLP = useDoubleWideMLP
+        self.attentionKEqualsV = attentionKEqualsV
+        self.fullAttentionRopeTheta = fullAttentionRopeTheta
+        self.fullAttentionPartialRotaryFactor = fullAttentionPartialRotaryFactor
+        self.fullAttentionRoPEScaling = fullAttentionRoPEScaling
         self.numDenseLayers = numDenseLayers
         self.mropeAxes = mropeAxes
     }

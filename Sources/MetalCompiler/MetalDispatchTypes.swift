@@ -94,18 +94,22 @@ public struct BufferBindingContext: @unchecked Sendable {
     public let bufferSet: MetalBufferSet
     public let slotDimension: Int
     public let elementSize: Int
+    public let layerIndex: Int?
     public let kvCacheIndex: Int
     public let convLayerIndex: Int
+    public let recurrentLayerIndex: Int
     public let resolveWeight: (String) -> (buffer: MTLBuffer, offset: Int)
 
     public init(bufferSet: MetalBufferSet, slotDimension: Int, elementSize: Int,
-                kvCacheIndex: Int, convLayerIndex: Int,
+                layerIndex: Int?, kvCacheIndex: Int, convLayerIndex: Int, recurrentLayerIndex: Int,
                 resolveWeight: @escaping (String) -> (buffer: MTLBuffer, offset: Int)) {
         self.bufferSet = bufferSet
         self.slotDimension = slotDimension
         self.elementSize = elementSize
+        self.layerIndex = layerIndex
         self.kvCacheIndex = kvCacheIndex
         self.convLayerIndex = convLayerIndex
+        self.recurrentLayerIndex = recurrentLayerIndex
         self.resolveWeight = resolveWeight
     }
 }
@@ -123,19 +127,23 @@ public struct FragmentBindings: @unchecked Sendable {
     public let consumesKVCacheLayer: Bool
     /// Whether this fragment consumes a conv state layer slot.
     public let consumesConvLayer: Bool
+    /// Whether this fragment consumes a recurrent state layer slot.
+    public let consumesRecurrentLayer: Bool
 
     public init(buffers: [(index: Int, buffer: MTLBuffer, offset: Int)],
                 bytes: [(index: Int, value: [UInt8])],
                 outputIsHidden: Bool,
                 resetsProjectionIndex: Bool = false,
                 consumesKVCacheLayer: Bool = false,
-                consumesConvLayer: Bool = false) {
+                consumesConvLayer: Bool = false,
+                consumesRecurrentLayer: Bool = false) {
         self.buffers = buffers
         self.bytes = bytes
         self.outputIsHidden = outputIsHidden
         self.resetsProjectionIndex = resetsProjectionIndex
         self.consumesKVCacheLayer = consumesKVCacheLayer
         self.consumesConvLayer = consumesConvLayer
+        self.consumesRecurrentLayer = consumesRecurrentLayer
     }
 }
 
@@ -148,14 +156,16 @@ public struct PrefillBindingContext: @unchecked Sendable {
     public let slotDimension: Int
     public let scratchElementSize: Int
     public let maximumSequenceLength: Int
+    public let layerIndex: Int?
     public let kvCacheIndex: Int
     public let convLayerIndex: Int
+    public let recurrentLayerIndex: Int
     public let kernelContext: KernelContext
     public let resolveWeight: (String) -> (buffer: MTLBuffer, offset: Int)
     public let getPipeline: (String) throws -> MTLComputePipelineState
 
     public init(buffers: PrefillBufferSet, slotDimension: Int, scratchElementSize: Int,
-                maximumSequenceLength: Int, kvCacheIndex: Int, convLayerIndex: Int,
+                maximumSequenceLength: Int, layerIndex: Int?, kvCacheIndex: Int, convLayerIndex: Int, recurrentLayerIndex: Int,
                 kernelContext: KernelContext,
                 resolveWeight: @escaping (String) -> (buffer: MTLBuffer, offset: Int),
                 getPipeline: @escaping (String) throws -> MTLComputePipelineState) {
@@ -163,8 +173,10 @@ public struct PrefillBindingContext: @unchecked Sendable {
         self.slotDimension = slotDimension
         self.scratchElementSize = scratchElementSize
         self.maximumSequenceLength = maximumSequenceLength
+        self.layerIndex = layerIndex
         self.kvCacheIndex = kvCacheIndex
         self.convLayerIndex = convLayerIndex
+        self.recurrentLayerIndex = recurrentLayerIndex
         self.kernelContext = kernelContext
         self.resolveWeight = resolveWeight
         self.getPipeline = getPipeline
@@ -179,16 +191,19 @@ public struct FragmentPrefillSteps: @unchecked Sendable {
     public let resetsProjectionIndex: Bool
     public let consumesKVCacheLayer: Bool
     public let consumesConvLayer: Bool
+    public let consumesRecurrentLayer: Bool
 
     public init(steps: [MetalPrefillStep], outputIsHidden: Bool,
                 resetsProjectionIndex: Bool = false,
                 consumesKVCacheLayer: Bool = false,
-                consumesConvLayer: Bool = false) {
+                consumesConvLayer: Bool = false,
+                consumesRecurrentLayer: Bool = false) {
         self.steps = steps
         self.outputIsHidden = outputIsHidden
         self.resetsProjectionIndex = resetsProjectionIndex
         self.consumesKVCacheLayer = consumesKVCacheLayer
         self.consumesConvLayer = consumesConvLayer
+        self.consumesRecurrentLayer = consumesRecurrentLayer
     }
 }
 

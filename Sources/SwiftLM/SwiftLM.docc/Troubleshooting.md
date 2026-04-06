@@ -23,8 +23,13 @@ Generation is stream-based. If you need a single final string, collect all ``Gen
 
 ## Current Public API Limits
 
-- public input is text-only or chat-only through ``UserInput``
-- multimodal image or video input is not part of the current public API
+- public input is represented by ``ModelInput``
+- image and video content can be represented in ``ModelInput``, and Qwen3-VL style prompt preparation expands the correct placeholder count before tokenization
+- ``PreparedInput`` and ``ExecutablePrompt`` separate prompt preparation from executable runtime input
+- `makeExecutablePrompt(from:)` converts prepared input into an executable prompt, while `makePromptState(input: ModelInput)` and `generate(input: ModelInput, parameters:)` are async convenience APIs for Qwen3-VL style image/video prompts when the loaded bundle provides compatible vision weights
+- ``ModelConfiguration/vision`` now exposes Qwen-style marker tokens, processor names, and patch sizing metadata
+- ``ModelConfiguration/executionCapabilities`` tells you which prompt shapes the current runtime can prepare and execute
+- unsupported multimodal families still throw ``ModelContainerError/multimodalInputNotSupported(_:)``
 - tool calling and structured function-calling APIs are not part of the current public API
 
 ## Building Documentation
