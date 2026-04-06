@@ -56,6 +56,8 @@ struct MetalKernelSourceCatalog {
         var mppSources: [String] = []
         var mppGEMMWeightFormat: MetalSourceGenerator.WeightFormat = .float16
         var needsFlashAttnHelper = false
+        var needsSSMHelpers = false
+        var ssmConvSiluWeightFormats: [MetalSourceGenerator.WeightFormat] = []
 
         for entry in entries {
             let name: String
@@ -249,13 +251,20 @@ struct MetalKernelSourceCatalog {
                         needsFlashAttnHelper = true
                     }
                     sources.append(source)
-                    if bufferPrecision == .float32, fragment is SSMRecurrenceFragment {
+                    if fragment is SSMRecurrenceFragment {
+                        needsSSMHelpers = true
+                        if !ssmConvSiluWeightFormats.contains(where: { $0 == weightFormat }) {
+                            ssmConvSiluWeightFormats.append(weightFormat)
+                        }
+                    }
+                    if bufferPrecision == .float32, let ssmFragment = fragment as? SSMRecurrenceFragment {
                         let sequenceKernelName = "ssm_recurrence_seq_f32"
                         if generatedNames.insert(sequenceKernelName).inserted {
                             sources.append(MetalSourceGenerator.generateSSMRecurrenceSequence(
                                 name: sequenceKernelName,
                                 bufferPrecision: bufferPrecision,
-                                weightFormat: weightFormat))
+                                weightFormat: weightFormat,
+                                convDimension: ssmFragment.convDimension))
                         }
                     }
                     if bufferPrecision != .float32 {
@@ -487,6 +496,8 @@ struct MetalKernelSourceCatalog {
                     }
                 } else {
                     let gemmName = weightFormat == .bfloat16 ? "gemm_bf16_f32s" : "gemm_f32s"
+                    mppGEMMNames.insert(gemmName)
+                    mppGEMMWeightFormat = weightFormat
                     if generatedNames.insert(gemmName).inserted {
                         sources.append(MetalSourceGenerator.generateGEMM(
                             name: gemmName,
@@ -550,6 +561,8 @@ struct MetalKernelSourceCatalog {
                     }
                 } else {
                     let gemmName = weightFormat == .bfloat16 ? "gemm_bf16_f32s" : "gemm_f32s"
+                    mppGEMMNames.insert(gemmName)
+                    mppGEMMWeightFormat = weightFormat
                     if generatedNames.insert(gemmName).inserted {
                         sources.append(MetalSourceGenerator.generateGEMM(
                             name: gemmName,
@@ -596,6 +609,13 @@ struct MetalKernelSourceCatalog {
 
         if needsFlashAttnHelper {
             sources.insert(MetalSourceGenerator.flashAttentionHelperSource, at: 1)
+        }
+
+        if needsSSMHelpers {
+            sources.insert(MetalSourceGenerator.generateSSMWeightIndependentHelpers(), at: 1)
+            for format in ssmConvSiluWeightFormats {
+                sources.insert(MetalSourceGenerator.generateSSMConvSiluHelper(weightFormat: format), at: 2)
+            }
         }
 
         let hiddenCopyName = bufferPrecision == .bfloat16

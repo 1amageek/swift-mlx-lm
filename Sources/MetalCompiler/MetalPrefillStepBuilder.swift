@@ -373,7 +373,9 @@ private struct PrefillStepPlanner {
                 sync: .bufferBarrier,
                 mode: mode,
                 sequenceLengthPolicy: mode == .batch
-                    ? (usesMPP ? .bind(index: 5) : .bindAndAdjustGridHeight(index: 5))
+                    ? (usesMPP
+                        ? .bindAndAdjustGridHeightTiled(index: 5, tileHeight: 64)
+                        : .bindAndAdjustGridHeight(index: 5))
                     : .none,
                 positionBufferIndex: nil,
                 perPositionStrides: perPositionStrides

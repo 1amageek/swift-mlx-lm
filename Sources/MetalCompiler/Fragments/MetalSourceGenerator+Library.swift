@@ -187,10 +187,12 @@ extension MetalSourceGenerator {
 
         // === SSM recurrence (DeltaNet/Mamba) ===
         sources.append(generateSSMHelperSource(weightFormat: .float16))
-        sources.append(generateSSMRecurrence(name: "ssm_recurrence", bufferPrecision: decode, weightFormat: .float16))
-        sources.append(generateSSMRecurrence(name: "ssm_recurrence_f32", bufferPrecision: prefill, weightFormat: .float16))
-        sources.append(generateSSMRecurrenceSequence(name: "ssm_recurrence_seq", bufferPrecision: decode, weightFormat: .float16))
-        sources.append(generateSSMRecurrenceSequence(name: "ssm_recurrence_seq_f32", bufferPrecision: prefill, weightFormat: .float16))
+        // Default convDimension for library generation (LFM2-style: 16 groups × 128 dk, 16 heads × 128 dv)
+        let defaultConvDimension = 2 * 16 * 128 + 16 * 128
+        sources.append(generateSSMRecurrence(name: "ssm_recurrence", bufferPrecision: decode, weightFormat: .float16, convDimension: defaultConvDimension))
+        sources.append(generateSSMRecurrence(name: "ssm_recurrence_f32", bufferPrecision: prefill, weightFormat: .float16, convDimension: defaultConvDimension))
+        sources.append(generateSSMRecurrenceSequence(name: "ssm_recurrence_seq", bufferPrecision: decode, weightFormat: .float16, convDimension: defaultConvDimension))
+        sources.append(generateSSMRecurrenceSequence(name: "ssm_recurrence_seq_f32", bufferPrecision: prefill, weightFormat: .float16, convDimension: defaultConvDimension))
 
         // === KV cache quantization ===
         sources.append(kvQuantizationSource)

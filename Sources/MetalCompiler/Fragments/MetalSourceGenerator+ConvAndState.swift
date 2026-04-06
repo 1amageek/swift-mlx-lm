@@ -167,26 +167,11 @@ public static func generateExtractConvState(
 
 // MARK: - State Space
 
-public static func generateSSMHelperSource(weightFormat: WeightFormat) -> String {
-    let wt = weightFormat.bufferType
-    let readWeight = { (expr: String) in weightFormat.readExpression(expr) }
-
+/// Weight-independent SSM helper functions (emitted once per compilation unit).
+public static func generateSSMWeightIndependentHelpers() -> String {
     return """
     inline float stable_softplus(float x) { return max(x, 0.0f) + log(1.0f + exp(-abs(x))); }
     inline float stable_sigmoid(float x) { return 1.0f / (1.0f + exp(-x)); }
-    inline float conv_silu(
-        device const half* convState,
-        device const \(wt)* convWeight,
-        uint channel,
-        uint convKernelSize
-    ) {
-        float sum = 0.0f;
-        uint base = channel * convKernelSize;
-        for (uint k = 0; k < convKernelSize; ++k) {
-            sum += float(convState[base + k]) * \(readWeight("convWeight[base + k]"));
-        }
-        return sum * stable_sigmoid(sum);
-    }
     inline float compute_l2_inv_norm(
         threadgroup float* vec,
         uint dim,
@@ -210,10 +195,39 @@ public static func generateSSMHelperSource(weightFormat: WeightFormat) -> String
     """
 }
 
+/// Weight-dependent conv_silu overload (emitted per weight format).
+/// MSL function overloading resolves the correct variant based on convWeight pointer type.
+public static func generateSSMConvSiluHelper(weightFormat: WeightFormat) -> String {
+    let wt = weightFormat.bufferType
+    let readWeight = { (expr: String) in weightFormat.readExpression(expr) }
+
+    return """
+    inline float conv_silu(
+        device const half* convState,
+        device const \(wt)* convWeight,
+        uint channel,
+        uint convKernelSize
+    ) {
+        float sum = 0.0f;
+        uint base = channel * convKernelSize;
+        for (uint k = 0; k < convKernelSize; ++k) {
+            sum += float(convState[base + k]) * \(readWeight("convWeight[base + k]"));
+        }
+        return sum * stable_sigmoid(sum);
+    }
+    """
+}
+
+/// Combined SSM helper source for a single weight format (convenience for library use).
+public static func generateSSMHelperSource(weightFormat: WeightFormat) -> String {
+    return generateSSMWeightIndependentHelpers() + "\n" + generateSSMConvSiluHelper(weightFormat: weightFormat)
+}
+
 public static func generateSSMRecurrence(
     name: String,
     bufferPrecision: BufferPrecision,
-    weightFormat: WeightFormat
+    weightFormat: WeightFormat,
+    convDimension: Int
 ) -> String {
     let bt = bufferPrecision.metalType
     let wt = weightFormat.bufferType
@@ -237,76 +251,127 @@ public static func generateSSMRecurrence(
         constant uint& keyDimension [[buffer(13)]],
         constant uint& valueDimension [[buffer(14)]],
         constant uint& convKernelSize [[buffer(15)]],
-        uint tid [[thread_index_in_threadgroup]]
+        uint tid [[thread_index_in_threadgroup]],
+        uint tgSize [[threads_per_threadgroup]]
     ) {
-        if (tid != 0) return;
-
         const uint dk = keyDimension;
         const uint dv = valueDimension;
         const uint keyGroupDim = groupCount * dk;
         const uint convDim = 2 * keyGroupDim + numHeads * dv;
         const uint headsPerGroup = max(1u, numHeads / max(groupCount, 1u));
 
-        for (uint channel = 0; channel < convDim; ++channel) {
+        threadgroup float convSiluCache[\(convDimension)];
+
+        // Phase 1: Shift conv state (all threads in parallel)
+        for (uint channel = tid; channel < convDim; channel += tgSize) {
             const uint base = channel * convKernelSize;
             for (uint k = 0; k + 1 < convKernelSize; ++k) {
                 convState[base + k] = convState[base + k + 1];
             }
             convState[base + convKernelSize - 1] = half(projectedQKV[channel]);
         }
+        threadgroup_barrier(mem_flags::mem_device);
 
-        for (uint headIndex = 0; headIndex < numHeads; ++headIndex) {
-            const uint keyGroupIndex = min(groupCount - 1, headIndex / headsPerGroup);
-            float decay = exp(-exp(aLog[headIndex]) * stable_softplus(float(projectedAlpha[headIndex]) + \(readWeight("dtBias[headIndex]"))));
-            float beta = stable_sigmoid(float(projectedBeta[headIndex]));
-            device float* state = recurrentState + headIndex * dk * dv;
-
-            float qNormSq = 0.0f;
-            float kNormSq = 0.0f;
-            for (uint j = 0; j < dk; ++j) {
-                float q = conv_silu(convState, convWeight, keyGroupDim + keyGroupIndex * dk + j, convKernelSize);
-                float k = conv_silu(convState, convWeight, keyGroupIndex * dk + j, convKernelSize);
-                qNormSq += q * q;
-                kNormSq += k * k;
+        // Phase 2: Precompute all conv_silu values (all threads in parallel)
+        for (uint channel = tid; channel < convDim; channel += tgSize) {
+            float sum = 0.0f;
+            const uint base = channel * convKernelSize;
+            for (uint k = 0; k < convKernelSize; ++k) {
+                sum += float(convState[base + k]) * \(readWeight("convWeight[base + k]"));
             }
+            convSiluCache[channel] = sum * stable_sigmoid(sum);
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
 
-            float qInv = rsqrt(qNormSq + 1e-6f) * rsqrt(float(dk));
-            float kInv = rsqrt(kNormSq + 1e-6f);
+        // Phase 3: Per-head recurrence with multi-thread-per-head parallelism.
+        // Distribute dv dimension across multiple threads within each head.
+        threadgroup float normPartials[\(convDimension > 256 ? 256 : convDimension)];
+        {
+            const uint threadsPerHead = min(tgSize / max(numHeads, 1u), dv);
+            const uint activeThreads = numHeads * threadsPerHead;
+            if (tid < activeThreads) {
+                const uint headIndex = tid / threadsPerHead;
+                const uint localTid = tid % threadsPerHead;
+                const uint dChunk = dv / threadsPerHead;
+                const uint dStart = localTid * dChunk;
+                const uint dEnd = (localTid + 1 == threadsPerHead) ? dv : dStart + dChunk;
 
-            for (uint idx = 0; idx < dk * dv; ++idx) {
-                state[idx] *= decay;
-            }
+                const uint keyGroupIndex = min(groupCount - 1, headIndex / headsPerGroup);
+                float decay = exp(-exp(aLog[headIndex]) * stable_softplus(float(projectedAlpha[headIndex]) + \(readWeight("dtBias[headIndex]"))));
+                float beta = stable_sigmoid(float(projectedBeta[headIndex]));
+                device float* state = recurrentState + headIndex * dk * dv;
 
-            for (uint d = 0; d < dv; ++d) {
-                float v = conv_silu(convState, convWeight, 2 * keyGroupDim + headIndex * dv + d, convKernelSize);
-                float kvmem = 0.0f;
+                const uint qBase = keyGroupDim + keyGroupIndex * dk;
+                const uint kBase = keyGroupIndex * dk;
+                const uint vBase = 2 * keyGroupDim + headIndex * dv;
+
+                float qNormSq = 0.0f;
+                float kNormSq = 0.0f;
                 for (uint j = 0; j < dk; ++j) {
-                    float k = conv_silu(convState, convWeight, keyGroupIndex * dk + j, convKernelSize) * kInv;
-                    kvmem += state[j * dv + d] * k;
+                    float q = convSiluCache[qBase + j];
+                    float k = convSiluCache[kBase + j];
+                    qNormSq += q * q;
+                    kNormSq += k * k;
                 }
-                float delta = beta * (v - kvmem);
-                for (uint j = 0; j < dk; ++j) {
-                    float k = conv_silu(convState, convWeight, keyGroupIndex * dk + j, convKernelSize) * kInv;
-                    state[j * dv + d] += k * delta;
-                }
-            }
+                float qInv = rsqrt(qNormSq + 1e-6f) * rsqrt(float(dk));
+                float kInv = rsqrt(kNormSq + 1e-6f);
 
-            float outputNormSq = 0.0f;
-            for (uint d = 0; d < dv; ++d) {
-                float dot = 0.0f;
                 for (uint j = 0; j < dk; ++j) {
-                    float q = conv_silu(convState, convWeight, keyGroupDim + keyGroupIndex * dk + j, convKernelSize) * qInv;
-                    dot += state[j * dv + d] * q;
+                    for (uint d = dStart; d < dEnd; ++d) {
+                        state[j * dv + d] *= decay;
+                    }
                 }
-                output[headIndex * dv + d] = \(bt)(dot);
-                outputNormSq += dot * dot;
-            }
 
-            float rmsScale = rsqrt(outputNormSq / float(dv) + 1e-6f);
-            for (uint d = 0; d < dv; ++d) {
-                float normed = float(output[headIndex * dv + d]) * rmsScale * normWeight[d];
-                float z = float(projectedZ[headIndex * dv + d]);
-                output[headIndex * dv + d] = \(bt)(normed * z * stable_sigmoid(z));
+                for (uint d = dStart; d < dEnd; ++d) {
+                    float v = convSiluCache[vBase + d];
+                    float kvmem = 0.0f;
+                    for (uint j = 0; j < dk; ++j) {
+                        float k = convSiluCache[kBase + j] * kInv;
+                        kvmem += state[j * dv + d] * k;
+                    }
+                    float delta = beta * (v - kvmem);
+                    for (uint j = 0; j < dk; ++j) {
+                        float k = convSiluCache[kBase + j] * kInv;
+                        state[j * dv + d] += k * delta;
+                    }
+                }
+
+                float localNormSq = 0.0f;
+                for (uint d = dStart; d < dEnd; ++d) {
+                    float dot = 0.0f;
+                    for (uint j = 0; j < dk; ++j) {
+                        float q = convSiluCache[qBase + j] * qInv;
+                        dot += state[j * dv + d] * q;
+                    }
+                    output[headIndex * dv + d] = \(bt)(dot);
+                    localNormSq += dot * dot;
+                }
+
+                normPartials[tid] = localNormSq;
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        {
+            const uint threadsPerHead = min(tgSize / max(numHeads, 1u), dv);
+            const uint activeThreads = numHeads * threadsPerHead;
+            if (tid < activeThreads) {
+                const uint headIndex = tid / threadsPerHead;
+                const uint localTid = tid % threadsPerHead;
+                const uint dChunk = dv / threadsPerHead;
+                const uint dStart = localTid * dChunk;
+                const uint dEnd = (localTid + 1 == threadsPerHead) ? dv : dStart + dChunk;
+
+                float totalNormSq = 0.0f;
+                for (uint t = 0; t < threadsPerHead; ++t) {
+                    totalNormSq += normPartials[headIndex * threadsPerHead + t];
+                }
+                float rmsScale = rsqrt(totalNormSq / float(dv) + 1e-6f);
+                for (uint d = dStart; d < dEnd; ++d) {
+                    float normed = float(output[headIndex * dv + d]) * rmsScale * normWeight[d];
+                    float z = float(projectedZ[headIndex * dv + d]);
+                    output[headIndex * dv + d] = \(bt)(normed * z * stable_sigmoid(z));
+                }
             }
         }
     }
@@ -316,7 +381,8 @@ public static func generateSSMRecurrence(
 public static func generateSSMRecurrenceSequence(
     name: String,
     bufferPrecision: BufferPrecision,
-    weightFormat: WeightFormat
+    weightFormat: WeightFormat,
+    convDimension: Int
 ) -> String {
     let bt = bufferPrecision.metalType
     let wt = weightFormat.bufferType
@@ -352,6 +418,11 @@ public static func generateSSMRecurrenceSequence(
         const uint safeGroupCount = max(groupCount, 1u);
         const uint headsPerGroup = max(1u, numHeads / safeGroupCount);
 
+        // Precomputed conv_silu values for all channels (eliminates ~33K redundant
+        // device memory reads per head per position).
+        threadgroup float convSiluCache[\(convDimension)];
+        threadgroup float normPartials[256];
+
         for (uint pos = 0; pos < sequenceLength; ++pos) {
             device const \(bt)* projectedQKVPos = projectedQKV + pos * convDim;
             device const \(bt)* projectedZPos = projectedZ + pos * outputDim;
@@ -359,6 +430,7 @@ public static func generateSSMRecurrenceSequence(
             device const \(bt)* projectedAlphaPos = projectedAlpha + pos * numHeads;
             device \(bt)* outputPos = output + pos * outputDim;
 
+            // Phase 1: Shift conv state (all threads)
             for (uint channel = tid; channel < convDim; channel += tgSize) {
                 const uint base = channel * convKernelSize;
                 for (uint k = 0; k + 1 < convKernelSize; ++k) {
@@ -368,58 +440,105 @@ public static func generateSSMRecurrenceSequence(
             }
             threadgroup_barrier(mem_flags::mem_device);
 
-            for (uint headIndex = tid; headIndex < numHeads; headIndex += tgSize) {
-                const uint keyGroupIndex = min(groupCount - 1, headIndex / headsPerGroup);
-                float decay = exp(-exp(aLog[headIndex]) * stable_softplus(float(projectedAlphaPos[headIndex]) + \(readWeight("dtBias[headIndex]"))));
-                float beta = stable_sigmoid(float(projectedBetaPos[headIndex]));
-                device float* state = recurrentState + headIndex * dk * dv;
-
-                float qNormSq = 0.0f;
-                float kNormSq = 0.0f;
-                for (uint j = 0; j < dk; ++j) {
-                    float q = conv_silu(convState, convWeight, keyGroupDim + keyGroupIndex * dk + j, convKernelSize);
-                    float k = conv_silu(convState, convWeight, keyGroupIndex * dk + j, convKernelSize);
-                    qNormSq += q * q;
-                    kNormSq += k * k;
+            // Phase 2: Precompute all conv_silu values into threadgroup memory (all threads)
+            for (uint channel = tid; channel < convDim; channel += tgSize) {
+                float sum = 0.0f;
+                const uint base = channel * convKernelSize;
+                for (uint k = 0; k < convKernelSize; ++k) {
+                    sum += float(convState[base + k]) * \(readWeight("convWeight[base + k]"));
                 }
+                convSiluCache[channel] = sum * stable_sigmoid(sum);
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
 
-                float qInv = rsqrt(qNormSq + 1e-6f) * rsqrt(float(dk));
-                float kInv = rsqrt(kNormSq + 1e-6f);
+            // Phase 3: Per-head recurrence with multi-thread-per-head parallelism.
+            // Distribute dv dimension across multiple threads within each head.
+            {
+                const uint threadsPerHead = min(tgSize / max(numHeads, 1u), dv);
+                const uint activeThreads = numHeads * threadsPerHead;
+                if (tid < activeThreads) {
+                    const uint headIndex = tid / threadsPerHead;
+                    const uint localTid = tid % threadsPerHead;
+                    const uint dChunk = dv / threadsPerHead;
+                    const uint dStart = localTid * dChunk;
+                    const uint dEnd = (localTid + 1 == threadsPerHead) ? dv : dStart + dChunk;
 
-                for (uint idx = 0; idx < dk * dv; ++idx) {
-                    state[idx] *= decay;
-                }
+                    const uint keyGroupIndex = min(groupCount - 1, headIndex / headsPerGroup);
+                    float decay = exp(-exp(aLog[headIndex]) * stable_softplus(float(projectedAlphaPos[headIndex]) + \(readWeight("dtBias[headIndex]"))));
+                    float beta = stable_sigmoid(float(projectedBetaPos[headIndex]));
+                    device float* state = recurrentState + headIndex * dk * dv;
 
-                for (uint d = 0; d < dv; ++d) {
-                    float v = conv_silu(convState, convWeight, 2 * keyGroupDim + headIndex * dv + d, convKernelSize);
-                    float kvmem = 0.0f;
+                    const uint qBase = keyGroupDim + keyGroupIndex * dk;
+                    const uint kBase = keyGroupIndex * dk;
+                    const uint vBase = 2 * keyGroupDim + headIndex * dv;
+
+                    float qNormSq = 0.0f;
+                    float kNormSq = 0.0f;
                     for (uint j = 0; j < dk; ++j) {
-                        float k = conv_silu(convState, convWeight, keyGroupIndex * dk + j, convKernelSize) * kInv;
-                        kvmem += state[j * dv + d] * k;
+                        float q = convSiluCache[qBase + j];
+                        float k = convSiluCache[kBase + j];
+                        qNormSq += q * q;
+                        kNormSq += k * k;
                     }
-                    float delta = beta * (v - kvmem);
-                    for (uint j = 0; j < dk; ++j) {
-                        float k = conv_silu(convState, convWeight, keyGroupIndex * dk + j, convKernelSize) * kInv;
-                        state[j * dv + d] += k * delta;
-                    }
-                }
+                    float qInv = rsqrt(qNormSq + 1e-6f) * rsqrt(float(dk));
+                    float kInv = rsqrt(kNormSq + 1e-6f);
 
-                float outputNormSq = 0.0f;
-                for (uint d = 0; d < dv; ++d) {
-                    float dot = 0.0f;
                     for (uint j = 0; j < dk; ++j) {
-                        float q = conv_silu(convState, convWeight, keyGroupDim + keyGroupIndex * dk + j, convKernelSize) * qInv;
-                        dot += state[j * dv + d] * q;
+                        for (uint d = dStart; d < dEnd; ++d) {
+                            state[j * dv + d] *= decay;
+                        }
                     }
-                    outputPos[headIndex * dv + d] = \(bt)(dot);
-                    outputNormSq += dot * dot;
-                }
 
-                float rmsScale = rsqrt(outputNormSq / float(dv) + 1e-6f);
-                for (uint d = 0; d < dv; ++d) {
-                    float normed = float(outputPos[headIndex * dv + d]) * rmsScale * normWeight[d];
-                    float z = float(projectedZPos[headIndex * dv + d]);
-                    outputPos[headIndex * dv + d] = \(bt)(normed * z * stable_sigmoid(z));
+                    for (uint d = dStart; d < dEnd; ++d) {
+                        float v = convSiluCache[vBase + d];
+                        float kvmem = 0.0f;
+                        for (uint j = 0; j < dk; ++j) {
+                            float k = convSiluCache[kBase + j] * kInv;
+                            kvmem += state[j * dv + d] * k;
+                        }
+                        float delta = beta * (v - kvmem);
+                        for (uint j = 0; j < dk; ++j) {
+                            float k = convSiluCache[kBase + j] * kInv;
+                            state[j * dv + d] += k * delta;
+                        }
+                    }
+
+                    float localNormSq = 0.0f;
+                    for (uint d = dStart; d < dEnd; ++d) {
+                        float dot = 0.0f;
+                        for (uint j = 0; j < dk; ++j) {
+                            float q = convSiluCache[qBase + j] * qInv;
+                            dot += state[j * dv + d] * q;
+                        }
+                        outputPos[headIndex * dv + d] = \(bt)(dot);
+                        localNormSq += dot * dot;
+                    }
+
+                    normPartials[tid] = localNormSq;
+                }
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+
+            {
+                const uint threadsPerHead = min(tgSize / max(numHeads, 1u), dv);
+                const uint activeThreads = numHeads * threadsPerHead;
+                if (tid < activeThreads) {
+                    const uint headIndex = tid / threadsPerHead;
+                    const uint localTid = tid % threadsPerHead;
+                    const uint dChunk = dv / threadsPerHead;
+                    const uint dStart = localTid * dChunk;
+                    const uint dEnd = (localTid + 1 == threadsPerHead) ? dv : dStart + dChunk;
+
+                    float totalNormSq = 0.0f;
+                    for (uint t = 0; t < threadsPerHead; ++t) {
+                        totalNormSq += normPartials[headIndex * threadsPerHead + t];
+                    }
+                    float rmsScale = rsqrt(totalNormSq / float(dv) + 1e-6f);
+                    for (uint d = dStart; d < dEnd; ++d) {
+                        float normed = float(outputPos[headIndex * dv + d]) * rmsScale * normWeight[d];
+                        float z = float(projectedZPos[headIndex * dv + d]);
+                        outputPos[headIndex * dv + d] = \(bt)(normed * z * stable_sigmoid(z));
+                    }
                 }
             }
             threadgroup_barrier(mem_flags::mem_device);

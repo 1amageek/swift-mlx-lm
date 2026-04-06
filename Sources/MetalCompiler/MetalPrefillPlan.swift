@@ -14,22 +14,34 @@ public enum PrefillSequenceLengthPolicy: Sendable {
     case none
     case bind(index: Int)
     case bindAndAdjustGridHeight(index: Int)
+    /// Bind sequence length and adjust grid height with tiling: ceil(seqLen / tileHeight).
+    case bindAndAdjustGridHeightTiled(index: Int, tileHeight: Int)
 
     public var bindingIndex: Int? {
         switch self {
         case .none:
             return nil
-        case .bind(let index), .bindAndAdjustGridHeight(let index):
+        case .bind(let index), .bindAndAdjustGridHeight(let index),
+             .bindAndAdjustGridHeightTiled(let index, _):
             return index
         }
     }
 
     public var adjustsGridHeightToSequenceLength: Bool {
         switch self {
-        case .bindAndAdjustGridHeight:
+        case .bindAndAdjustGridHeight, .bindAndAdjustGridHeightTiled:
             return true
         case .none, .bind:
             return false
+        }
+    }
+
+    public var tileHeight: Int? {
+        switch self {
+        case .bindAndAdjustGridHeightTiled(_, let tileHeight):
+            return tileHeight
+        default:
+            return nil
         }
     }
 }
@@ -136,6 +148,10 @@ public struct MetalPrefillStep: @unchecked Sendable {
     public func resolvedGridSize(sequenceLength: Int) -> MTLSize {
         guard sequenceLengthPolicy.adjustsGridHeightToSequenceLength, gridSize.height > 1 else {
             return gridSize
+        }
+        if let tileHeight = sequenceLengthPolicy.tileHeight {
+            let tiledHeight = (sequenceLength + tileHeight - 1) / tileHeight
+            return MTLSize(width: gridSize.width, height: tiledHeight, depth: gridSize.depth)
         }
         return MTLSize(width: gridSize.width, height: sequenceLength, depth: gridSize.depth)
     }

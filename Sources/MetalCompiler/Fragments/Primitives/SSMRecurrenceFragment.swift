@@ -42,11 +42,16 @@ public struct SSMRecurrenceFragment: PrimitiveMetalKernelFragment {
         ]
     }
 
+    public var convDimension: Int {
+        2 * groupCount * keyHeadDimension + headCount * valueHeadDimension
+    }
+
     public func kernelSource(name: String, bufferPrecision: BufferPrecision, weightFormat: WeightFormat) -> String {
         MetalSourceGenerator.generateSSMRecurrence(
             name: name,
             bufferPrecision: bufferPrecision,
-            weightFormat: weightFormat
+            weightFormat: weightFormat,
+            convDimension: convDimension
         )
     }
 
