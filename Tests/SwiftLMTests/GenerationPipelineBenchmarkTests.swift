@@ -348,7 +348,7 @@ struct GenerationPipelineBenchmarkTests {
             hiddenSize: config.hiddenSize,
             intermediateSize: config.intermediateSize,
             vocabSize: config.vocabSize,
-            maximumSequenceLength: max(1, maximumSequenceLength),
+            inferencePolicy: InferencePolicy(maximumSequenceLength: max(1, maximumSequenceLength)),
             stafWeightStore: store,
             sharedKVCache: decodePlan.buffers.kvCache,
             sharedConvState: decodePlan.buffers.convState,

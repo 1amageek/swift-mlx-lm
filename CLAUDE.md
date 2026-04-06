@@ -22,16 +22,17 @@ LMIR (IR モジュール — backend 非依存)
     │   └── Transformer, Qwen35, LFM2, Cohere
     │
     ├── MetalCompiler (depends: LMIR only — no MLX)
+    │   ├── InferencePolicy (deployment intent: KV cache quantization, max sequence length)
     │   ├── MetalComponent protocol (dispatchDeclarations)
     │   ├── MetalComputeOperation protocol (kernelName, isFusable, dispatchDimension)
     │   ├── MetalKernelSource (compiler 所有の全 kernel MSL source)
     │   ├── MetalInferenceCompiler (IR walk → fusion → dispatch plan)
     │   ├── MetalInferenceModel (dispatch plan 実行)
     │   ├── STAF (STAFConverter, STAFLoader, QuantizationFormat, ParameterResolver)
-    │   └── KVCacheSpecification (K/V 独立量子化, layout mode)
+    │   └── KVCacheSpecification (compiler internal: resolved K/V cache layout)
     │
     └── SwiftLM (consumer API — depends: LMArchitecture, MetalCompiler, ModelDeclarations)
-        ├── ModelBundleLoader (HF download → STAF → compile → ModelContainer)
+        ├── ModelBundleLoader (HF download → STAF → compile(inferencePolicy:) → ModelContainer)
         ├── ModelContainer (generate, encode, decode)
         ├── ModelInput, PreparedInput, ExecutablePrompt, Generation, GenerateParameters
         └── InputMessage, InputImage, InputVideo, ModelConfiguration
@@ -284,6 +285,34 @@ GEMV kernel がブロックを直接読んで計算
 | hidden / scratch / residual / logits | `private` + `hazardTrackingModeUntracked` | GPU のみ |
 | tokenIn / tokenOut / position | `shared` | CPU read/write 必要 |
 
+### InferencePolicy — Deployment Intent
+
+デプロイメント判断（KV cache 量子化、最大シーケンス長、レイアウトモード）は `InferencePolicy` で宣言的に指定する。IR（構造）でもなく compiler 内部（実装）でもない第三の関心事。
+
+```
+Consumer (ModelBundleLoader)
+  │ InferencePolicy
+  │   ├── maximumSequenceLength: Int        // KV cache + prefill buffer sizing
+  │   └── kvCache: KVCachePolicy
+  │         ├── keyScheme: .automatic | .fixed(scheme)
+  │         ├── valueScheme: .automatic | .fixed(scheme)
+  │         └── layoutMode: .sequenceMajor | .headMajor
+  │
+  ├── compile(inferencePolicy:)       → MetalCompiledModel (decode plan + KV cache)
+  └── compilePrefill(inferencePolicy:) → MetalPrefillPlan (shared KV cache from decode)
+```
+
+| レイヤー | 責務 | 例 |
+|---|---|---|
+| IR (LMIR) | モデル構造 (WHAT) | Attention, MLP, layer count |
+| InferencePolicy | デプロイメント意図 | KV cache Q4, max 8192 tokens |
+| Compiler (MetalCompiler) | 実装方法 (HOW) | kernel 選択, buffer 確保, KVCacheSpecification |
+
+- `InferencePolicy.default` = FP16 KV cache, 4096 max tokens, sequenceMajor
+- `SchemeSelection.automatic` は weight format から KV cache scheme を導出（BF16 weights → BF16 cache, else → FP16）
+- K/V は独立量子化可能 — K は dot product 用（攻撃的量子化可）、V は weighted sum 用（保守的が必要）
+- `KVCacheSpecification` は compiler 内部の実装詳細。InferencePolicy（意図）→ KVCacheSpecification（実体）の変換は `MetalBufferAllocator` が担う
+
 ### 新しい計算の追加手順
 
 1. LMIR に新 Attributes 型を追加 (`OperationAttributes` 準拠、backend 非依存)
@@ -321,6 +350,8 @@ swift build
 - IR はランタイム非依存。Metal/MLX/TPU 固有の型を IR に持ち込まない
 - MetalComponent は MetalCompiler モジュール内。SwiftLM/LMIR に属さない
 - 全 public 型は `Sendable`
+- デプロイメント判断（KV cache 量子化、最大シーケンス長）は `InferencePolicy` で外部化。compiler 内部にハードコードしない
+- `KVCacheSpecification` の `maximumSequenceLength` にデフォルト値を持たせない — silent fallback 防止
 
 ## Vision Encoder
 

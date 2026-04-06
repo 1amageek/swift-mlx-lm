@@ -66,7 +66,7 @@ struct Gemma4CompilerTests {
             hiddenSize: config.hiddenSize,
             intermediateSize: config.intermediateSize,
             vocabSize: config.vocabSize,
-            maximumSequenceLength: 128,
+            inferencePolicy: InferencePolicy(maximumSequenceLength: 128),
             sharedKVCache: compiled.buffers.kvCache,
             sharedConvState: compiled.buffers.convState,
             sharedConvStateDimension: compiled.buffers.convStateDimension,

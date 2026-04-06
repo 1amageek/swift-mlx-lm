@@ -216,7 +216,7 @@ enum BenchmarkSupport {
             vocabSize: 65536, stafWeightStore: store, device: device)
         let prefillPlan = try compiler.compilePrefill(
             graph: resolved, hiddenSize: 2048, intermediateSize: 8192,
-            vocabSize: 65536, maximumSequenceLength: 64,
+            vocabSize: 65536, inferencePolicy: InferencePolicy(maximumSequenceLength: 64),
             stafWeightStore: store,
             sharedKVCache: decodePlan.buffers.kvCache,
             sharedConvState: decodePlan.buffers.convState,
@@ -434,7 +434,7 @@ enum BenchmarkSupport {
             hiddenSize: config.hiddenSize,
             intermediateSize: config.intermediateSize,
             vocabSize: config.vocabSize,
-            maximumSequenceLength: maximumPrefillLength,
+            inferencePolicy: InferencePolicy(maximumSequenceLength: maximumPrefillLength),
             stafWeightStore: store,
             sharedKVCache: compiled.decodePlan.buffers.kvCache,
             sharedConvState: compiled.decodePlan.buffers.convState,

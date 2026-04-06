@@ -79,7 +79,7 @@ struct DecodeTests {
             vocabSize: 65536, stafWeightStore: store, device: device)
         let prefillPlan = try compiler.compilePrefill(
             graph: resolved, hiddenSize: 2048, intermediateSize: 8192,
-            vocabSize: 65536, maximumSequenceLength: 64,
+            vocabSize: 65536, inferencePolicy: InferencePolicy(maximumSequenceLength: 64),
             stafWeightStore: store, device: device)
 
         var model = try MetalInferenceModel(plan: decodePlan, device: device)
@@ -147,7 +147,7 @@ struct DecodeTests {
             vocabSize: 65536, stafWeightStore: store, device: device)
         let prefillPlan = try compiler.compilePrefill(
             graph: resolved, hiddenSize: 2048, intermediateSize: 8192,
-            vocabSize: 65536, maximumSequenceLength: 64,
+            vocabSize: 65536, inferencePolicy: InferencePolicy(maximumSequenceLength: 64),
             stafWeightStore: store, device: device)
 
         var model = try MetalInferenceModel(plan: decodePlan, device: device)
@@ -212,7 +212,7 @@ struct DecodeTests {
             vocabSize: 65536, stafWeightStore: store, device: device)
         let prefillPlan = try compiler.compilePrefill(
             graph: resolved, hiddenSize: 2048, intermediateSize: 8192,
-            vocabSize: 65536, maximumSequenceLength: 64,
+            vocabSize: 65536, inferencePolicy: InferencePolicy(maximumSequenceLength: 64),
             stafWeightStore: store, device: device)
 
         // Run 1: prefill + decode with KV cache
@@ -304,7 +304,7 @@ struct DecodeTests {
         // Decode 5 steps from prefill — dump top-5 logits per step
         let prefillPlan = try compiler.compilePrefill(
             graph: resolved, hiddenSize: 2048, intermediateSize: 8192,
-            vocabSize: 65536, maximumSequenceLength: 64,
+            vocabSize: 65536, inferencePolicy: InferencePolicy(maximumSequenceLength: 64),
             stafWeightStore: store, device: device)
         var model3 = try MetalInferenceModel(plan: plan, device: device)
         model3.prefillPlan = prefillPlan

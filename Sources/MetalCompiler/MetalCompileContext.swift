@@ -124,12 +124,14 @@ struct CompileContext {
     let hiddenSize: Int
     let intermediateSize: Int
     let vocabSize: Int
-    let maximumSequenceLength: Int
+    let inferencePolicy: InferencePolicy
     let stafWeightStore: STAFWeightStore?
     let device: MTLDevice
     let weightFormat: WeightFormat
     let decodeBufferPrecision: BufferPrecision
     let accessPolicyResolver: ProjectionWeightAccessPolicyResolver
+
+    var maximumSequenceLength: Int { inferencePolicy.maximumSequenceLength }
 
     var decodeKernelContext: KernelContext {
         KernelContext(

@@ -63,7 +63,7 @@ struct PrefillNaNDiagnosticTests {
             hiddenSize: hiddenSize,
             intermediateSize: intermediateSize,
             vocabSize: vocabSize,
-            maximumSequenceLength: 32,
+            inferencePolicy: InferencePolicy(maximumSequenceLength: 32),
             stafWeightStore: store,
             device: device)
 
@@ -242,7 +242,7 @@ struct PrefillNaNDiagnosticTests {
             hiddenSize: hiddenSize,
             intermediateSize: intermediateSize,
             vocabSize: vocabSize,
-            maximumSequenceLength: 32,
+            inferencePolicy: InferencePolicy(maximumSequenceLength: 32),
             stafWeightStore: store,
             device: device)
 

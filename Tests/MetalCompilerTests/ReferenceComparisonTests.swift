@@ -315,7 +315,7 @@ struct ReferenceComparisonTests {
             let decode = try compiler.compile(graph: resolved, hiddenSize: 2048, intermediateSize: 8192,
                                               vocabSize: 65536, stafWeightStore: store, device: device)
             let prefill = try compiler.compilePrefill(graph: resolved, hiddenSize: 2048, intermediateSize: 8192,
-                                                     vocabSize: 65536, maximumSequenceLength: 64,
+                                                     vocabSize: 65536, inferencePolicy: InferencePolicy(maximumSequenceLength: 64),
                                                      stafWeightStore: store, device: device)
             var model = try MetalInferenceModel(plan: decode, device: device)
             model.prefillPlan = prefill
@@ -747,7 +747,7 @@ struct ReferenceComparisonTests {
             vocabSize: 65536, stafWeightStore: store, device: device)
         let prefillPlan = try compiler.compilePrefill(
             graph: resolved, hiddenSize: 2048, intermediateSize: 8192,
-            vocabSize: 65536, maximumSequenceLength: 64,
+            vocabSize: 65536, inferencePolicy: InferencePolicy(maximumSequenceLength: 64),
             stafWeightStore: store, device: device)
 
         var model = try MetalInferenceModel(plan: decodePlan, device: device)

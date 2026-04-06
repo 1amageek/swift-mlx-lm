@@ -22,6 +22,7 @@ public struct ModelBundleLoader: Sendable {
     /// Load a model from a HuggingFace repository.
     public func load(
         repo: String,
+        inferencePolicy: InferencePolicy = .default,
         progress: Progress? = nil
     ) async throws -> ModelContainer {
         let hubApi = HubApi()
@@ -31,11 +32,14 @@ public struct ModelBundleLoader: Sendable {
             "*.safetensors", "special_tokens_map.json",
             "chat_template.jinja", "preprocessor_config.json", "processor_config.json"
         ])
-        return try await load(directory: directory)
+        return try await load(directory: directory, inferencePolicy: inferencePolicy)
     }
 
     /// Load a model from a local directory.
-    public func load(directory: URL) async throws -> ModelContainer {
+    public func load(
+        directory: URL,
+        inferencePolicy: InferencePolicy = .default
+    ) async throws -> ModelContainer {
         guard let device = MTLCreateSystemDefaultDevice() else {
             throw ModelBundleLoaderError.noMetalDevice
         }
@@ -78,6 +82,7 @@ public struct ModelBundleLoader: Sendable {
             hiddenSize: resources.config.hiddenSize,
             intermediateSize: resources.config.intermediateSize,
             vocabSize: resources.config.vocabSize,
+            inferencePolicy: inferencePolicy,
             stafWeightStore: weightStore,
             device: device
         )
@@ -88,7 +93,7 @@ public struct ModelBundleLoader: Sendable {
             hiddenSize: resources.config.hiddenSize,
             intermediateSize: resources.config.intermediateSize,
             vocabSize: resources.config.vocabSize,
-            maximumSequenceLength: 4096,
+            inferencePolicy: inferencePolicy,
             stafWeightStore: weightStore,
             sharedKVCache: compiledModel.buffers.kvCache,
             sharedConvState: compiledModel.buffers.convState,

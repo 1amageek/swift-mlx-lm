@@ -42,7 +42,7 @@ public struct KVCacheSpecification: Sendable {
         layerCount: Int = 1,
         kvHeadCount: Int,
         headDimension: Int,
-        maximumSequenceLength: Int = 4096
+        maximumSequenceLength: Int
     ) {
         self.keyQuantizationScheme = keyQuantizationScheme
         self.valueQuantizationScheme = valueQuantizationScheme

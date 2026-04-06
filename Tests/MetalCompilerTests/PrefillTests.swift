@@ -190,7 +190,7 @@ struct PrefillTests {
             graph: graph, hiddenSize: config.hiddenSize,
             intermediateSize: config.intermediateSize,
             vocabSize: config.vocabSize,
-            maximumSequenceLength: 1024,
+            inferencePolicy: InferencePolicy(maximumSequenceLength: 1024),
             device: device)
     }
 }

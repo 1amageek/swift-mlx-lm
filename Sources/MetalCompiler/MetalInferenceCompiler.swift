@@ -45,7 +45,7 @@ public struct MetalInferenceCompiler: Sendable {
         hiddenSize: Int,
         intermediateSize: Int,
         vocabSize: Int,
-        maximumSequenceLength: Int = 4096,
+        inferencePolicy: InferencePolicy = .default,
         stafWeightStore: STAFWeightStore?,
         device: MTLDevice
     ) -> CompileContext {
@@ -59,7 +59,7 @@ public struct MetalInferenceCompiler: Sendable {
             hiddenSize: hiddenSize,
             intermediateSize: intermediateSize,
             vocabSize: vocabSize,
-            maximumSequenceLength: maximumSequenceLength,
+            inferencePolicy: inferencePolicy,
             stafWeightStore: stafWeightStore,
             device: device,
             weightFormat: weightFormat,
@@ -264,7 +264,7 @@ public struct MetalInferenceCompiler: Sendable {
         hiddenSize: Int,
         intermediateSize: Int = 0,
         vocabSize: Int = 0,
-        maximumSequenceLength: Int,
+        inferencePolicy: InferencePolicy = .default,
         stafWeightStore: STAFWeightStore? = nil,
         device: MTLDevice
     ) throws -> String {
@@ -273,11 +273,11 @@ public struct MetalInferenceCompiler: Sendable {
             hiddenSize: hiddenSize,
             intermediateSize: intermediateSize,
             vocabSize: vocabSize,
-            maximumSequenceLength: maximumSequenceLength,
+            inferencePolicy: inferencePolicy,
             stafWeightStore: stafWeightStore,
             device: device)
         let formatter = CompiledPlanDiagnosticsFormatter()
-        return formatter.formatPrefillPlan(plan, maximumSequenceLength: maximumSequenceLength)
+        return formatter.formatPrefillPlan(plan, maximumSequenceLength: inferencePolicy.maximumSequenceLength)
     }
 
     struct DecodeWeightBindingSummary: Sendable {
@@ -446,6 +446,7 @@ public struct MetalInferenceCompiler: Sendable {
         hiddenSize: Int,
         intermediateSize: Int = 0,
         vocabSize: Int = 0,
+        inferencePolicy: InferencePolicy = .default,
         stafWeightStore: STAFWeightStore? = nil,
         device: MTLDevice
     ) throws -> MetalCompiledModel {
@@ -454,6 +455,7 @@ public struct MetalInferenceCompiler: Sendable {
             hiddenSize: hiddenSize,
             intermediateSize: intermediateSize,
             vocabSize: vocabSize,
+            inferencePolicy: inferencePolicy,
             stafWeightStore: stafWeightStore,
             device: device)
         let initialOptimization = entryCollector.collect(using: initialContext, kernelContext: initialContext.decodeKernelContext)
@@ -468,6 +470,7 @@ public struct MetalInferenceCompiler: Sendable {
             hiddenSize: hiddenSize,
             intermediateSize: intermediateSize,
             vocabSize: vocabSize,
+            inferencePolicy: inferencePolicy,
             stafWeightStore: specializedWeightStore,
             device: device)
         let optimization = entryCollector.collect(using: context, kernelContext: context.decodeKernelContext)
@@ -526,7 +529,7 @@ public struct MetalInferenceCompiler: Sendable {
         hiddenSize: Int,
         intermediateSize: Int = 0,
         vocabSize: Int = 0,
-        maximumSequenceLength: Int = 4096,
+        inferencePolicy: InferencePolicy = .default,
         stafWeightStore: STAFWeightStore? = nil,
         sharedKVCache: MetalKVCache? = nil,
         sharedConvState: MTLBuffer? = nil,
@@ -541,7 +544,7 @@ public struct MetalInferenceCompiler: Sendable {
             hiddenSize: hiddenSize,
             intermediateSize: intermediateSize,
             vocabSize: vocabSize,
-            maximumSequenceLength: maximumSequenceLength,
+            inferencePolicy: inferencePolicy,
             stafWeightStore: stafWeightStore,
             device: device)
         let optimization = entryCollector.collect(using: context, kernelContext: context.prefillKernelContext)

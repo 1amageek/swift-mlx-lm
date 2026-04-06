@@ -139,7 +139,7 @@ struct BenchmarkDiagnosticsTests {
         let prefillStart = CFAbsoluteTimeGetCurrent()
         let prefillPlan = try compiler.compilePrefill(
             graph: resolved, hiddenSize: 2048, intermediateSize: 8192,
-            vocabSize: 65536, maximumSequenceLength: 64,
+            vocabSize: 65536, inferencePolicy: InferencePolicy(maximumSequenceLength: 64),
             stafWeightStore: store, device: device)
         let prefillCompileTime = CFAbsoluteTimeGetCurrent() - prefillStart
 

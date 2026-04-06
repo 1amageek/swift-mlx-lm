@@ -478,7 +478,7 @@ private actor QwenVisionSyntheticContainerCache {
             hiddenSize: config.hiddenSize,
             intermediateSize: config.intermediateSize,
             vocabSize: config.vocabSize,
-            maximumSequenceLength: 512,
+            inferencePolicy: InferencePolicy(maximumSequenceLength: 512),
             sharedKVCache: compiledModel.buffers.kvCache,
             sharedConvState: compiledModel.buffers.convState,
             sharedConvStateDimension: compiledModel.buffers.convStateDimension,

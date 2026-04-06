@@ -34,7 +34,7 @@ struct LiveModelDiagnosticTests {
         let prefillPlan = try MetalInferenceCompiler().compilePrefill(
             graph: resolved,
             hiddenSize: 2048, intermediateSize: 5632, vocabSize: 128256,
-            maximumSequenceLength: seqLen,
+            inferencePolicy: InferencePolicy(maximumSequenceLength: seqLen),
             stafWeightStore: store, device: device)
 
         print("[Live CB] plan: \(prefillPlan.stepCount) steps, seqLen=\(seqLen)")
@@ -154,7 +154,7 @@ struct LiveModelDiagnosticTests {
             hiddenSize: config.hiddenSize,
             intermediateSize: config.intermediateSize,
             vocabSize: config.vocabSize,
-            maximumSequenceLength: seqLen,
+            inferencePolicy: InferencePolicy(maximumSequenceLength: seqLen),
             stafWeightStore: store, device: device)
 
         print("[Proj dump] plan: \(prefillPlan.stepCount) steps, scratch=\(prefillPlan.buffers.scratch.length)")
@@ -336,7 +336,7 @@ struct LiveModelDiagnosticTests {
             vocabSize: 65536, stafWeightStore: store, device: device)
         let prefillPlan = try compiler.compilePrefill(
             graph: resolved, hiddenSize: 2048, intermediateSize: 8192,
-            vocabSize: 65536, maximumSequenceLength: max(1, realTokens.count),
+            vocabSize: 65536, inferencePolicy: InferencePolicy(maximumSequenceLength: max(1, realTokens.count)),
             stafWeightStore: store, device: device)
 
         print("[InfModel] decode=\(decodePlan.steps.count) prefill=\(prefillPlan.stepCount) scratch=\(prefillPlan.buffers.scratch.length) hidden=\(prefillPlan.buffers.hidden.length)")
@@ -371,7 +371,7 @@ struct LiveModelDiagnosticTests {
         let prefillPlan = try MetalInferenceCompiler().compilePrefill(
             graph: resolved,
             hiddenSize: 2048, intermediateSize: 5632, vocabSize: 128256,
-            maximumSequenceLength: seqLen,
+            inferencePolicy: InferencePolicy(maximumSequenceLength: seqLen),
             stafWeightStore: store,
             device: device)
 

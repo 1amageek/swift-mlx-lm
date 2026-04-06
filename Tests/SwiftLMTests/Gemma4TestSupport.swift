@@ -310,7 +310,7 @@ private actor Gemma4SyntheticContainerCache {
             hiddenSize: config.hiddenSize,
             intermediateSize: config.intermediateSize,
             vocabSize: config.vocabSize,
-            maximumSequenceLength: 256,
+            inferencePolicy: InferencePolicy(maximumSequenceLength: 256),
             sharedKVCache: compiledModel.buffers.kvCache,
             sharedConvState: compiledModel.buffers.convState,
             sharedConvStateDimension: compiledModel.buffers.convStateDimension,

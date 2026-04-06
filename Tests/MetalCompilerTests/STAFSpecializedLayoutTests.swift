@@ -1578,7 +1578,7 @@ struct STAFSpecializedLayoutTests {
             hiddenSize: 2_048,
             intermediateSize: 8_192,
             vocabSize: 65_536,
-            maximumSequenceLength: 64,
+            inferencePolicy: InferencePolicy(maximumSequenceLength: 64),
             stafWeightStore: store,
             device: device
         )
@@ -1595,7 +1595,7 @@ struct STAFSpecializedLayoutTests {
             hiddenSize: 2_048,
             intermediateSize: 8_192,
             vocabSize: 65_536,
-            maximumSequenceLength: 64,
+            inferencePolicy: InferencePolicy(maximumSequenceLength: 64),
             stafWeightStore: store,
             device: device
         )
@@ -1655,7 +1655,7 @@ struct STAFSpecializedLayoutTests {
             hiddenSize: 2_048,
             intermediateSize: 8_192,
             vocabSize: 65_536,
-            maximumSequenceLength: 64,
+            inferencePolicy: InferencePolicy(maximumSequenceLength: 64),
             stafWeightStore: store,
             device: device
         )
@@ -1672,7 +1672,7 @@ struct STAFSpecializedLayoutTests {
             hiddenSize: 2_048,
             intermediateSize: 8_192,
             vocabSize: 65_536,
-            maximumSequenceLength: 64,
+            inferencePolicy: InferencePolicy(maximumSequenceLength: 64),
             stafWeightStore: store,
             device: device
         )
@@ -1732,7 +1732,7 @@ struct STAFSpecializedLayoutTests {
             hiddenSize: 2_048,
             intermediateSize: 8_192,
             vocabSize: 65_536,
-            maximumSequenceLength: 64,
+            inferencePolicy: InferencePolicy(maximumSequenceLength: 64),
             stafWeightStore: store,
             device: device
         )
@@ -1749,7 +1749,7 @@ struct STAFSpecializedLayoutTests {
             hiddenSize: 2_048,
             intermediateSize: 8_192,
             vocabSize: 65_536,
-            maximumSequenceLength: 64,
+            inferencePolicy: InferencePolicy(maximumSequenceLength: 64),
             stafWeightStore: store,
             device: device
         )
@@ -1820,7 +1820,7 @@ struct STAFSpecializedLayoutTests {
             hiddenSize: 2_048,
             intermediateSize: 8_192,
             vocabSize: 65_536,
-            maximumSequenceLength: 64,
+            inferencePolicy: InferencePolicy(maximumSequenceLength: 64),
             stafWeightStore: store,
             device: device
         )
@@ -1837,7 +1837,7 @@ struct STAFSpecializedLayoutTests {
             hiddenSize: 2_048,
             intermediateSize: 8_192,
             vocabSize: 65_536,
-            maximumSequenceLength: 64,
+            inferencePolicy: InferencePolicy(maximumSequenceLength: 64),
             stafWeightStore: store,
             device: device
         )
@@ -1897,7 +1897,7 @@ struct STAFSpecializedLayoutTests {
             hiddenSize: 2_048,
             intermediateSize: 8_192,
             vocabSize: 65_536,
-            maximumSequenceLength: 64,
+            inferencePolicy: InferencePolicy(maximumSequenceLength: 64),
             stafWeightStore: store,
             device: device
         )
@@ -1914,7 +1914,7 @@ struct STAFSpecializedLayoutTests {
             hiddenSize: 2_048,
             intermediateSize: 8_192,
             vocabSize: 65_536,
-            maximumSequenceLength: 64,
+            inferencePolicy: InferencePolicy(maximumSequenceLength: 64),
             stafWeightStore: store,
             device: device
         )
@@ -1972,7 +1972,7 @@ struct STAFSpecializedLayoutTests {
             hiddenSize: 2_048,
             intermediateSize: 8_192,
             vocabSize: 65_536,
-            maximumSequenceLength: 64,
+            inferencePolicy: InferencePolicy(maximumSequenceLength: 64),
             stafWeightStore: store,
             device: device
         )
@@ -1989,7 +1989,7 @@ struct STAFSpecializedLayoutTests {
             hiddenSize: 2_048,
             intermediateSize: 8_192,
             vocabSize: 65_536,
-            maximumSequenceLength: 64,
+            inferencePolicy: InferencePolicy(maximumSequenceLength: 64),
             stafWeightStore: store,
             device: device
         )
@@ -2052,7 +2052,7 @@ struct STAFSpecializedLayoutTests {
             hiddenSize: 2_048,
             intermediateSize: 8_192,
             vocabSize: 65_536,
-            maximumSequenceLength: 64,
+            inferencePolicy: InferencePolicy(maximumSequenceLength: 64),
             stafWeightStore: store,
             device: device
         )
@@ -2069,7 +2069,7 @@ struct STAFSpecializedLayoutTests {
             hiddenSize: 2_048,
             intermediateSize: 8_192,
             vocabSize: 65_536,
-            maximumSequenceLength: 64,
+            inferencePolicy: InferencePolicy(maximumSequenceLength: 64),
             stafWeightStore: store,
             device: device
         )
@@ -2133,7 +2133,7 @@ struct STAFSpecializedLayoutTests {
             hiddenSize: 2_048,
             intermediateSize: 8_192,
             vocabSize: 65_536,
-            maximumSequenceLength: 64,
+            inferencePolicy: InferencePolicy(maximumSequenceLength: 64),
             stafWeightStore: store,
             device: device
         )
@@ -2165,7 +2165,7 @@ struct STAFSpecializedLayoutTests {
                 hiddenSize: 2_048,
                 intermediateSize: 8_192,
                 vocabSize: 65_536,
-                maximumSequenceLength: 64,
+                inferencePolicy: InferencePolicy(maximumSequenceLength: 64),
                 stafWeightStore: store,
                 device: device
             )
@@ -2222,7 +2222,7 @@ struct STAFSpecializedLayoutTests {
             hiddenSize: 2_048,
             intermediateSize: 8_192,
             vocabSize: 65_536,
-            maximumSequenceLength: 64,
+            inferencePolicy: InferencePolicy(maximumSequenceLength: 64),
             stafWeightStore: store,
             device: device
         )
@@ -2239,7 +2239,7 @@ struct STAFSpecializedLayoutTests {
             hiddenSize: 2_048,
             intermediateSize: 8_192,
             vocabSize: 65_536,
-            maximumSequenceLength: 64,
+            inferencePolicy: InferencePolicy(maximumSequenceLength: 64),
             stafWeightStore: store,
             device: device
         )

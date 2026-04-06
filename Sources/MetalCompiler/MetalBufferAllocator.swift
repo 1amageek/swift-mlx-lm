@@ -30,15 +30,19 @@ struct MetalBufferAllocator {
 
         let kvCache: MetalKVCache?
         if let firstSlot = walkContext.cacheSlots.first {
-            let kvCacheScheme = preferredKVCacheScheme(for: context.weightFormat)
+            let kvCachePolicy = context.inferencePolicy.kvCache
+            let keyScheme = resolveKVCacheScheme(selection: kvCachePolicy.keyScheme, weightFormat: context.weightFormat)
+            let valueScheme = resolveKVCacheScheme(selection: kvCachePolicy.valueScheme, weightFormat: context.weightFormat)
             kvCache = try MetalKVCache(
                 device: context.device,
                 specification: KVCacheSpecification(
-                    keyQuantizationScheme: kvCacheScheme,
-                    valueQuantizationScheme: kvCacheScheme,
+                    keyQuantizationScheme: keyScheme,
+                    valueQuantizationScheme: valueScheme,
+                    layoutMode: kvCachePolicy.layoutMode,
                     layerCount: walkContext.cacheSlots.count,
                     kvHeadCount: firstSlot.kvHeadCount,
-                    headDimension: firstSlot.headDimension
+                    headDimension: firstSlot.headDimension,
+                    maximumSequenceLength: context.maximumSequenceLength
                 ),
                 resourceOptions: gpuOnlyOptions
             )
@@ -161,15 +165,19 @@ struct MetalBufferAllocator {
         if let sharedKVCache {
             prefillKVCache = sharedKVCache
         } else if let firstSlot = walkContext.cacheSlots.first {
-            let kvCacheScheme = preferredKVCacheScheme(for: context.weightFormat)
+            let kvCachePolicy = context.inferencePolicy.kvCache
+            let keyScheme = resolveKVCacheScheme(selection: kvCachePolicy.keyScheme, weightFormat: context.weightFormat)
+            let valueScheme = resolveKVCacheScheme(selection: kvCachePolicy.valueScheme, weightFormat: context.weightFormat)
             prefillKVCache = try MetalKVCache(
                 device: context.device,
                 specification: KVCacheSpecification(
-                    keyQuantizationScheme: kvCacheScheme,
-                    valueQuantizationScheme: kvCacheScheme,
+                    keyQuantizationScheme: keyScheme,
+                    valueQuantizationScheme: valueScheme,
+                    layoutMode: kvCachePolicy.layoutMode,
                     layerCount: walkContext.cacheSlots.count,
                     kvHeadCount: firstSlot.kvHeadCount,
-                    headDimension: firstSlot.headDimension
+                    headDimension: firstSlot.headDimension,
+                    maximumSequenceLength: context.maximumSequenceLength
                 ),
                 resourceOptions: gpuOptions
             )
@@ -314,8 +322,16 @@ struct MetalBufferAllocator {
         return PerLayerInputRequirements(layerCount: layerCount, dimension: dimension)
     }
 
-    private func preferredKVCacheScheme(for weightFormat: WeightFormat) -> QuantizationSchemeIdentifier {
-        weightFormat == .bfloat16 ? .bf16RowMajor : .fp16RowMajor
+    private func resolveKVCacheScheme(
+        selection: SchemeSelection,
+        weightFormat: WeightFormat
+    ) -> QuantizationSchemeIdentifier {
+        switch selection {
+        case .automatic:
+            return weightFormat == .bfloat16 ? .bf16RowMajor : .fp16RowMajor
+        case .fixed(let scheme):
+            return scheme
+        }
     }
 }
 
