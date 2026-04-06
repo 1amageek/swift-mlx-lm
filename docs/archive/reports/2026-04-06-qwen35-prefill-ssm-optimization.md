@@ -157,7 +157,28 @@ After (2 dk-loops per d, sharing cache lines):
   Total: 2 reads + 2 writes per element (33% reduction)
 ```
 
-#### 4c. Threadgroup サイズ拡大 (256 → 1024)
+#### 4c. kInv/qInv の内側ループ外への因数分解
+
+Phase 3 の内側 dk ループ内で kInv と qInv が各反復で冗長に乗算されていた。これをループ外に因数分解。
+
+```
+Before (per d value):
+  loop 1: kvmem += state * k * kInv   // dk muls of kInv
+  loop 2: state += k * kInv * delta   // dk muls of kInv
+           dot += state * q * qInv    // dk muls of qInv
+  Total: 3 * dk = 384 redundant muls per d
+
+After:
+  loop 1: kvmemRaw += state * k       // no kInv
+  kvmem = kvmemRaw * kInv             // 1 mul
+  kInvDelta = kInv * delta            // 1 mul
+  loop 2: state += k * kInvDelta      // 1 combined mul
+           dotRaw += state * q         // no qInv
+  dot = dotRaw * qInv                 // 1 mul
+  Savings: (3 * dk - 3) = 381 muls per d, 48,768 per head, 780K per position
+```
+
+#### 4d. Threadgroup サイズ拡大 (256 → 1024)
 
 Prefill kernel の threadgroup サイズを 256 → 1024 に変更。threadsPerHead = 64, dChunk = 2。
 
@@ -298,8 +319,9 @@ Text segments の固定オーバーヘッド (~40-70ms/segment) が支配的。C
 | Candidate | Expected Impact | Rationale |
 |-----------|-----------------|-----------|
 | Prefill command buffer fusion | Medium | Multimodal prefill が segment ごとに `waitUntilCompleted:true` で同期。fusion で CPU-GPU 同期削減。Text segments の per-token overhead が high (25ms vs 11ms) |
-| Prefill barrier optimization | Medium | Decode 側で実施済みの `optimizeDecodeBarrierPolicies` と同等のアプローチを prefill に適用 |
+| ~~Prefill barrier optimization~~ | ~~Medium~~ | **実施済み**: offset-aware buffer region tracking で prefill barriers を最適化。DeltaNet layer あたり 4 barriers 削減 (norm + z + b + a projections) |
 | Segment coalescing | Low-Medium | 隣接テキストセグメントを結合し、GEMM バッチサイズを拡大。固定オーバーヘッド削減 |
+| in_proj_b + in_proj_a 統合 | Low-Medium | 1024→16 の tiny GEMM が 18 DeltaNet 層で 2 回ずつ dispatch。1024→32 に結合すれば dispatch 数半減 |
 | SSM position chunking | Unknown | Position 間の serial dependency を chunk 化して並列度向上。DeltaNet の recurrence は厳密に sequential だが、chunk 単位の並列化は理論的に可能 |
 | Metal 4 cooperative tensor | Unknown | 大バッチセグメントで AMX 効率向上 |
 
@@ -309,8 +331,9 @@ Text segments の固定オーバーヘッド (~40-70ms/segment) が支配的。C
 
 | File | Change |
 |------|--------|
-| `Sources/MetalCompiler/Fragments/MetalSourceGenerator+ConvAndState.swift` | Modified: 3-phase SSM recurrence → multi-thread-per-head Phase 3 (decode + prefill) |
-| `Sources/MetalCompiler/Fragments/Primitives/SSMRecurrenceFragment.swift` | Modified: `convDimension` property |
+| `Sources/MetalCompiler/Fragments/MetalSourceGenerator+ConvAndState.swift` | Modified: 3-phase SSM recurrence → multi-thread-per-head Phase 3, fused state passes, kInv/qInv factored |
+| `Sources/MetalCompiler/Fragments/Primitives/SSMRecurrenceFragment.swift` | Modified: `convDimension` property, threadgroup 1024, dispatch dimension fix |
+| `Sources/MetalCompiler/MetalPrefillStepBuilder.swift` | Modified: offset-aware prefill barrier optimization |
 | `Sources/MetalCompiler/MetalKernelSourceCatalog.swift` | Modified: SSM convDimension passthrough + MPP GEMM registration for fused entries |
 | `Sources/MetalCompiler/Fragments/MetalSourceGenerator+Library.swift` | Modified: default convDimension |
 | `Sources/MetalCompiler/MetalPrefillPlan.swift` | Modified: `bindAndAdjustGridHeightTiled` policy |
