@@ -27,7 +27,7 @@ public struct SSMRecurrenceFragment: PrimitiveMetalKernelFragment {
         context.bufferPrecision == .float32 ? "ssm_recurrence_f32" : "ssm_recurrence"
     }
     public var dispatchDimension: MetalDispatchDimension {
-        .reduction(dimension: 1)
+        .reduction(dimension: convDimension)
     }
     public var weightSlots: [MetalWeightSlot] {
         [
@@ -128,7 +128,7 @@ public struct SSMRecurrenceFragment: PrimitiveMetalKernelFragment {
             ? "ssm_recurrence_seq_f32"
             : "ssm_recurrence_seq"
         let pipeline = try context.getPipeline(kernelName)
-        let threads = min(256, pipeline.maxTotalThreadsPerThreadgroup)
+        let threads = min(1024, pipeline.maxTotalThreadsPerThreadgroup)
 
         let step = MetalPrefillStep(
             pipeline: pipeline,

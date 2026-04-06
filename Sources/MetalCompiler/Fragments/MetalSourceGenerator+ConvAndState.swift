@@ -285,7 +285,7 @@ public static func generateSSMRecurrence(
 
         // Phase 3: Per-head recurrence with multi-thread-per-head parallelism.
         // Distribute dv dimension across multiple threads within each head.
-        threadgroup float normPartials[\(convDimension > 256 ? 256 : convDimension)];
+        threadgroup float normPartials[1024];
         {
             const uint threadsPerHead = min(tgSize / max(numHeads, 1u), dv);
             const uint activeThreads = numHeads * threadsPerHead;
@@ -316,32 +316,21 @@ public static func generateSSMRecurrence(
                 float qInv = rsqrt(qNormSq + 1e-6f) * rsqrt(float(dk));
                 float kInv = rsqrt(kNormSq + 1e-6f);
 
-                for (uint j = 0; j < dk; ++j) {
-                    for (uint d = dStart; d < dEnd; ++d) {
-                        state[j * dv + d] *= decay;
-                    }
-                }
-
+                // Fully fused per-d: decay+kvmem → delta → update+output
+                float localNormSq = 0.0f;
                 for (uint d = dStart; d < dEnd; ++d) {
-                    float v = convSiluCache[vBase + d];
                     float kvmem = 0.0f;
                     for (uint j = 0; j < dk; ++j) {
-                        float k = convSiluCache[kBase + j] * kInv;
-                        kvmem += state[j * dv + d] * k;
+                        float s = state[j * dv + d] * decay;
+                        state[j * dv + d] = s;
+                        kvmem += s * convSiluCache[kBase + j] * kInv;
                     }
-                    float delta = beta * (v - kvmem);
+                    float delta = beta * (convSiluCache[vBase + d] - kvmem);
+                    float dot = 0.0f;
                     for (uint j = 0; j < dk; ++j) {
                         float k = convSiluCache[kBase + j] * kInv;
                         state[j * dv + d] += k * delta;
-                    }
-                }
-
-                float localNormSq = 0.0f;
-                for (uint d = dStart; d < dEnd; ++d) {
-                    float dot = 0.0f;
-                    for (uint j = 0; j < dk; ++j) {
-                        float q = convSiluCache[qBase + j] * qInv;
-                        dot += state[j * dv + d] * q;
+                        dot += state[j * dv + d] * convSiluCache[qBase + j] * qInv;
                     }
                     output[headIndex * dv + d] = \(bt)(dot);
                     localNormSq += dot * dot;
@@ -421,7 +410,7 @@ public static func generateSSMRecurrenceSequence(
         // Precomputed conv_silu values for all channels (eliminates ~33K redundant
         // device memory reads per head per position).
         threadgroup float convSiluCache[\(convDimension)];
-        threadgroup float normPartials[256];
+        threadgroup float normPartials[1024];
 
         for (uint pos = 0; pos < sequenceLength; ++pos) {
             device const \(bt)* projectedQKVPos = projectedQKV + pos * convDim;
@@ -483,32 +472,22 @@ public static func generateSSMRecurrenceSequence(
                     float qInv = rsqrt(qNormSq + 1e-6f) * rsqrt(float(dk));
                     float kInv = rsqrt(kNormSq + 1e-6f);
 
-                    for (uint j = 0; j < dk; ++j) {
-                        for (uint d = dStart; d < dEnd; ++d) {
-                            state[j * dv + d] *= decay;
-                        }
-                    }
-
+                    // Fully fused per-d: decay+kvmem → delta → update+output
+                    // Two dk-loops per d share the same state cache lines.
+                    float localNormSq = 0.0f;
                     for (uint d = dStart; d < dEnd; ++d) {
-                        float v = convSiluCache[vBase + d];
                         float kvmem = 0.0f;
                         for (uint j = 0; j < dk; ++j) {
-                            float k = convSiluCache[kBase + j] * kInv;
-                            kvmem += state[j * dv + d] * k;
+                            float s = state[j * dv + d] * decay;
+                            state[j * dv + d] = s;
+                            kvmem += s * convSiluCache[kBase + j] * kInv;
                         }
-                        float delta = beta * (v - kvmem);
+                        float delta = beta * (convSiluCache[vBase + d] - kvmem);
+                        float dot = 0.0f;
                         for (uint j = 0; j < dk; ++j) {
                             float k = convSiluCache[kBase + j] * kInv;
                             state[j * dv + d] += k * delta;
-                        }
-                    }
-
-                    float localNormSq = 0.0f;
-                    for (uint d = dStart; d < dEnd; ++d) {
-                        float dot = 0.0f;
-                        for (uint j = 0; j < dk; ++j) {
-                            float q = convSiluCache[qBase + j] * qInv;
-                            dot += state[j * dv + d] * q;
+                            dot += state[j * dv + d] * convSiluCache[qBase + j] * qInv;
                         }
                         outputPos[headIndex * dv + d] = \(bt)(dot);
                         localNormSq += dot * dot;
