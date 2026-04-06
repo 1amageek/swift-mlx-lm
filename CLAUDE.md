@@ -342,6 +342,38 @@ Vision encoder と text decoder は独立したモデル。IR に vision encoder
 - Prefill GEMM は Metal 4 `matmul2d` への置換で AMX 最適化パスが期待できる
 - Weight quantization (Q4/Q8) が decode 高速化の最大レバー (帯域 2-4x 削減)
 
+## Qwen3.5 = VLM（Vision Language Model）
+
+**Qwen3.5 はマルチモーダルモデルである。テキスト専用モデルではない。**
+
+- `model_type: "qwen3_5"` は Vision Encoder を含む VLM を指す
+- config.json に `vision_config`, `image_token_id`, `video_token_id` が存在する
+- `preprocessor_config.json` の `processor_class: "Qwen3VLProcessor"` で画像・動画処理を宣言
+- テキスト専用で使う場合は vLLM の `--language-model-only` 相当のフラグが必要
+- テキストバックボーンは DeltaNet + Full Attention hybrid（`layer_types` で混在指定）
+- 「Qwen3-VL」という別のモデル系列は存在しない — Qwen3.5 自体が VLM
+
+### Qwen3.5 config.json の構造
+
+```
+{
+  "model_type": "qwen3_5",
+  "image_token_id": 248056,
+  "video_token_id": 248057,
+  "vision_start_token_id": 248053,
+  "vision_end_token_id": 248054,
+  "text_config": { ... },          // DeltaNet + Attention hybrid
+  "vision_config": {
+    "depth": 12,
+    "hidden_size": 768,
+    "patch_size": 16,
+    "spatial_merge_size": 2,
+    "temporal_patch_size": 2,
+    "deepstack_visual_indexes": []  // 0.8B では空
+  }
+}
+```
+
 ## Family と Model の境界
 
 - Family: 計算グラフ上の再利用可能な単位 (DeltaNet, MoE, parallel attention+MLP)
