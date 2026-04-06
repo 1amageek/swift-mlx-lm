@@ -262,8 +262,6 @@ public struct MetalInferenceModel: @unchecked Sendable {
 
         guard let prefillPlan else {
             var lastOutput: Int32 = -1
-            let shouldProfile = getenv("SWIFTLM_PROFILE_MULTIMODAL").map { String(cString: $0) == "1" } ?? false
-            let profileStart = shouldProfile ? CFAbsoluteTimeGetCurrent() : 0
             for tokenIndex in hiddenStates.indices {
                 lastOutput = try decodeSync(
                     hiddenState: hiddenStates[tokenIndex],
@@ -271,10 +269,6 @@ public struct MetalInferenceModel: @unchecked Sendable {
                     deepstackFeaturesByLayer: deepstackFeaturesByLayer,
                     tokenIndex: tokenIndex
                 )
-                if shouldProfile, ((tokenIndex + 1) % 8 == 0 || tokenIndex + 1 == hiddenStates.count) {
-                    let elapsed = CFAbsoluteTimeGetCurrent() - profileStart
-                    print("[MetalInference] visual-prefill-progress tokens=\(tokenIndex + 1)/\(hiddenStates.count) elapsed=\(String(format: "%.3f", elapsed))s")
-                }
             }
             return lastOutput
         }
@@ -323,10 +317,8 @@ public struct MetalInferenceModel: @unchecked Sendable {
         if tokens.count > multimodalChunkSize {
             var lastOutput: Int32 = -1
             var startIndex = 0
-            let shouldProfile = getenv("SWIFTLM_PROFILE_MULTIMODAL").map { String(cString: $0) == "1" } ?? false
             while startIndex < tokens.count {
                 let endIndex = min(startIndex + multimodalChunkSize, tokens.count)
-                let chunkStart = shouldProfile ? CFAbsoluteTimeGetCurrent() : 0
                 var localHiddenOverrides: [Int: [Float]] = [:]
                 for (index, values) in hiddenOverridesByTokenIndex where index >= startIndex && index < endIndex {
                     localHiddenOverrides[index - startIndex] = values
@@ -349,10 +341,6 @@ public struct MetalInferenceModel: @unchecked Sendable {
                     hiddenOverridesByTokenIndex: localHiddenOverrides,
                     deepstackFeaturesByLayerAndTokenIndex: localDeepstack
                 )
-                if shouldProfile {
-                    let elapsed = CFAbsoluteTimeGetCurrent() - chunkStart
-                    print("[MetalInference] multimodal-prefill-chunk start=\(startIndex) end=\(endIndex) elapsed=\(String(format: "%.3f", elapsed))s")
-                }
                 startIndex = endIndex
             }
             return lastOutput
@@ -370,12 +358,6 @@ public struct MetalInferenceModel: @unchecked Sendable {
     }
 
     private func resolveMultimodalChunkSize(tokenCount: Int) -> Int {
-        if let configured = getenv("SWIFTLM_MULTIMODAL_PREFILL_CHUNK_SIZE") {
-            let value = String(cString: configured)
-            if let parsed = Int(value), parsed > 0 {
-                return parsed
-            }
-        }
         // Larger chunks amortize per-chunk overhead (command buffer round-trips,
         // CPU hidden writes) without increasing total GPU work. SSM serial loops
         // and GEMMs are memory-bandwidth bound regardless of chunk size.

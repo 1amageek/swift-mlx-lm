@@ -36,29 +36,9 @@ final class QwenVisionRuntime {
             )
         }
 
-        let shouldProfile = getenv("SWIFTLM_PROFILE_MULTIMODAL").map { String(cString: $0) == "1" } ?? false
-        let totalStart = shouldProfile ? CFAbsoluteTimeGetCurrent() : 0
-
-        let layoutStart = shouldProfile ? CFAbsoluteTimeGetCurrent() : 0
         let layout = try QwenVisionExecutionLayoutBuilder().makeLayout(for: prepared)
-        if shouldProfile {
-            let elapsed = CFAbsoluteTimeGetCurrent() - layoutStart
-            print("[QwenVisionRuntime] layout=\(String(format: "%.3f", elapsed))s tokens=\(prepared.tokenIDs.count)")
-        }
-
-        let imagesStart = shouldProfile ? CFAbsoluteTimeGetCurrent() : 0
         let encodedImages = try encoder.encode(images: multimodal.images)
-        if shouldProfile {
-            let elapsed = CFAbsoluteTimeGetCurrent() - imagesStart
-            print("[QwenVisionRuntime] encode-images=\(String(format: "%.3f", elapsed))s samples=\(multimodal.images.count) tokens=\(encodedImages.visualTokenEmbeddings.count)")
-        }
-
-        let videosStart = shouldProfile ? CFAbsoluteTimeGetCurrent() : 0
         let encodedVideos = try encoder.encode(videos: multimodal.videos)
-        if shouldProfile {
-            let elapsed = CFAbsoluteTimeGetCurrent() - videosStart
-            print("[QwenVisionRuntime] encode-videos=\(String(format: "%.3f", elapsed))s samples=\(multimodal.videos.count) tokens=\(encodedVideos.visualTokenEmbeddings.count)")
-        }
 
         let visualTokenCount = layout.layout.tokenTypeIDs.filter { $0 == 1 }.count
         guard visualTokenCount == encodedImages.visualTokenEmbeddings.count else {
@@ -85,11 +65,6 @@ final class QwenVisionRuntime {
                     "Deepstack feature count mismatch at video layer \(layerIndex)."
                 )
             }
-        }
-
-        if shouldProfile {
-            let elapsed = CFAbsoluteTimeGetCurrent() - totalStart
-            print("[QwenVisionRuntime] executable-total=\(String(format: "%.3f", elapsed))s")
         }
 
         return VisualContext(

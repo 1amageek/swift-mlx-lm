@@ -335,8 +335,6 @@ public final class ModelContainer: @unchecked Sendable {
     }
 
     private func prefill(prompt: ExecutablePrompt) throws -> (firstToken: Int32, ropePositionOffset: Int) {
-        let shouldProfile = getenv("SWIFTLM_PROFILE_MULTIMODAL").map { String(cString: $0) == "1" } ?? false
-        let profileStart = shouldProfile ? CFAbsoluteTimeGetCurrent() : 0
         inferenceModel.resetCaches()
         if let gemma4PromptContext = prompt.gemma4PromptContext {
             let ropeAxes = (0..<gemma4PromptContext.promptEmbeddings.count).map { index -> (UInt32, UInt32, UInt32) in
@@ -351,10 +349,6 @@ public final class ModelContainer: @unchecked Sendable {
             guard firstToken >= 0 else {
                 throw ModelContainerError.invalidPrefillResult
             }
-            if shouldProfile {
-                let elapsed = CFAbsoluteTimeGetCurrent() - profileStart
-                print("[ModelContainer] gemma4-prefill=\(String(format: "%.3f", elapsed))s tokens=\(prompt.tokenIDs.count)")
-            }
             return (firstToken: firstToken, ropePositionOffset: 0)
         }
         guard let visualContext = prompt.visualContext else {
@@ -362,10 +356,6 @@ public final class ModelContainer: @unchecked Sendable {
             let firstToken = inferenceModel.prefill(tokens: promptTokens)
             guard firstToken >= 0 else {
                 throw ModelContainerError.invalidPrefillResult
-            }
-            if shouldProfile {
-                let elapsed = CFAbsoluteTimeGetCurrent() - profileStart
-                print("[ModelContainer] text-prefill=\(String(format: "%.3f", elapsed))s tokens=\(prompt.tokenIDs.count)")
             }
             return (firstToken: firstToken, ropePositionOffset: 0)
         }
@@ -385,7 +375,6 @@ public final class ModelContainer: @unchecked Sendable {
             let tokenIndex = segment.tokenRange.lowerBound
             let endIndex = segment.tokenRange.upperBound
             let chunkTokens = prompt.tokenIDs[segment.tokenRange].map(Int32.init)
-            let chunkStart = shouldProfile ? CFAbsoluteTimeGetCurrent() : 0
             switch tokenType {
             case 0:
                 firstToken = inferenceModel.prefill(tokens: chunkTokens)
@@ -452,18 +441,10 @@ public final class ModelContainer: @unchecked Sendable {
                     "Unsupported multimodal token type ID: \(tokenType)"
                 )
             }
-            if shouldProfile {
-                let elapsed = CFAbsoluteTimeGetCurrent() - chunkStart
-                print("[ModelContainer] multimodal-prefill-run type=\(tokenType) tokens=\(segment.tokenCount) elapsed=\(String(format: "%.3f", elapsed))s")
-            }
         }
 
         guard firstToken >= 0 else {
             throw ModelContainerError.invalidPrefillResult
-        }
-        if shouldProfile {
-            let elapsed = CFAbsoluteTimeGetCurrent() - profileStart
-            print("[ModelContainer] multimodal-prefill-total=\(String(format: "%.3f", elapsed))s tokens=\(prompt.tokenIDs.count)")
         }
         return (
             firstToken: firstToken,
