@@ -509,10 +509,15 @@ struct MetalKernelSourceCatalog {
                             bufferPrecision: bufferPrecision,
                             weightFormat: weightFormat))
                     }
-                    if generatedNames.insert("swiglu_seq_f32").inserted {
-                        sources.append(MetalSourceGenerator.generateSwiGLU(
-                            name: "swiglu_seq_f32",
-                            bufferPrecision: bufferPrecision))
+                    let activationKernelName: String = switch fused.activation {
+                    case .silu: "swiglu_seq_f32"
+                    case .geluTanh: "geglu_seq_f32"
+                    }
+                    if generatedNames.insert(activationKernelName).inserted {
+                        sources.append(MetalSourceGenerator.generateGatedActivation(
+                            name: activationKernelName,
+                            bufferPrecision: bufferPrecision,
+                            activation: fused.activation))
                     }
                 }
 

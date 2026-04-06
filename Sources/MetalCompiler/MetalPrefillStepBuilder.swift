@@ -302,9 +302,13 @@ private struct PrefillStepPlanner {
                 parameterBindings: entry.parameterBindings,
                 layerIndex: entry.layerIndex
             )
+            let elementwiseKind: ElementwiseFragment.ElementwiseKind = switch fusedOp.activation {
+            case .silu: .swiglu
+            case .geluTanh: .geluGated
+            }
             let swigluEntry = DispatchEntry(
                 index: entry.index + 1,
-                kind: .fragment(ElementwiseFragment(count: fusedOp.outputDimension, kind: .swiglu)),
+                kind: .fragment(ElementwiseFragment(count: fusedOp.outputDimension, kind: elementwiseKind)),
                 parameterBindings: entry.parameterBindings,
                 layerIndex: entry.layerIndex
             )
