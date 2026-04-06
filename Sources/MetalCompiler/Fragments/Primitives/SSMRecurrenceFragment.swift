@@ -46,12 +46,18 @@ public struct SSMRecurrenceFragment: PrimitiveMetalKernelFragment {
         2 * groupCount * keyHeadDimension + headCount * valueHeadDimension
     }
 
+    /// Upper bound for threadgroup size used in SSM kernels.
+    /// Matches the normPartials array size in the generated kernel source.
+    /// At dispatch time, actual threads = min(this, pipeline.maxTotalThreadsPerThreadgroup).
+    public static let maxThreadgroupSize = 1024
+
     public func kernelSource(name: String, bufferPrecision: BufferPrecision, weightFormat: WeightFormat) -> String {
         MetalSourceGenerator.generateSSMRecurrence(
             name: name,
             bufferPrecision: bufferPrecision,
             weightFormat: weightFormat,
-            convDimension: convDimension
+            convDimension: convDimension,
+            maxThreadgroupSize: Self.maxThreadgroupSize
         )
     }
 
@@ -128,7 +134,7 @@ public struct SSMRecurrenceFragment: PrimitiveMetalKernelFragment {
             ? "ssm_recurrence_seq_f32"
             : "ssm_recurrence_seq"
         let pipeline = try context.getPipeline(kernelName)
-        let threads = min(1024, pipeline.maxTotalThreadsPerThreadgroup)
+        let threads = min(Self.maxThreadgroupSize, pipeline.maxTotalThreadsPerThreadgroup)
 
         let step = MetalPrefillStep(
             pipeline: pipeline,

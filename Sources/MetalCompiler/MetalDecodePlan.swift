@@ -63,10 +63,26 @@ public struct MetalDispatchStep: @unchecked Sendable {
 public struct MetalDispatchStepMetadata: Sendable, Equatable {
     public let kernelName: String?
     public let layerIndex: Int?
+    /// Buffer binding access pattern declared by the fragment that created this step.
+    /// The optimizer uses this to determine whether a memory barrier is needed between steps.
+    /// When nil, the optimizer conservatively treats all bindings as both read and written.
+    public let bufferAccessPattern: BufferAccessPattern?
 
-    public init(kernelName: String? = nil, layerIndex: Int? = nil) {
+    public init(kernelName: String? = nil, layerIndex: Int? = nil, bufferAccessPattern: BufferAccessPattern? = nil) {
         self.kernelName = kernelName
         self.layerIndex = layerIndex
+        self.bufferAccessPattern = bufferAccessPattern
+    }
+
+    /// Declares which buffer binding indices are read vs written by a prefill step.
+    public struct BufferAccessPattern: Sendable, Equatable {
+        public let readIndices: Set<Int>
+        public let writeIndices: Set<Int>
+
+        public init(reads: Set<Int>, writes: Set<Int>) {
+            self.readIndices = reads
+            self.writeIndices = writes
+        }
     }
 }
 

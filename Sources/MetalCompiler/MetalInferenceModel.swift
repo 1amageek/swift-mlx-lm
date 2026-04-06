@@ -313,12 +313,12 @@ public struct MetalInferenceModel: @unchecked Sendable {
                 "Multimodal prefill requires a sequence prefill plan"
             )
         }
-        let multimodalChunkSize = resolveMultimodalChunkSize(tokenCount: tokens.count)
-        if tokens.count > multimodalChunkSize {
+        let chunkSize = prefillPlan.maximumSequenceLength
+        if tokens.count > chunkSize {
             var lastOutput: Int32 = -1
             var startIndex = 0
             while startIndex < tokens.count {
-                let endIndex = min(startIndex + multimodalChunkSize, tokens.count)
+                let endIndex = min(startIndex + chunkSize, tokens.count)
                 var localHiddenOverrides: [Int: [Float]] = [:]
                 for (index, values) in hiddenOverridesByTokenIndex where index >= startIndex && index < endIndex {
                     localHiddenOverrides[index - startIndex] = values
@@ -357,18 +357,6 @@ public struct MetalInferenceModel: @unchecked Sendable {
         )
     }
 
-    private func resolveMultimodalChunkSize(tokenCount: Int) -> Int {
-        // Larger chunks amortize per-chunk overhead (command buffer round-trips,
-        // CPU hidden writes) without increasing total GPU work. SSM serial loops
-        // and GEMMs are memory-bandwidth bound regardless of chunk size.
-        if tokenCount >= 64 {
-            return 32
-        }
-        if tokenCount >= 24 {
-            return 16
-        }
-        return 8
-    }
 
     // MARK: - Lifecycle
 

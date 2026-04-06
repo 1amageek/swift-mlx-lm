@@ -264,7 +264,8 @@ struct MetalKernelSourceCatalog {
                                 name: sequenceKernelName,
                                 bufferPrecision: bufferPrecision,
                                 weightFormat: weightFormat,
-                                convDimension: ssmFragment.convDimension))
+                                convDimension: ssmFragment.convDimension,
+                                maxThreadgroupSize: SSMRecurrenceFragment.maxThreadgroupSize))
                         }
                     }
                     if bufferPrecision != .float32 {

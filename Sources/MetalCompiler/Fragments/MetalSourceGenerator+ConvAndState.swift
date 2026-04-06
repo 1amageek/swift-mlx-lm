@@ -227,7 +227,8 @@ public static func generateSSMRecurrence(
     name: String,
     bufferPrecision: BufferPrecision,
     weightFormat: WeightFormat,
-    convDimension: Int
+    convDimension: Int,
+    maxThreadgroupSize: Int
 ) -> String {
     let bt = bufferPrecision.metalType
     let wt = weightFormat.bufferType
@@ -281,7 +282,7 @@ public static func generateSSMRecurrence(
 
         // Phase 3: Per-head recurrence with multi-thread-per-head parallelism.
         // Distribute dv dimension across multiple threads within each head.
-        threadgroup float normPartials[1024];
+        threadgroup float normPartials[\(maxThreadgroupSize)];
         {
             const uint threadsPerHead = min(tgSize / max(numHeads, 1u), dv);
             const uint activeThreads = numHeads * threadsPerHead;
@@ -369,7 +370,8 @@ public static func generateSSMRecurrenceSequence(
     name: String,
     bufferPrecision: BufferPrecision,
     weightFormat: WeightFormat,
-    convDimension: Int
+    convDimension: Int,
+    maxThreadgroupSize: Int
 ) -> String {
     let bt = bufferPrecision.metalType
     let wt = weightFormat.bufferType
@@ -408,7 +410,7 @@ public static func generateSSMRecurrenceSequence(
         // Precomputed conv_silu values for all channels (eliminates ~33K redundant
         // device memory reads per head per position).
         threadgroup float convSiluCache[\(convDimension)];
-        threadgroup float normPartials[1024];
+        threadgroup float normPartials[\(maxThreadgroupSize)];
 
         for (uint pos = 0; pos < sequenceLength; ++pos) {
             device const \(bt)* projectedQKVPos = projectedQKV + pos * convDim;

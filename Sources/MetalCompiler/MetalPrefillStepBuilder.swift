@@ -55,14 +55,15 @@ struct MetalPrefillStepBuilder {
     /// Eliminate unnecessary memory barriers between prefill steps using
     /// offset-aware buffer region tracking.
     ///
-    /// Consecutive projections reading the same scratch slot but writing to different
-    /// slots skip barriers because their write regions don't overlap with any pending read.
+    /// Each step's `metadata.bufferAccessPattern` declares which binding indices are
+    /// reads vs writes. Steps without a declared pattern are treated conservatively
+    /// (all bindings as both read and written).
     static func optimizePrefillBarrierPolicies(
         _ steps: [MetalPrefillStep]
     ) -> [MetalPrefillStep] {
         var pendingWrites = Set<BufferRegion>()
         return steps.map { step in
-            let accesses = prefillRegionAccesses(for: step)
+            let accesses = resolveBufferRegions(for: step)
             let requiresBarrier = !pendingWrites.isDisjoint(with: accesses.reads.union(accesses.writes))
             let newBarrierPolicy: MetalBarrierPolicy = requiresBarrier ? .bufferBarrier : .none
 
@@ -93,58 +94,27 @@ struct MetalPrefillStepBuilder {
         }
     }
 
-    /// Determine read/write buffer regions for a prefill step based on kernel name.
-    ///
-    /// Uses (buffer, offset) pairs so that non-overlapping scratch slots don't
-    /// create false write-after-write or read-after-write hazards.
-    private static func prefillRegionAccesses(
+    /// Convert a step's declared buffer access pattern into concrete buffer regions.
+    /// Falls back to treating all bindings as read+written when no pattern is declared.
+    private static func resolveBufferRegions(
         for step: MetalPrefillStep
     ) -> (reads: Set<BufferRegion>, writes: Set<BufferRegion>) {
         let buffers = step.bindings.buffers
-        let name = step.metadata.kernelName ?? ""
 
         func regions(for indices: Set<Int>) -> Set<BufferRegion> {
             Set(buffers.filter { indices.contains($0.index) }
                 .map { BufferRegion(buffer: ObjectIdentifier($0.buffer), offset: $0.offset) })
         }
 
-        if isGEMMKernel(name) {
-            return (reads: regions(for: [0, 1]), writes: regions(for: [2]))
+        if let pattern = step.metadata.bufferAccessPattern {
+            return (reads: regions(for: pattern.readIndices), writes: regions(for: pattern.writeIndices))
         }
 
-        if name.hasPrefix("rms_norm") || name.hasPrefix("layer_norm") {
-            return (reads: regions(for: [0, 1]), writes: regions(for: [2]))
-        }
-
-        if name.hasPrefix("copy_buffer") {
-            return (reads: regions(for: [0]), writes: regions(for: [1]))
-        }
-
-        if name.hasPrefix("swiglu") || name.hasPrefix("sigmoid_gate") {
-            return (reads: regions(for: [0, 1]), writes: regions(for: [2]))
-        }
-
-        if name.hasPrefix("residual_add") {
-            return (reads: regions(for: [0, 1]), writes: regions(for: [2]))
-        }
-
-        if name.hasPrefix("embedding_lookup") {
-            return (reads: regions(for: [0, 1]), writes: regions(for: [2]))
-        }
-
-        if name.hasPrefix("argmax") {
-            return (reads: regions(for: [0]), writes: regions(for: [1]))
-        }
-
+        // Conservative fallback: treat all bindings as both read and written.
         let all = Set(buffers.map {
             BufferRegion(buffer: ObjectIdentifier($0.buffer), offset: $0.offset)
         })
         return (reads: all, writes: all)
-    }
-
-    private static func isGEMMKernel(_ name: String) -> Bool {
-        name.hasPrefix("gemm") || name.hasPrefix("gemv") || name.hasPrefix("matmul")
-            || name.hasPrefix("batched_gemv")
     }
 
     private func makeResidentConstantSteps(
@@ -458,6 +428,8 @@ private struct PrefillStepPlanner {
                 threadgroupSize = resolved.config.threadgroup
             }
 
+            // GEMM: reads input[0] + weight[1], writes output[2]
+            let gemmPattern = MetalDispatchStepMetadata.BufferAccessPattern(reads: [0, 1], writes: [2])
             return [MetalPrefillStep(
                 pipeline: resolved.pipeline,
                 gridSize: gridSize,
@@ -481,13 +453,16 @@ private struct PrefillStepPlanner {
                         : .bindAndAdjustGridHeight(index: 5))
                     : .none,
                 positionBufferIndex: nil,
-                perPositionStrides: perPositionStrides
+                perPositionStrides: perPositionStrides,
+                metadata: .init(bufferAccessPattern: gemmPattern)
             )]
 
         case .structuralCopy(let dimension):
             let resolved = try resolveDispatch(entry)
             routingState.projectionIndex = 0
 
+            // copy: reads source[0], writes destination[1]
+            let copyPattern = MetalDispatchStepMetadata.BufferAccessPattern(reads: [0], writes: [1])
             return [MetalPrefillStep(
                 pipeline: resolved.pipeline,
                 gridSize: MTLSize(width: resolved.config.grid.width, height: maximumSequenceLength, depth: 1),
@@ -505,13 +480,16 @@ private struct PrefillStepPlanner {
                 mode: .batch,
                 sequenceLengthPolicy: .bindAndAdjustGridHeight(index: 3),
                 positionBufferIndex: nil,
-                perPositionStrides: [:]
+                perPositionStrides: [:],
+                metadata: .init(bufferAccessPattern: copyPattern)
             )]
 
         case .structuralAdd(let dimension):
             let resolved = try resolveDispatch(entry)
             routingState.lastOutputIsHidden = true
 
+            // add: reads operands[0,1], writes result[2]
+            let addPattern = MetalDispatchStepMetadata.BufferAccessPattern(reads: [0, 1], writes: [2])
             return [MetalPrefillStep(
                 pipeline: resolved.pipeline,
                 gridSize: MTLSize(width: resolved.config.grid.width, height: maximumSequenceLength, depth: 1),
@@ -530,7 +508,8 @@ private struct PrefillStepPlanner {
                 mode: .batch,
                 sequenceLengthPolicy: .bindAndAdjustGridHeight(index: 4),
                 positionBufferIndex: nil,
-                perPositionStrides: [:]
+                perPositionStrides: [:],
+                metadata: .init(bufferAccessPattern: addPattern)
             )]
         }
     }
@@ -561,6 +540,8 @@ private struct PrefillStepPlanner {
 
         let (weightBuffer, weightOffset) = weightResolver.resolve(role: "scale")
 
+        // norm: reads input[0] + weight[1], writes output[2]
+        let normPattern = MetalDispatchStepMetadata.BufferAccessPattern(reads: [0, 1], writes: [2])
         return [MetalPrefillStep(
             pipeline: pipeline,
             gridSize: MTLSize(width: maximumSequenceLength, height: 1, depth: 1),
@@ -580,7 +561,8 @@ private struct PrefillStepPlanner {
             mode: .batch,
             sequenceLengthPolicy: .bindAndAdjustGridHeight(index: 5),
             positionBufferIndex: nil,
-            perPositionStrides: [:]
+            perPositionStrides: [:],
+            metadata: .init(bufferAccessPattern: normPattern)
         )]
     }
 }
