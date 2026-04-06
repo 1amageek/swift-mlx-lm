@@ -336,7 +336,7 @@ struct MetalDispatchStepBuilder {
                 return MetalKernelNameResolver.argumentTableVariantKernelName(for: kernelName)
             case let name where name.hasPrefix("fused_residual_add_rms_norm"):
                 return MetalKernelNameResolver.argumentTableVariantKernelName(for: kernelName)
-            case "fused_swiglu_projection_2048", "fused_swiglu_projection_2048_bf16":
+            case let name where name.hasSuffix("glu_projection_2048") || name.hasSuffix("glu_projection_2048_bf16"):
                 return MetalKernelNameResolver.argumentTableVariantKernelName(for: kernelName)
             case "conv_state_update", "conv_state_update_bf16":
                 return MetalKernelNameResolver.argumentTableVariantKernelName(for: kernelName)
