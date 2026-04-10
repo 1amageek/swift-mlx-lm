@@ -7,17 +7,22 @@
 public struct ModelInput: Sendable {
     /// The prompt payload.
     public var prompt: Prompt
+    /// Prompt/render-time options used before token generation begins.
+    public var promptOptions: PromptPreparationOptions
 
-    public init(_ prompt: String) {
+    public init(_ prompt: String, promptOptions: PromptPreparationOptions = PromptPreparationOptions()) {
         self.prompt = .text(prompt)
+        self.promptOptions = promptOptions
     }
 
-    public init(prompt: String) {
+    public init(prompt: String, promptOptions: PromptPreparationOptions = PromptPreparationOptions()) {
         self.prompt = .text(prompt)
+        self.promptOptions = promptOptions
     }
 
-    public init(chat: [InputMessage]) {
+    public init(chat: [InputMessage], promptOptions: PromptPreparationOptions = PromptPreparationOptions()) {
         self.prompt = .chat(chat)
+        self.promptOptions = promptOptions
     }
 
     /// Prompt representation.

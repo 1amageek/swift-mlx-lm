@@ -18,6 +18,8 @@ public struct GenerateParameters: Sendable {
     public var presencePenalty: Float?
     /// Number of recent tokens to consider for repetition penalty.
     public var repetitionContextSize: Int
+    /// Request-level controls for whether reasoning tags are included in visible output.
+    public var thinking: GenerationThinkingOptions
 
     public init(
         maxTokens: Int? = nil,
@@ -28,7 +30,8 @@ public struct GenerateParameters: Sendable {
         minP: Float = 0,
         repetitionPenalty: Float? = nil,
         presencePenalty: Float? = nil,
-        repetitionContextSize: Int = 20
+        repetitionContextSize: Int = 20,
+        thinking: GenerationThinkingOptions = .hidden
     ) {
         self.maxTokens = maxTokens
         self.streamChunkTokenCount = streamChunkTokenCount
@@ -39,5 +42,6 @@ public struct GenerateParameters: Sendable {
         self.repetitionPenalty = repetitionPenalty
         self.presencePenalty = presencePenalty
         self.repetitionContextSize = repetitionContextSize
+        self.thinking = thinking
     }
 }

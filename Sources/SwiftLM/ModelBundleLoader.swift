@@ -33,7 +33,10 @@ public struct ModelBundleLoader: Sendable {
             "*.safetensors", "special_tokens_map.json",
             "chat_template.jinja", "preprocessor_config.json", "processor_config.json"
         ])
-        return try await load(directory: directory, inferencePolicy: inferencePolicy)
+        return try await load(
+            directory: directory,
+            inferencePolicy: inferencePolicy
+        )
     }
 
     /// Load a model from a local directory.

@@ -93,4 +93,60 @@ struct LFMVisibilityBenchmarkDiagnosticsTests {
         #expect(rawTokenIDs.count >= visibleTokenIDs.count)
         #expect(!visibleText.contains("<think>"))
     }
+
+    @Test("thinking opt-in surfaces reasoning in streaming and visible token output", .timeLimit(.minutes(10)))
+    func thinkingOptInSurfacesReasoningInStreamingAndVisibleOutput() async throws {
+        let localModelDirectory = URL(
+            fileURLWithPath: "/Users/1amageek/Desktop/swift-lm/TestData/LFM2.5-1.2B-Thinking"
+        )
+        let configURL = localModelDirectory.appendingPathComponent("config.json")
+        guard FileManager.default.fileExists(atPath: configURL.path) else {
+            print("[Skip] No local LFM bundle found at \(localModelDirectory.path)")
+            return
+        }
+
+        let container = try await ModelBundleLoader().load(directory: localModelDirectory)
+        let parameters = GenerateParameters(
+            maxTokens: 64,
+            streamChunkTokenCount: 1,
+            temperature: 0,
+            thinking: .visible
+        )
+        let prepared = try await container.prepare(input: ModelInput(
+            prompt: "Hello",
+            promptOptions: PromptPreparationOptions(thinkingEnabled: true)
+        ))
+        let prompt = try container.makeExecutablePrompt(from: prepared)
+
+        container.resetCaches()
+        let visibleTokenIDs = try container.debugGeneratedTokenIDs(
+            prompt: prompt,
+            parameters: parameters
+        )
+
+        container.resetCaches()
+        let rawTokenIDs = try container.debugRawGeneratedTokenIDs(
+            prompt: prompt,
+            parameters: parameters
+        )
+
+        container.resetCaches()
+        let stream = try container.generate(prompt: prompt, parameters: parameters)
+        let streamed = await QwenVisionTestSupport.collectGeneration(from: stream)
+
+        let visibleText = container.tokenizer.decode(tokens: visibleTokenIDs, skipSpecialTokens: false)
+        let rawText = container.tokenizer.decode(tokens: rawTokenIDs, skipSpecialTokens: false)
+        let streamedText = streamed.chunks.joined()
+
+        print("[LFM thinking opt-in visible text prefix]")
+        print(String(visibleText.prefix(400)))
+        print("[LFM thinking opt-in streamed text prefix]")
+        print(String(streamedText.prefix(400)))
+
+        #expect(!rawTokenIDs.isEmpty)
+        #expect(visibleTokenIDs == rawTokenIDs)
+        #expect(rawText.contains("<think>"))
+        #expect(visibleText.contains("<think>"))
+        #expect(streamedText.contains("<think>"))
+    }
 }

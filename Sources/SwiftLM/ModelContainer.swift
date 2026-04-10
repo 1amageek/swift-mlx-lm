@@ -106,12 +106,12 @@ public final class ModelContainer: @unchecked Sendable {
             if modelTokenizer.hasChatTemplate || chatTemplate != nil {
                 preparedPrompt = try await applyChatTemplate(messages: [
                     .user([.text(prompt)])
-                ])
+                ], promptOptions: input.promptOptions)
             } else {
                 preparedPrompt = PreparedPrompt(text: prompt, multimodal: nil)
             }
         case .chat(let messages):
-            preparedPrompt = try await applyChatTemplate(messages: messages)
+            preparedPrompt = try await applyChatTemplate(messages: messages, promptOptions: input.promptOptions)
         }
         let tokens = preparedPrompt.tokenIDs ?? modelTokenizer.encode(text: preparedPrompt.text)
         var multimodal = preparedPrompt.multimodal
@@ -136,8 +136,14 @@ public final class ModelContainer: @unchecked Sendable {
     }
 
     /// Apply the Jinja chat template to format chat messages into a prompt string.
-    private func applyChatTemplate(messages: [InputMessage]) async throws -> PreparedPrompt {
-        let renderedMessages = renderedMessagesWithThinkingControl(from: messages)
+    private func applyChatTemplate(
+        messages: [InputMessage],
+        promptOptions: PromptPreparationOptions
+    ) async throws -> PreparedPrompt {
+        let renderedMessages = renderedMessagesWithThinkingControl(
+            from: messages,
+            promptOptions: promptOptions
+        )
         let containsImages = messages.contains(where: \.containsImageContent)
         let containsVideos = messages.contains(where: \.containsVideoContent)
         if containsImages && !configuration.inputCapabilities.supportsImages {
@@ -152,14 +158,16 @@ public final class ModelContainer: @unchecked Sendable {
         }
 
         if let template = chatTemplate {
-            let context: [String: Value] = [
+            var context: [String: Value] = [
                 "messages": .array(try renderedMessages.map(makeJinjaMessageValue)),
                 "add_generation_prompt": .boolean(true),
                 "add_vision_id": .boolean(false),
-                "enable_thinking": .boolean(false),
                 "bos_token": .string(modelTokenizer.bosToken ?? ""),
                 "eos_token": .string(modelTokenizer.eosToken ?? ""),
             ]
+            for (key, value) in jinjaPromptTemplateContext(promptOptions: promptOptions) {
+                context[key] = value
+            }
             let rendered = try template.render(context)
             return try await prepareRenderedPrompt(rendered, messages: messages)
         }
@@ -168,10 +176,7 @@ public final class ModelContainer: @unchecked Sendable {
             let renderedTokenIDs = try modelTokenizer.applyChatTemplate(
                 messages: try renderedMessages.map(makeTokenizerMessage),
                 tools: nil,
-                additionalContext: [
-                    "add_vision_id": false,
-                    "enable_thinking": false,
-                ]
+                additionalContext: tokenizerPromptTemplateContext(promptOptions: promptOptions)
             )
             let rendered = modelTokenizer.decode(tokens: renderedTokenIDs, skipSpecialTokens: false)
             let prepared = try await prepareRenderedPrompt(rendered, messages: messages)
@@ -214,9 +219,10 @@ public final class ModelContainer: @unchecked Sendable {
     }
 
     private func renderedMessagesWithThinkingControl(
-        from messages: [InputMessage]
+        from messages: [InputMessage],
+        promptOptions: PromptPreparationOptions
     ) -> [InputMessage] {
-        guard shouldInjectDirectAnswerSystemPrompt,
+        guard shouldInjectDirectAnswerSystemPrompt(promptOptions: promptOptions),
               messages.first?.role != .system else {
             return messages
         }
@@ -230,10 +236,41 @@ public final class ModelContainer: @unchecked Sendable {
         ] + messages
     }
 
-    private var shouldInjectDirectAnswerSystemPrompt: Bool {
+    private func shouldInjectDirectAnswerSystemPrompt(promptOptions: PromptPreparationOptions) -> Bool {
+        guard !promptOptions.thinkingEnabled else { return false }
         guard let chatTemplateSource else { return false }
         return chatTemplateSource.contains("keep_past_thinking")
             && !chatTemplateSource.contains("enable_thinking")
+    }
+
+    private func jinjaPromptTemplateContext(
+        promptOptions: PromptPreparationOptions
+    ) -> [String: Value] {
+        promptTemplateVariables(promptOptions: promptOptions).mapValues(\.jinjaValue)
+    }
+
+    private func tokenizerPromptTemplateContext(
+        promptOptions: PromptPreparationOptions
+    ) -> [String: any Sendable] {
+        var context: [String: any Sendable] = ["add_vision_id": false]
+        for (key, value) in promptTemplateVariables(promptOptions: promptOptions) {
+            context[key] = value.tokenizerValue
+        }
+        return context
+    }
+
+    private func promptTemplateVariables(
+        promptOptions: PromptPreparationOptions
+    ) -> [String: PromptTemplateValue] {
+        var options = promptOptions.templateVariables
+        if options["enable_thinking"] == nil {
+            options["enable_thinking"] = .boolean(promptOptions.thinkingEnabled)
+        }
+        return options
+    }
+
+    private func visibleThinkingPolicy(for parameters: GenerateParameters) -> ThinkingTagPolicy? {
+        parameters.thinking.includeInOutput ? nil : thinkingTagPolicy
     }
 
     private func prepareRenderedPrompt(
@@ -347,11 +384,15 @@ public final class ModelContainer: @unchecked Sendable {
         var visibleText = ""
         var rawTokenCount = 0
         let maxVisibleTokens = parameters.maxTokens ?? 1024
-        let maxRawTokens = maxRawTokenCount(forVisibleLimit: maxVisibleTokens)
+        let visibilityPolicy = visibleThinkingPolicy(for: parameters)
+        let maxRawTokens = maxRawTokenCount(
+            forVisibleLimit: maxVisibleTokens,
+            visibilityPolicy: visibilityPolicy
+        )
         let chunkTokenCount = max(1, parameters.streamChunkTokenCount)
         var bufferedRawTokenIDs: [Int] = []
         var fallbackTokenIDs: [Int] = []
-        var visibilityState = GenerationVisibilityState(policy: thinkingTagPolicy)
+        var visibilityState = GenerationVisibilityState(policy: visibilityPolicy)
 
         func emitBufferedChunkIfNeeded(force: Bool = false) {
             guard !bufferedRawTokenIDs.isEmpty else { return }
@@ -2384,9 +2425,13 @@ public final class ModelContainer: @unchecked Sendable {
         }
 
         var rawTokenCount = 0
+        let visibilityPolicy = visibleThinkingPolicy(for: parameters)
         let maxRawTokens = collectionMode == .raw
             ? maxRequestedTokens
-            : maxRawTokenCount(forVisibleLimit: maxRequestedTokens)
+            : maxRawTokenCount(
+                forVisibleLimit: maxRequestedTokens,
+                visibilityPolicy: visibilityPolicy
+            )
         var rawTokenIDs: [Int] = []
 
         func appendGeneratedToken(_ tokenID: Int32) {
@@ -2421,7 +2466,10 @@ public final class ModelContainer: @unchecked Sendable {
         case .raw:
             return rawTokenIDs
         case .visibleOnly:
-            var visibilityState = GenerationVisibilityState(policy: thinkingTagPolicy)
+            guard let visibilityPolicy else {
+                return Array(rawTokenIDs.prefix(maxRequestedTokens))
+            }
+            var visibilityState = GenerationVisibilityState(policy: visibilityPolicy)
             let rawText = self.modelTokenizer.decode(tokens: rawTokenIDs, skipSpecialTokens: false)
             var visibleText = visibilityState.append(decodedText: rawText)
             visibleText += visibilityState.finalize()
@@ -2436,8 +2484,11 @@ public final class ModelContainer: @unchecked Sendable {
         }
     }
 
-    private func maxRawTokenCount(forVisibleLimit visibleLimit: Int) -> Int {
-        guard thinkingTagPolicy != nil else { return visibleLimit }
+    private func maxRawTokenCount(
+        forVisibleLimit visibleLimit: Int,
+        visibilityPolicy: ThinkingTagPolicy?
+    ) -> Int {
+        guard visibilityPolicy != nil else { return visibleLimit }
         return max(visibleLimit * 256, visibleLimit + 1024)
     }
 
@@ -2708,6 +2759,34 @@ private extension GenerateParameters {
             && minP == 0
             && repetitionPenalty == nil
             && presencePenalty == nil
+    }
+}
+
+private extension PromptTemplateValue {
+    var jinjaValue: Value {
+        switch self {
+        case .boolean(let value):
+            return .boolean(value)
+        case .int(let value):
+            return .int(value)
+        case .double(let value):
+            return .double(value)
+        case .string(let value):
+            return .string(value)
+        }
+    }
+
+    var tokenizerValue: any Sendable {
+        switch self {
+        case .boolean(let value):
+            return value
+        case .int(let value):
+            return value
+        case .double(let value):
+            return value
+        case .string(let value):
+            return value
+        }
     }
 }
 

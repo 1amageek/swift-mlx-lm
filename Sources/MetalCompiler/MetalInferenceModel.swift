@@ -19,11 +19,6 @@ public struct MetalInferenceModel: @unchecked Sendable {
     /// Layout: [hiddenElementCount: UInt32] at offset 0.
     private let hiddenOverrideConstantBuffer: MTLBuffer
 
-    /// Backward-compatible decode plan view.
-    ///
-    /// Prefer ``decodePlan`` or ``compiledModel`` for new call sites.
-    public var plan: MetalDispatchPlan { compiledModel.decodePlan }
-
     /// Decode-time dispatch plan extracted from the compiled model.
     public var decodePlan: MetalDispatchPlan { compiledModel.decodePlan }
 
