@@ -149,4 +149,55 @@ struct LFMVisibilityBenchmarkDiagnosticsTests {
         #expect(visibleText.contains("<think>"))
         #expect(streamedText.contains("<think>"))
     }
+
+    @Test("thinking separate emits reasoning stream for LFM template semantics", .timeLimit(.minutes(10)))
+    func thinkingSeparateEmitsReasoningStream() async throws {
+        let localModelDirectory = URL(
+            fileURLWithPath: "/Users/1amageek/Desktop/swift-lm/TestData/LFM2.5-1.2B-Thinking"
+        )
+        let configURL = localModelDirectory.appendingPathComponent("config.json")
+        guard FileManager.default.fileExists(atPath: configURL.path) else {
+            print("[Skip] No local LFM bundle found at \(localModelDirectory.path)")
+            return
+        }
+
+        let container = try await ModelBundleLoader().load(directory: localModelDirectory)
+        let parameters = GenerateParameters(
+            maxTokens: 64,
+            streamChunkTokenCount: 1,
+            temperature: 0,
+            thinking: .separate
+        )
+        let prepared = try await container.prepare(input: ModelInput(
+            prompt: "Hello",
+            promptOptions: PromptPreparationOptions(thinkingEnabled: true)
+        ))
+        let prompt = try container.makeExecutablePrompt(from: prepared)
+
+        container.resetCaches()
+        let stream = try container.generate(prompt: prompt, parameters: parameters)
+
+        var answer = ""
+        var reasoning = ""
+        for await generation in stream {
+            switch generation {
+            case .chunk(let chunk):
+                answer += chunk
+            case .reasoningChunk(let chunk):
+                reasoning += chunk
+            case .info:
+                break
+            }
+        }
+
+        print("[LFM separate reasoning prefix]")
+        print(String(reasoning.prefix(400)))
+        print("[LFM separate answer prefix]")
+        print(String(answer.prefix(400)))
+
+        #expect(!reasoning.isEmpty)
+        #expect(!answer.contains("<think>"))
+        #expect(!reasoning.contains("<think>"))
+        #expect(!reasoning.contains("</think>"))
+    }
 }

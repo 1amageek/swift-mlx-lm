@@ -2,12 +2,20 @@
 public enum Generation: Sendable {
     /// A text chunk (one or more decoded tokens).
     case chunk(String)
+    /// A reasoning chunk extracted using the active chat template's reasoning tags.
+    case reasoningChunk(String)
     /// Completion information (token count, timing, etc.).
     case info(CompletionInfo)
 
     /// The text chunk, if this is a `.chunk` case.
     public var chunk: String? {
         if case .chunk(let text) = self { return text }
+        return nil
+    }
+
+    /// The reasoning chunk, if this is a `.reasoningChunk` case.
+    public var reasoningChunk: String? {
+        if case .reasoningChunk(let text) = self { return text }
         return nil
     }
 

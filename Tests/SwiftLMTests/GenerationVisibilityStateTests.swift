@@ -11,16 +11,17 @@ struct GenerationVisibilityStateTests {
                 closeTag: "</think>",
                 openTagTokenID: nil,
                 closeTagTokenID: nil
-            )
+            ),
+            emitsReasoning: false
         )
 
-        #expect(state.append(decodedText: "Hello ") == "Hello ")
-        #expect(state.append(decodedText: "<") == "")
-        #expect(state.append(decodedText: "think") == "")
-        #expect(state.append(decodedText: ">hidden") == "")
+        #expect(state.append(decodedText: "Hello ").answer == "Hello ")
+        #expect(state.append(decodedText: "<").answer == "")
+        #expect(state.append(decodedText: "think").answer == "")
+        #expect(state.append(decodedText: ">hidden").answer == "")
         #expect(state.suppressingReasoning)
-        #expect(state.append(decodedText: " text</") == "")
-        #expect(state.append(decodedText: "think> tail") == " tail")
+        #expect(state.append(decodedText: " text</").answer == "")
+        #expect(state.append(decodedText: "think> tail").answer == " tail")
         #expect(!state.suppressingReasoning)
         #expect(state.didSuppressReasoning)
     }
@@ -33,20 +34,21 @@ struct GenerationVisibilityStateTests {
                 closeTag: "</think>",
                 openTagTokenID: nil,
                 closeTagTokenID: nil
-            )
+            ),
+            emitsReasoning: false
         )
 
-        #expect(state.append(decodedText: "Visible <th") == "Visible ")
-        #expect(state.finalize() == "<th")
+        #expect(state.append(decodedText: "Visible <th").answer == "Visible ")
+        #expect(state.finalize().answer == "<th")
         #expect(!state.suppressingReasoning)
     }
 
     @Test("visibility state is a no-op without a policy")
     func noOpWithoutPolicy() {
-        var state = GenerationVisibilityState(policy: nil)
+        var state = GenerationVisibilityState(policy: nil, emitsReasoning: false)
 
-        #expect(state.append(decodedText: "<think>hello</think>") == "<think>hello</think>")
-        #expect(state.finalize().isEmpty)
+        #expect(state.append(decodedText: "<think>hello</think>").answer == "<think>hello</think>")
+        #expect(state.finalize().answer.isEmpty)
         #expect(!state.suppressingReasoning)
     }
 }

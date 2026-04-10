@@ -527,6 +527,8 @@ struct GenerationPipelineBenchmarkTests {
                 if firstChunkElapsed == nil {
                     firstChunkElapsed = CFAbsoluteTimeGetCurrent() - start
                 }
+            case .reasoningChunk:
+                break
             case .info(let info):
                 generated = info.tokenCount
             }
@@ -569,6 +571,8 @@ struct GenerationPipelineBenchmarkTests {
                 if firstChunkElapsed == nil {
                     firstChunkElapsed = CFAbsoluteTimeGetCurrent() - start
                 }
+            case .reasoningChunk:
+                break
             case .info(let info):
                 generated = info.tokenCount
             }

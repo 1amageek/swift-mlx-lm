@@ -270,7 +270,10 @@ public final class ModelContainer: @unchecked Sendable {
     }
 
     private func visibleThinkingPolicy(for parameters: GenerateParameters) -> ThinkingTagPolicy? {
-        parameters.thinking.includeInOutput ? nil : thinkingTagPolicy
+        if parameters.thinking.emitSeparately {
+            return thinkingTagPolicy
+        }
+        return parameters.thinking.includeInOutput ? nil : thinkingTagPolicy
     }
 
     private func prepareRenderedPrompt(
@@ -392,7 +395,10 @@ public final class ModelContainer: @unchecked Sendable {
         let chunkTokenCount = max(1, parameters.streamChunkTokenCount)
         var bufferedRawTokenIDs: [Int] = []
         var fallbackTokenIDs: [Int] = []
-        var visibilityState = GenerationVisibilityState(policy: visibilityPolicy)
+        var visibilityState = GenerationVisibilityState(
+            policy: visibilityPolicy,
+            emitsReasoning: parameters.thinking.emitSeparately
+        )
 
         func emitBufferedChunkIfNeeded(force: Bool = false) {
             guard !bufferedRawTokenIDs.isEmpty else { return }
@@ -402,10 +408,14 @@ public final class ModelContainer: @unchecked Sendable {
                 skipSpecialTokens: false
             )
             bufferedRawTokenIDs.removeAll(keepingCapacity: true)
-            let visibleChunk = visibilityState.append(decodedText: decodedText)
-            guard !visibleChunk.isEmpty else { return }
-            visibleText += visibleChunk
-            continuation.yield(.chunk(visibleChunk))
+            let emitted = visibilityState.append(decodedText: decodedText)
+            if !emitted.answer.isEmpty {
+                visibleText += emitted.answer
+                continuation.yield(.chunk(emitted.answer))
+            }
+            if !emitted.reasoning.isEmpty {
+                continuation.yield(.reasoningChunk(emitted.reasoning))
+            }
         }
 
         func recordGeneratedToken(_ tokenID: Int32) {
@@ -466,10 +476,13 @@ public final class ModelContainer: @unchecked Sendable {
         }
 
         emitBufferedChunkIfNeeded(force: true)
-        let trailingVisibleText = visibilityState.finalize()
-        if !trailingVisibleText.isEmpty {
-            visibleText += trailingVisibleText
-            continuation.yield(.chunk(trailingVisibleText))
+        let trailingEmitted = visibilityState.finalize()
+        if !trailingEmitted.answer.isEmpty {
+            visibleText += trailingEmitted.answer
+            continuation.yield(.chunk(trailingEmitted.answer))
+        }
+        if !trailingEmitted.reasoning.isEmpty {
+            continuation.yield(.reasoningChunk(trailingEmitted.reasoning))
         }
 
         if visibleText.isEmpty,
@@ -2469,10 +2482,13 @@ public final class ModelContainer: @unchecked Sendable {
             guard let visibilityPolicy else {
                 return Array(rawTokenIDs.prefix(maxRequestedTokens))
             }
-            var visibilityState = GenerationVisibilityState(policy: visibilityPolicy)
+            var visibilityState = GenerationVisibilityState(
+                policy: visibilityPolicy,
+                emitsReasoning: false
+            )
             let rawText = self.modelTokenizer.decode(tokens: rawTokenIDs, skipSpecialTokens: false)
-            var visibleText = visibilityState.append(decodedText: rawText)
-            visibleText += visibilityState.finalize()
+            var visibleText = visibilityState.append(decodedText: rawText).answer
+            visibleText += visibilityState.finalize().answer
             let visibleTokenIDs = self.modelTokenizer.encode(
                 text: visibleText,
                 addSpecialTokens: false
@@ -2496,12 +2512,11 @@ public final class ModelContainer: @unchecked Sendable {
         tokenizer: any Tokenizer,
         chatTemplateSource: String?
     ) -> ThinkingTagPolicy? {
-        guard let chatTemplateSource,
-              chatTemplateSource.contains("keep_past_thinking") else {
+        guard let (openTag, closeTag) = TemplateThinkingTagPolicyExtractor.extract(
+            from: chatTemplateSource
+        ) else {
             return nil
         }
-        let openTag = "<think>"
-        let closeTag = "</think>"
         return ThinkingTagPolicy(
             openTag: openTag,
             closeTag: closeTag,
@@ -2639,24 +2654,102 @@ struct ThinkingTagPolicy {
     let closeTagTokenID: Int?
 }
 
+struct TemplateThinkingTagPolicyExtractor {
+    private static let keywordCandidates = ["think", "reason"]
+    private static let openTagPattern = #"<([A-Za-z][A-Za-z0-9:_-]*)>"#
+    private static let closeTagPattern = #"</([A-Za-z][A-Za-z0-9:_-]*)>"#
+
+    static func extract(from chatTemplateSource: String?) -> (openTag: String, closeTag: String)? {
+        guard let chatTemplateSource, !chatTemplateSource.isEmpty else {
+            return nil
+        }
+
+        let nsRange = NSRange(chatTemplateSource.startIndex..<chatTemplateSource.endIndex, in: chatTemplateSource)
+        guard let openRegex = try? NSRegularExpression(pattern: openTagPattern),
+              let closeRegex = try? NSRegularExpression(pattern: closeTagPattern) else {
+            return nil
+        }
+
+        let openMatches = openRegex.matches(in: chatTemplateSource, options: [], range: nsRange)
+        for match in openMatches {
+            guard match.numberOfRanges == 2,
+                  let tagNameRange = Range(match.range(at: 1), in: chatTemplateSource) else {
+                continue
+            }
+
+            let tagName = String(chatTemplateSource[tagNameRange])
+            let lowered = tagName.lowercased()
+            guard keywordCandidates.contains(where: lowered.contains) else {
+                continue
+            }
+
+            let openTag = "<\(tagName)>"
+            let closeTag = "</\(tagName)>"
+            guard chatTemplateSource.contains(openTag),
+                  chatTemplateSource.contains(closeTag) else {
+                continue
+            }
+
+            return (openTag, closeTag)
+        }
+
+        let closeMatches = closeRegex.matches(in: chatTemplateSource, options: [], range: nsRange)
+        for match in closeMatches {
+            guard match.numberOfRanges == 2,
+                  let tagNameRange = Range(match.range(at: 1), in: chatTemplateSource) else {
+                continue
+            }
+
+            let tagName = String(chatTemplateSource[tagNameRange])
+            let lowered = tagName.lowercased()
+            guard keywordCandidates.contains(where: lowered.contains) else {
+                continue
+            }
+
+            guard chatTemplateSource.contains("keep_past_thinking") else {
+                continue
+            }
+
+            return ("<\(tagName)>", "</\(tagName)>")
+        }
+
+        return nil
+    }
+}
+
+struct GenerationChannelOutput {
+    var answer = ""
+    var reasoning = ""
+}
+
 struct GenerationVisibilityState {
     let policy: ThinkingTagPolicy?
+    let emitsReasoning: Bool
     private(set) var suppressingReasoning = false
     private(set) var didSuppressReasoning = false
     private var pendingText = ""
 
-    init(policy: ThinkingTagPolicy?) {
+    init(policy: ThinkingTagPolicy?, emitsReasoning: Bool) {
         self.policy = policy
+        self.emitsReasoning = emitsReasoning
     }
 
-    mutating func append(decodedText: String) -> String {
-        guard let policy else { return decodedText }
+    mutating func append(decodedText: String) -> GenerationChannelOutput {
+        guard let policy else {
+            return GenerationChannelOutput(answer: decodedText, reasoning: "")
+        }
         pendingText += decodedText
-        var visibleOutput = ""
+        var emitted = GenerationChannelOutput()
 
         while !pendingText.isEmpty {
             if suppressingReasoning {
                 if let closeRange = pendingText.range(of: policy.closeTag) {
+                    let reasoningPart = String(pendingText[..<closeRange.lowerBound])
+                    if emitsReasoning {
+                        emitted.reasoning += reasoningPart
+                    } else if !reasoningPart.isEmpty {
+                        didSuppressReasoning = true
+                    }
                     didSuppressReasoning = true
                     pendingText.removeSubrange(pendingText.startIndex..<closeRange.upperBound)
                     suppressingReasoning = false
@@ -2665,17 +2758,26 @@ struct GenerationVisibilityState {
 
                 let keepSuffix = pendingSuffixMatchingPrefix(of: policy.closeTag)
                 if pendingText.count > keepSuffix.count {
-                    didSuppressReasoning = true
+                    let emitCount = pendingText.count - keepSuffix.count
+                    let emitEnd = pendingText.index(pendingText.startIndex, offsetBy: emitCount)
+                    let reasoningPart = String(pendingText[..<emitEnd])
+                    if emitsReasoning {
+                        emitted.reasoning += reasoningPart
+                    } else if !reasoningPart.isEmpty {
+                        didSuppressReasoning = true
+                    }
+                    if !reasoningPart.isEmpty {
+                        didSuppressReasoning = true
+                    }
                 }
                 pendingText = keepSuffix
-                return visibleOutput
+                return emitted
             }
 
             if let openRange = pendingText.range(of: policy.openTag) {
-                visibleOutput += String(pendingText[..<openRange.lowerBound])
+                emitted.answer += String(pendingText[..<openRange.lowerBound])
                 pendingText.removeSubrange(pendingText.startIndex..<openRange.upperBound)
                 suppressingReasoning = true
-                didSuppressReasoning = true
                 continue
             }
 
@@ -2683,32 +2785,36 @@ struct GenerationVisibilityState {
             if pendingText.count > keepSuffix.count {
                 let emitCount = pendingText.count - keepSuffix.count
                 let emitEnd = pendingText.index(pendingText.startIndex, offsetBy: emitCount)
-                visibleOutput += String(pendingText[..<emitEnd])
+                emitted.answer += String(pendingText[..<emitEnd])
                 pendingText = keepSuffix
             }
-            return visibleOutput
+            return emitted
         }
 
-        return visibleOutput
+        return emitted
     }
 
-    mutating func finalize() -> String {
+    mutating func finalize() -> GenerationChannelOutput {
         guard policy != nil else {
             let text = pendingText
             pendingText = ""
-            return text
+            return GenerationChannelOutput(answer: text, reasoning: "")
         }
         guard !suppressingReasoning else {
+            let reasoning = pendingText
             if !pendingText.isEmpty {
                 didSuppressReasoning = true
             }
             pendingText = ""
-            return ""
+            return GenerationChannelOutput(
+                answer: "",
+                reasoning: emitsReasoning ? reasoning : ""
+            )
         }
 
         let text = pendingText
         pendingText = ""
-        return text
+        return GenerationChannelOutput(answer: text, reasoning: "")
     }
 
     private func pendingSuffixMatchingPrefix(of pattern: String) -> String {
