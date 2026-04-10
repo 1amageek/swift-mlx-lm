@@ -254,9 +254,9 @@ public struct ParameterResolver: Sendable {
             var bindings = [
                 ParameterBinding(role: "q_proj", tensorName: "\(attnPrefix).q_proj.weight"),
                 ParameterBinding(role: "k_proj", tensorName: "\(attnPrefix).k_proj.weight"),
-                ParameterBinding(role: "v_proj", tensorName: "\(attnPrefix).v_proj.weight"),
                 ParameterBinding(role: "o_proj", tensorName: "\(attnPrefix).o_proj.weight"),
             ]
+            bindings.append(contentsOf: valueProjectionBindings(attributes: attrs, attentionPrefix: attnPrefix))
             if let qkNorm = attrs.qkNorm, qkNorm != .none {
                 bindings.append(ParameterBinding(role: "q_layernorm", tensorName: "\(attnPrefix).q_layernorm.weight"))
                 bindings.append(ParameterBinding(role: "k_layernorm", tensorName: "\(attnPrefix).k_layernorm.weight"))
@@ -344,9 +344,9 @@ public struct ParameterResolver: Sendable {
             var bindings = [
                 ParameterBinding(role: "q_proj", tensorName: "\(attnPrefix).q_proj.weight"),
                 ParameterBinding(role: "k_proj", tensorName: "\(attnPrefix).k_proj.weight"),
-                ParameterBinding(role: "v_proj", tensorName: "\(attnPrefix).v_proj.weight"),
                 ParameterBinding(role: "o_proj", tensorName: "\(attnPrefix).o_proj.weight"),
             ]
+            bindings.append(contentsOf: valueProjectionBindings(attributes: attrs, attentionPrefix: attnPrefix))
             if let qkNorm = attrs.qkNorm, qkNorm != .none {
                 bindings.append(ParameterBinding(role: "q_layernorm", tensorName: "\(attnPrefix).q_norm.weight"))
                 bindings.append(ParameterBinding(role: "k_layernorm", tensorName: "\(attnPrefix).k_norm.weight"))
@@ -449,11 +449,11 @@ public struct ParameterResolver: Sendable {
                 ParameterBinding(role: "k_proj", tensorName: "\(attnPrefix).k_proj.weight"),
                 ParameterBinding(role: "o_proj", tensorName: "\(attnPrefix).o_proj.weight"),
             ]
-            if attrs.qkNorm == .rmsNorm {
+            bindings.append(contentsOf: valueProjectionBindings(attributes: attrs, attentionPrefix: attnPrefix))
+            if let qkNorm = attrs.qkNorm, qkNorm != .none {
                 bindings.append(ParameterBinding(role: "q_layernorm", tensorName: "\(attnPrefix).q_norm.weight"))
                 bindings.append(ParameterBinding(role: "k_layernorm", tensorName: "\(attnPrefix).k_norm.weight"))
             }
-            bindings.append(ParameterBinding(role: "v_proj", tensorName: "\(attnPrefix).v_proj.weight"))
             return bindings
         }
 
@@ -486,6 +486,14 @@ public struct ParameterResolver: Sendable {
                 ParameterBinding(
                     role: "post_per_layer_input_norm",
                     tensorName: "\(prefix).post_per_layer_input_norm.weight"),
+            ]
+        }
+
+        if let _ = attributes as? LayerScaleAttributes {
+            return [
+                ParameterBinding(
+                    role: "layer_scalar",
+                    tensorName: "\(prefix).layer_scalar")
             ]
         }
 
@@ -529,9 +537,9 @@ public struct ParameterResolver: Sendable {
             var bindings = [
                 ParameterBinding(role: "q_proj", tensorName: "\(attnPrefix).q_proj.weight"),
                 ParameterBinding(role: "k_proj", tensorName: "\(attnPrefix).k_proj.weight"),
-                ParameterBinding(role: "v_proj", tensorName: "\(attnPrefix).v_proj.weight"),
                 ParameterBinding(role: "o_proj", tensorName: "\(attnPrefix).out_proj.weight"),
             ]
+            bindings.append(contentsOf: valueProjectionBindings(attributes: attrs, attentionPrefix: attnPrefix))
             if let qkNorm = attrs.qkNorm, qkNorm != .none {
                 bindings.append(ParameterBinding(role: "q_layernorm", tensorName: "\(attnPrefix).q_layernorm.weight"))
                 bindings.append(ParameterBinding(role: "k_layernorm", tensorName: "\(attnPrefix).k_layernorm.weight"))
@@ -574,5 +582,15 @@ public struct ParameterResolver: Sendable {
         }
 
         return []
+    }
+
+    private func valueProjectionBindings(
+        attributes: AttentionAttributes,
+        attentionPrefix: String
+    ) -> [ParameterBinding] {
+        guard attributes.valueProjectionSource == .dedicatedProjection else {
+            return []
+        }
+        return [ParameterBinding(role: "v_proj", tensorName: "\(attentionPrefix).v_proj.weight")]
     }
 }

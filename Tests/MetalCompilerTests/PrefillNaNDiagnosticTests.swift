@@ -10,7 +10,8 @@ import ModelDeclarations
 @Suite("Prefill NaN Diagnostic")
 struct PrefillNaNDiagnosticTests {
 
-    @Test("Step-by-step prefill identifies NaN source")
+    @Test("Step-by-step prefill identifies NaN source",
+          .disabled("Pre-migration diagnostic: accesses storageModePrivate scratch buffer via contents()"))
     func stepByStepNaNDiagnostic() throws {
         guard let device = MTLCreateSystemDefaultDevice() else {
             Issue.record("No Metal device")
@@ -104,7 +105,12 @@ struct PrefillNaNDiagnosticTests {
                         enc.setBytes(ptr.baseAddress!, length: ptr.count, index: index)
                     }
                 }
-                step.bindRuntimeArguments(encoder: enc, sequenceLength: UInt32(seqLen))
+                if let bindingIndex = step.sequenceLengthPolicy.bindingIndex {
+                    var seqLenValue = UInt32(seqLen)
+                    withUnsafeBytes(of: &seqLenValue) { raw in
+                        enc.setBytes(raw.baseAddress!, length: raw.count, index: bindingIndex)
+                    }
+                }
                 let grid = step.resolvedGridSize(sequenceLength: seqLen)
                 enc.dispatchThreadgroups(grid, threadsPerThreadgroup: step.threadgroupSize)
 
@@ -191,7 +197,8 @@ struct PrefillNaNDiagnosticTests {
             print("[NaN diag] No NaN found in any step — prefill is correct!")
         }
     }
-    @Test("Step-by-step prefill with ShortConv layer (LFM2-like)")
+    @Test("Step-by-step prefill with ShortConv layer (LFM2-like)",
+          .disabled("Pre-migration diagnostic: accesses storageModePrivate scratch buffer via contents()"))
     func stepByStepWithShortConv() throws {
         guard let device = MTLCreateSystemDefaultDevice() else {
             Issue.record("No Metal device")
@@ -281,7 +288,12 @@ struct PrefillNaNDiagnosticTests {
                         enc.setBytes(ptr.baseAddress!, length: ptr.count, index: index)
                     }
                 }
-                step.bindRuntimeArguments(encoder: enc, sequenceLength: UInt32(seqLen))
+                if let bindingIndex = step.sequenceLengthPolicy.bindingIndex {
+                    var seqLenValue = UInt32(seqLen)
+                    withUnsafeBytes(of: &seqLenValue) { raw in
+                        enc.setBytes(raw.baseAddress!, length: raw.count, index: bindingIndex)
+                    }
+                }
                 let grid = step.resolvedGridSize(sequenceLength: seqLen)
                 enc.dispatchThreadgroups(grid, threadsPerThreadgroup: step.threadgroupSize)
 

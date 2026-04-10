@@ -42,6 +42,8 @@ public enum WeightFormat: Sendable, Equatable {
     case float16
     /// BFloat16 — read as uint16_t, shift left 16 to get float32.
     case bfloat16
+    /// Float32 — direct read as float.
+    case float32
     /// Quantized 4-bit with group size.
     case quantized4Bit(groupSize: Int)
     /// Quantized 8-bit with group size.
@@ -52,6 +54,7 @@ public enum WeightFormat: Sendable, Equatable {
         switch self {
         case .float16: return "half"
         case .bfloat16: return "uint16_t"
+        case .float32: return "float"
         case .quantized4Bit, .quantized8Bit: return "uchar"
         }
     }
@@ -61,8 +64,20 @@ public enum WeightFormat: Sendable, Equatable {
         switch self {
         case .float16: return "float(\(expr))"
         case .bfloat16: return "bf16_to_float(\(expr))"
+        case .float32: return "(\(expr))"
         case .quantized4Bit, .quantized8Bit:
             return "dequantize(\(expr))"
+        }
+    }
+
+    var storageByteSize: Int {
+        switch self {
+        case .float16, .bfloat16:
+            return MemoryLayout<UInt16>.stride
+        case .float32:
+            return MemoryLayout<Float>.stride
+        case .quantized4Bit, .quantized8Bit:
+            return MemoryLayout<UInt8>.stride
         }
     }
 }
@@ -94,6 +109,8 @@ public struct BufferBindingContext: @unchecked Sendable {
     public let bufferSet: MetalBufferSet
     public let slotDimension: Int
     public let elementSize: Int
+    public let currentInputBuffer: MTLBuffer
+    public let currentInputOffset: Int
     public let layerIndex: Int?
     public let kvCacheIndex: Int
     public let convLayerIndex: Int
@@ -101,11 +118,14 @@ public struct BufferBindingContext: @unchecked Sendable {
     public let resolveWeight: (String) -> (buffer: MTLBuffer, offset: Int)
 
     public init(bufferSet: MetalBufferSet, slotDimension: Int, elementSize: Int,
+                currentInputBuffer: MTLBuffer, currentInputOffset: Int,
                 layerIndex: Int?, kvCacheIndex: Int, convLayerIndex: Int, recurrentLayerIndex: Int,
                 resolveWeight: @escaping (String) -> (buffer: MTLBuffer, offset: Int)) {
         self.bufferSet = bufferSet
         self.slotDimension = slotDimension
         self.elementSize = elementSize
+        self.currentInputBuffer = currentInputBuffer
+        self.currentInputOffset = currentInputOffset
         self.layerIndex = layerIndex
         self.kvCacheIndex = kvCacheIndex
         self.convLayerIndex = convLayerIndex
@@ -163,6 +183,8 @@ public struct PrefillBindingContext: @unchecked Sendable {
     public let slotDimension: Int
     public let scratchElementSize: Int
     public let maximumSequenceLength: Int
+    public let currentInputBuffer: MTLBuffer
+    public let currentInputOffset: Int
     public let layerIndex: Int?
     public let kvCacheIndex: Int
     public let convLayerIndex: Int
@@ -172,7 +194,8 @@ public struct PrefillBindingContext: @unchecked Sendable {
     public let getPipeline: (String) throws -> MTLComputePipelineState
 
     public init(buffers: PrefillBufferSet, slotDimension: Int, scratchElementSize: Int,
-                maximumSequenceLength: Int, layerIndex: Int?, kvCacheIndex: Int, convLayerIndex: Int, recurrentLayerIndex: Int,
+                maximumSequenceLength: Int, currentInputBuffer: MTLBuffer, currentInputOffset: Int,
+                layerIndex: Int?, kvCacheIndex: Int, convLayerIndex: Int, recurrentLayerIndex: Int,
                 kernelContext: KernelContext,
                 resolveWeight: @escaping (String) -> (buffer: MTLBuffer, offset: Int),
                 getPipeline: @escaping (String) throws -> MTLComputePipelineState) {
@@ -180,6 +203,8 @@ public struct PrefillBindingContext: @unchecked Sendable {
         self.slotDimension = slotDimension
         self.scratchElementSize = scratchElementSize
         self.maximumSequenceLength = maximumSequenceLength
+        self.currentInputBuffer = currentInputBuffer
+        self.currentInputOffset = currentInputOffset
         self.layerIndex = layerIndex
         self.kvCacheIndex = kvCacheIndex
         self.convLayerIndex = convLayerIndex

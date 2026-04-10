@@ -8,12 +8,20 @@ public struct DispatchEntry: Sendable {
     public let kind: DispatchKind
     public let parameterBindings: [ParameterBinding]
     public let layerIndex: Int?
+    public let compositeID: Int?
 
-    public init(index: Int, kind: DispatchKind, parameterBindings: [ParameterBinding] = [], layerIndex: Int? = nil) {
+    public init(
+        index: Int,
+        kind: DispatchKind,
+        parameterBindings: [ParameterBinding] = [],
+        layerIndex: Int? = nil,
+        compositeID: Int? = nil
+    ) {
         self.index = index
         self.kind = kind
         self.parameterBindings = parameterBindings
         self.layerIndex = layerIndex
+        self.compositeID = compositeID
     }
 }
 

@@ -88,6 +88,57 @@ final class Gemma4WeightStore {
         return decoded
     }
 
+    func gatherRows(
+        named name: String,
+        rowCount: Int,
+        rowWidth: Int,
+        indices: [Int]
+    ) throws -> [[Float]] {
+        if let dense = denseTensors[name] {
+            return try gatherRows(
+                fromDenseValues: dense.values,
+                rowCount: rowCount,
+                rowWidth: rowWidth,
+                indices: indices
+            )
+        }
+        if let stafWeights {
+            guard let entry = stafWeights.entries[name] else {
+                throw ModelBundleLoaderError.invalidConfig("Missing Gemma4 tensor: \(name)")
+            }
+            let elementCount = entry.shape.reduce(1, *)
+            guard elementCount == rowCount * rowWidth else {
+                throw ModelBundleLoaderError.invalidConfig("Gemma4 tensor shape does not match expected row-major layout")
+            }
+            let basePointer = stafWeights.buffer.contents().advanced(by: entry.bufferOffset)
+            return try gatherRows(
+                fromRawBuffer: basePointer,
+                schemeIdentifier: entry.schemeIdentifier,
+                rowCount: rowCount,
+                rowWidth: rowWidth,
+                indices: indices
+            )
+        }
+        guard let weights else {
+            throw ModelBundleLoaderError.invalidConfig("Missing Gemma4 tensor: \(name)")
+        }
+        guard let tensor = weights.tensor(for: name) else {
+            throw ModelBundleLoaderError.invalidConfig("Missing Gemma4 tensor: \(name)")
+        }
+        let elementCount = tensor.shape.reduce(1, *)
+        guard elementCount == rowCount * rowWidth else {
+            throw ModelBundleLoaderError.invalidConfig("Gemma4 tensor shape does not match expected row-major layout")
+        }
+        let basePointer = tensor.buffer.contents().advanced(by: tensor.offset)
+        return try gatherRows(
+            fromRawBuffer: basePointer,
+            dtype: tensor.dtype,
+            rowCount: rowCount,
+            rowWidth: rowWidth,
+            indices: indices
+        )
+    }
+
     func optionalFloatTensor(named name: String) throws -> [Float]? {
         if let dense = denseTensors[name] {
             return dense.values
@@ -162,5 +213,100 @@ final class Gemma4WeightStore {
             throw ModelBundleLoaderError.invalidConfig("Missing Gemma4 tensor shape: \(name)")
         }
         return info.shape
+    }
+
+    private func gatherRows(
+        fromDenseValues values: [Float],
+        rowCount: Int,
+        rowWidth: Int,
+        indices: [Int]
+    ) throws -> [[Float]] {
+        guard values.count == rowCount * rowWidth else {
+            throw ModelBundleLoaderError.invalidConfig("Gemma4 tensor shape does not match expected row-major layout")
+        }
+        return try indices.map { index in
+            try validateRowIndex(index, rowCount: rowCount)
+            let start = index * rowWidth
+            return Array(values[start..<(start + rowWidth)])
+        }
+    }
+
+    private func gatherRows(
+        fromRawBuffer basePointer: UnsafeMutableRawPointer,
+        schemeIdentifier: QuantizationSchemeIdentifier,
+        rowCount: Int,
+        rowWidth: Int,
+        indices: [Int]
+    ) throws -> [[Float]] {
+        switch schemeIdentifier {
+        case .fp16RowMajor:
+            let values = basePointer.bindMemory(to: UInt16.self, capacity: rowCount * rowWidth)
+            return try indices.map { index in
+                try validateRowIndex(index, rowCount: rowCount)
+                let start = index * rowWidth
+                return (0..<rowWidth).map { column in
+                    Float(Float16(bitPattern: values[start + column]))
+                }
+            }
+        case .bf16RowMajor:
+            let values = basePointer.bindMemory(to: UInt16.self, capacity: rowCount * rowWidth)
+            return try indices.map { index in
+                try validateRowIndex(index, rowCount: rowCount)
+                let start = index * rowWidth
+                return (0..<rowWidth).map { column in
+                    Float(bitPattern: UInt32(values[start + column]) << 16)
+                }
+            }
+        default:
+            throw ModelBundleLoaderError.invalidConfig(
+                "Quantized Gemma4 tensor is not supported: row gather"
+            )
+        }
+    }
+
+    private func gatherRows(
+        fromRawBuffer basePointer: UnsafeMutableRawPointer,
+        dtype: MetalTensorDType,
+        rowCount: Int,
+        rowWidth: Int,
+        indices: [Int]
+    ) throws -> [[Float]] {
+        switch dtype {
+        case .float16:
+            let values = basePointer.bindMemory(to: UInt16.self, capacity: rowCount * rowWidth)
+            return try indices.map { index in
+                try validateRowIndex(index, rowCount: rowCount)
+                let start = index * rowWidth
+                return (0..<rowWidth).map { column in
+                    Float(Float16(bitPattern: values[start + column]))
+                }
+            }
+        case .bfloat16:
+            let values = basePointer.bindMemory(to: UInt16.self, capacity: rowCount * rowWidth)
+            return try indices.map { index in
+                try validateRowIndex(index, rowCount: rowCount)
+                let start = index * rowWidth
+                return (0..<rowWidth).map { column in
+                    Float(bitPattern: UInt32(values[start + column]) << 16)
+                }
+            }
+        case .float32:
+            let values = basePointer.bindMemory(to: Float.self, capacity: rowCount * rowWidth)
+            return try indices.map { index in
+                try validateRowIndex(index, rowCount: rowCount)
+                let start = index * rowWidth
+                return Array(UnsafeBufferPointer(start: values.advanced(by: start), count: rowWidth))
+            }
+        case .quantized:
+            throw ModelBundleLoaderError.invalidConfig(
+                "Quantized Gemma4 tensor is not supported: row gather"
+            )
+        }
+    }
+
+    private func validateRowIndex(_ index: Int, rowCount: Int) throws {
+        guard index >= 0, index < rowCount else {
+            throw ModelBundleLoaderError.invalidConfig("Gemma4 token ID \(index) is out of range")
+        }
     }
 }

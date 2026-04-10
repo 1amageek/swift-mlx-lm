@@ -32,8 +32,11 @@ public struct Conv1dFragment: PrimitiveMetalKernelFragment {
         guard let convState = context.bufferSet.convState else {
             fatalError("[Compiler] Conv1dFragment requires conv_state buffer")
         }
+        let convStateElementSize = MemoryLayout<Float16>.size
         let convLayerOffset = context.convLayerIndex
-            * context.bufferSet.convStateKernelSize * context.bufferSet.convStateDimension * context.elementSize
+            * context.bufferSet.convStateKernelSize
+            * context.bufferSet.convStateDimension
+            * convStateElementSize
 
         return FragmentBindings(
             buffers: [

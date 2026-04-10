@@ -54,6 +54,21 @@ public struct BFloat16Format: QuantizationFormat {
     public init() {}
 }
 
+public struct Float32Format: QuantizationFormat {
+    public var schemeIdentifier: QuantizationSchemeIdentifier { .fp32RowMajor }
+    public var blockStructName: String { "" }
+    public var gemvKernelName: String { "gemv_f32" }
+    public func gemmKernelName(bufferPrecision: BufferPrecision) -> String {
+        "gemm_f32s"
+    }
+    public var weightsPerBlock: Int { 1 }
+    public var bytesPerBlock: Int { 4 }
+    public var bits: Int { 32 }
+    public var groupSize: Int { 1 }
+
+    public init() {}
+}
+
 // MARK: - INT4 Affine Formats
 
 /// 4-bit affine quantization with group size 64.
@@ -151,6 +166,7 @@ public enum QuantizationFormatRegistry {
         switch identifier {
         case .fp16RowMajor: return Float16Format()
         case .bf16RowMajor: return BFloat16Format()
+        case .fp32RowMajor: return Float32Format()
         case .q4Group64ScaleF16: return AffineQ4Group64Format()
         case .q4Group128ScaleF16: return AffineQ4Group128Format()
         case .q8Group32ScaleF16: return AffineQ8Group32Format()

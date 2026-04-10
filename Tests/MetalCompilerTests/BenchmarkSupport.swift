@@ -12,6 +12,20 @@ enum BenchmarkSupport {
         let store: STAFWeightStore
     }
 
+    struct CollectedPrefillEntries {
+        let device: MTLDevice
+        let store: STAFWeightStore
+        let spec: LFM25ModelSpec
+        let context: CompileContext
+        let walkContext: WalkContext
+        let fusedEntries: [DispatchEntry]
+    }
+
+    struct SetupWithCollectedPrefillEntries {
+        let model: MetalInferenceModel
+        let collected: CollectedPrefillEntries
+    }
+
     struct StepProfile {
         let index: Int
         let kernelName: String
@@ -45,6 +59,7 @@ enum BenchmarkSupport {
         }
     }
 
+    static let lfmBundlePath = "/Users/1amageek/Desktop/swift-lm/TestData/LFM2.5-1.2B-Thinking"
     static let stafPath = "/Users/1amageek/Desktop/swift-lm/TestData/LFM2.5-1.2B-Thinking/model.staf"
     static let outputPath = "/Users/1amageek/Desktop/swift-lm/TestData/benchmark.txt"
     static let squareQProjBlockedSafePrefixTensorNames: Set<String> = [
@@ -59,6 +74,15 @@ enum BenchmarkSupport {
     static let squareSingleQProjBlockedTensorName = "model.layers.10.self_attn.q_proj.weight"
     private static let loadedStoreLock = NSLock()
     nonisolated(unsafe) private static var loadedStoreCache: LoadedStore?
+    private static let lfmSpecLock = NSLock()
+    nonisolated(unsafe) private static var lfmSpecCache: LFM25ModelSpec?
+
+    struct LFM25ModelSpec {
+        let modelType: String
+        let config: ModelConfig
+        let resolved: ModelGraph
+        let convention: ParameterResolver.WeightNamingConvention
+    }
 
     static func isHotExactShapeGEMVKernel(_ name: String) -> Bool {
         (name.hasPrefix("gemv_2048_6144") || name.hasPrefix("gemv_2048_sq")) &&
@@ -181,53 +205,230 @@ enum BenchmarkSupport {
 
     static func setupOrSkip(
         optimizer: (any DispatchOptimizer)? = nil,
-        weightAccessPolicyOverride: ProjectionWeightAccessPolicyOverride? = nil
+        weightAccessPolicyOverride: ProjectionWeightAccessPolicyOverride? = nil,
+        decodeBufferPrecisionOverride: BufferPrecision? = nil,
+        useCachedStore: Bool = true
     ) throws -> (MetalInferenceModel, STAFWeightStore) {
-        let (device, store) = try loadStoreOrSkip()
+        try autoreleasepool {
+            let (device, store): (MTLDevice, STAFWeightStore)
+            if useCachedStore {
+                (device, store) = try loadStoreOrSkip()
+            } else {
+                (device, store) = try loadFreshStoreOrSkip()
+            }
+            let spec = try loadLFM25ModelSpec()
 
-        let config = ModelConfig(
-            hiddenSize: 2048, layerCount: 16, intermediateSize: 8192,
-            vocabSize: 65536, attentionHeads: 32, kvHeads: 8, headDim: 64,
-            attentionBias: false, mlpBias: false, normEps: 1e-5,
-            normKind: .rmsNorm, ropeTheta: 1000000.0, ropeDimension: 64,
-            ropeScaling: nil, tiedEmbeddings: true,
-            expertCount: nil, expertsPerToken: nil, qkNorm: true,
-            fullAttentionInterval: nil, ssmNumHeads: nil, ssmKeyHeadDim: nil,
-            ssmValueHeadDim: nil, convKernelSize: nil, convLCache: 3,
-            partialRotaryFactor: nil, slidingWindow: nil,
-            layerTypes: ["conv", "conv", "full_attention", "conv", "conv", "full_attention",
-                         "conv", "conv", "full_attention", "conv", "full_attention", "conv",
-                         "full_attention", "conv", "full_attention", "conv"]
-        )
-        let graph = try LFM2(config: config).makeModelGraph()
-        let resolved = ParameterResolver().resolve(graph: graph, convention: .lfm2Family)
+            let compiler: MetalInferenceCompiler
+            if let weightAccessPolicyOverride {
+                compiler = MetalInferenceCompiler(
+                    optimizer: optimizer,
+                    weightAccessPolicyOverride: weightAccessPolicyOverride,
+                    decodeBufferPrecisionOverride: decodeBufferPrecisionOverride
+                )
+            } else if let decodeBufferPrecisionOverride {
+                compiler = MetalInferenceCompiler(
+                    optimizer: optimizer,
+                    decodeBufferPrecisionOverride: decodeBufferPrecisionOverride
+                )
+            } else {
+                compiler = MetalInferenceCompiler(optimizer: optimizer)
+            }
+            let decodePlan = try compiler.compile(
+                graph: spec.resolved,
+                hiddenSize: spec.config.hiddenSize,
+                intermediateSize: spec.config.intermediateSize,
+                vocabSize: spec.config.vocabSize,
+                stafWeightStore: store,
+                device: device)
+            let prefillPlan = try compiler.compilePrefill(
+                graph: spec.resolved,
+                hiddenSize: spec.config.hiddenSize,
+                intermediateSize: spec.config.intermediateSize,
+                vocabSize: spec.config.vocabSize,
+                inferencePolicy: InferencePolicy(maximumSequenceLength: 64),
+                stafWeightStore: store,
+                sharedKVCache: decodePlan.buffers.kvCache,
+                sharedConvState: decodePlan.buffers.convState,
+                sharedConvStateDimension: decodePlan.buffers.convStateDimension,
+                sharedConvStateKernelSize: decodePlan.buffers.convStateKernelSize,
+                device: device)
 
-        let compiler: MetalInferenceCompiler
-        if let weightAccessPolicyOverride {
-            compiler = MetalInferenceCompiler(
-                optimizer: optimizer,
+            var model = try MetalInferenceModel(plan: decodePlan, device: device)
+            model.prefillPlan = prefillPlan
+
+            return (model, store)
+        }
+    }
+
+    static func collectPrefillEntriesOrSkip(
+        optimizer: (any DispatchOptimizer)? = nil,
+        weightAccessPolicyOverride: ProjectionWeightAccessPolicyOverride? = nil,
+        decodeBufferPrecisionOverride: BufferPrecision? = nil,
+        useCachedStore: Bool = true
+    ) throws -> CollectedPrefillEntries {
+        try autoreleasepool {
+            let (device, store): (MTLDevice, STAFWeightStore)
+            if useCachedStore {
+                (device, store) = try loadStoreOrSkip()
+            } else {
+                (device, store) = try loadFreshStoreOrSkip()
+            }
+            let spec = try loadLFM25ModelSpec()
+
+            let kernelNameResolver = MetalKernelNameResolver(
+                stafWeightStore: store,
                 weightAccessPolicyOverride: weightAccessPolicyOverride
             )
-        } else {
-            compiler = MetalInferenceCompiler(optimizer: optimizer)
+            let context = CompileContext(
+                graph: spec.resolved,
+                hiddenSize: spec.config.hiddenSize,
+                intermediateSize: spec.config.intermediateSize,
+                vocabSize: spec.config.vocabSize,
+                inferencePolicy: InferencePolicy(maximumSequenceLength: 64),
+                stafWeightStore: store,
+                device: device,
+                weightFormat: kernelNameResolver.resolveModelWeightFormat(),
+                decodeBufferPrecision: decodeBufferPrecisionOverride ?? kernelNameResolver.preferredDecodeBufferPrecision(
+                    for: kernelNameResolver.resolveModelWeightFormat()
+                ),
+                accessPolicyResolver: ProjectionWeightAccessPolicyResolver(
+                    override: weightAccessPolicyOverride
+                )
+            )
+            let collector = MetalEntryCollector(optimizer: optimizer ?? AggressiveOptimizer())
+            let optimization = collector.collect(
+                using: context,
+                kernelContext: context.prefillKernelContext
+            )
+            return CollectedPrefillEntries(
+                device: device,
+                store: store,
+                spec: spec,
+                context: context,
+                walkContext: optimization.walkContext,
+                fusedEntries: optimization.fusedEntries
+            )
         }
-        let decodePlan = try compiler.compile(
-            graph: resolved, hiddenSize: 2048, intermediateSize: 8192,
-            vocabSize: 65536, stafWeightStore: store, device: device)
-        let prefillPlan = try compiler.compilePrefill(
-            graph: resolved, hiddenSize: 2048, intermediateSize: 8192,
-            vocabSize: 65536, inferencePolicy: InferencePolicy(maximumSequenceLength: 64),
-            stafWeightStore: store,
-            sharedKVCache: decodePlan.buffers.kvCache,
-            sharedConvState: decodePlan.buffers.convState,
-            sharedConvStateDimension: decodePlan.buffers.convStateDimension,
-            sharedConvStateKernelSize: decodePlan.buffers.convStateKernelSize,
-            device: device)
+    }
 
-        var model = try MetalInferenceModel(plan: decodePlan, device: device)
-        model.prefillPlan = prefillPlan
+    static func setupWithCollectedPrefillEntriesOrSkip(
+        optimizer: (any DispatchOptimizer)? = nil,
+        weightAccessPolicyOverride: ProjectionWeightAccessPolicyOverride? = nil,
+        decodeBufferPrecisionOverride: BufferPrecision? = nil,
+        useCachedStore: Bool = true
+    ) throws -> SetupWithCollectedPrefillEntries {
+        try autoreleasepool {
+            let (device, store): (MTLDevice, STAFWeightStore)
+            if useCachedStore {
+                (device, store) = try loadStoreOrSkip()
+            } else {
+                (device, store) = try loadFreshStoreOrSkip()
+            }
+            let spec = try loadLFM25ModelSpec()
 
-        return (model, store)
+            let compiler: MetalInferenceCompiler
+            if let weightAccessPolicyOverride {
+                compiler = MetalInferenceCompiler(
+                    optimizer: optimizer,
+                    weightAccessPolicyOverride: weightAccessPolicyOverride,
+                    decodeBufferPrecisionOverride: decodeBufferPrecisionOverride
+                )
+            } else if let decodeBufferPrecisionOverride {
+                compiler = MetalInferenceCompiler(
+                    optimizer: optimizer,
+                    decodeBufferPrecisionOverride: decodeBufferPrecisionOverride
+                )
+            } else {
+                compiler = MetalInferenceCompiler(optimizer: optimizer)
+            }
+            let decodePlan = try compiler.compile(
+                graph: spec.resolved,
+                hiddenSize: spec.config.hiddenSize,
+                intermediateSize: spec.config.intermediateSize,
+                vocabSize: spec.config.vocabSize,
+                stafWeightStore: store,
+                device: device)
+            let prefillPlan = try compiler.compilePrefill(
+                graph: spec.resolved,
+                hiddenSize: spec.config.hiddenSize,
+                intermediateSize: spec.config.intermediateSize,
+                vocabSize: spec.config.vocabSize,
+                inferencePolicy: InferencePolicy(maximumSequenceLength: 64),
+                stafWeightStore: store,
+                sharedKVCache: decodePlan.buffers.kvCache,
+                sharedConvState: decodePlan.buffers.convState,
+                sharedConvStateDimension: decodePlan.buffers.convStateDimension,
+                sharedConvStateKernelSize: decodePlan.buffers.convStateKernelSize,
+                device: device)
+
+            var model = try MetalInferenceModel(plan: decodePlan, device: device)
+            model.prefillPlan = prefillPlan
+
+            let kernelNameResolver = MetalKernelNameResolver(
+                stafWeightStore: store,
+                weightAccessPolicyOverride: weightAccessPolicyOverride
+            )
+            let context = CompileContext(
+                graph: spec.resolved,
+                hiddenSize: spec.config.hiddenSize,
+                intermediateSize: spec.config.intermediateSize,
+                vocabSize: spec.config.vocabSize,
+                inferencePolicy: InferencePolicy(maximumSequenceLength: 64),
+                stafWeightStore: store,
+                device: device,
+                weightFormat: kernelNameResolver.resolveModelWeightFormat(),
+                decodeBufferPrecision: decodeBufferPrecisionOverride ?? kernelNameResolver.preferredDecodeBufferPrecision(
+                    for: kernelNameResolver.resolveModelWeightFormat()
+                ),
+                accessPolicyResolver: ProjectionWeightAccessPolicyResolver(
+                    override: weightAccessPolicyOverride
+                )
+            )
+            let collector = MetalEntryCollector(optimizer: optimizer ?? AggressiveOptimizer())
+            let optimization = collector.collect(
+                using: context,
+                kernelContext: context.prefillKernelContext
+            )
+
+            return SetupWithCollectedPrefillEntries(
+                model: model,
+                collected: CollectedPrefillEntries(
+                    device: device,
+                    store: store,
+                    spec: spec,
+                    context: context,
+                    walkContext: optimization.walkContext,
+                    fusedEntries: optimization.fusedEntries
+                )
+            )
+        }
+    }
+
+    static func loadLFM25ModelSpec() throws -> LFM25ModelSpec {
+        lfmSpecLock.lock()
+        defer { lfmSpecLock.unlock() }
+
+        if let cached = lfmSpecCache {
+            return cached
+        }
+
+        let configURL = URL(fileURLWithPath: lfmBundlePath).appendingPathComponent("config.json")
+        let configData = try Data(contentsOf: configURL)
+        let decoder = HFConfigDecoder()
+        let modelType = try decoder.modelType(from: configData)
+        let config = try decoder.decode(from: configData)
+        let resolver = ModelGraphResolver()
+        let graph = try resolver.resolveModelGraph(modelType: modelType, config: config)
+        let convention = resolver.namingConvention(for: modelType)
+        let resolved = ParameterResolver().resolve(graph: graph, convention: convention)
+        let spec = LFM25ModelSpec(
+            modelType: modelType,
+            config: config,
+            resolved: resolved,
+            convention: convention
+        )
+        lfmSpecCache = spec
+        return spec
     }
 
     static func loadStoreOrSkip() throws -> (MTLDevice, STAFWeightStore) {
@@ -254,9 +455,25 @@ enum BenchmarkSupport {
         return (device, store)
     }
 
+    static func loadFreshStoreOrSkip() throws -> (MTLDevice, STAFWeightStore) {
+        guard let device = MTLCreateSystemDefaultDevice() else { throw BenchError.noDevice }
+
+        let stafURL = URL(fileURLWithPath: stafPath)
+        if !FileManager.default.fileExists(atPath: stafURL.path) {
+            let safetensorsURL = stafURL.deletingLastPathComponent()
+                .appendingPathComponent("model.safetensors")
+            guard FileManager.default.fileExists(atPath: safetensorsURL.path) else {
+                throw BenchError.noModel
+            }
+            try STAFConverter().convert(safetensorsURLs: [safetensorsURL], outputURL: stafURL)
+        }
+        let store = try STAFLoader().load(at: stafURL, device: device)
+        return (device, store)
+    }
+
     static func profileDecodeSteps(
         model: inout MetalInferenceModel,
-        queue: MTLCommandQueue,
+        device: MTLDevice,
         iterations: Int,
         filter: (MetalDispatchStep) -> Bool
     ) throws -> [StepProfile] {
@@ -276,13 +493,15 @@ enum BenchmarkSupport {
                 threadgroupSize: step.threadgroupSize)
         }
 
+        var submission = try MetalSubmissionContext(device: device)
+
         for (_, step) in steps {
-            try executeProfiledStep(step, queue: queue)
+            try executeProfiledStep(step, submission: &submission)
         }
 
         for _ in 0..<iterations {
             for (profileIndex, (_, step)) in steps.enumerated() {
-                let elapsedMicroseconds = try executeProfiledStep(step, queue: queue)
+                let elapsedMicroseconds = try executeProfiledStep(step, submission: &submission)
                 profiles[profileIndex].totalMicroseconds += elapsedMicroseconds
             }
         }
@@ -293,34 +512,16 @@ enum BenchmarkSupport {
     @discardableResult
     static func executeProfiledStep(
         _ step: MetalDispatchStep,
-        queue: MTLCommandQueue
+        submission: inout MetalSubmissionContext
     ) throws -> Double {
-        guard let commandBuffer = queue.makeCommandBuffer(),
-              let encoder = commandBuffer.makeComputeCommandEncoder() else {
-            throw BenchError.noDevice
+        let timing = try submission.withComputeTimed { encoder, argumentTable in
+            MetalDecodeEncoder.encodeStep(
+                step: step,
+                encoder: encoder,
+                argumentTable: argumentTable
+            )
         }
-        if step.barrierPolicy.isBarrier {
-            encoder.memoryBarrier(scope: .buffers)
-        }
-        encoder.setComputePipelineState(step.pipeline)
-        for (index, buffer, offset) in step.bufferBindings {
-            encoder.setBuffer(buffer, offset: offset, index: index)
-        }
-        for (index, value) in step.bytesBindings {
-            value.withUnsafeBufferPointer { pointer in
-                if let baseAddress = pointer.baseAddress {
-                    encoder.setBytes(baseAddress, length: pointer.count, index: index)
-                }
-            }
-        }
-        if step.threadgroupMemoryLength > 0 {
-            encoder.setThreadgroupMemoryLength(step.threadgroupMemoryLength, index: 0)
-        }
-        encoder.dispatchThreadgroups(step.gridSize, threadsPerThreadgroup: step.threadgroupSize)
-        encoder.endEncoding()
-        commandBuffer.commit()
-        commandBuffer.waitUntilCompleted()
-        return (commandBuffer.gpuEndTime - commandBuffer.gpuStartTime) * 1_000_000
+        return (timing.gpuEndTime - timing.gpuStartTime) * 1_000_000
     }
 
     static func measureDecodeSyncBreakdown(
@@ -331,43 +532,25 @@ enum BenchmarkSupport {
         var currentToken = model.prefill(tokens: promptTokens)
         for _ in 0..<3 { currentToken = model.decodeSync(tokenID: currentToken) }
 
-        let buffers = model.buffers
         var breakdown = DecodeSyncBreakdown()
 
         for _ in 0..<iterations {
             let totalStart = currentTimeNanoseconds()
 
-            let writeStart = currentTimeNanoseconds()
-            buffers.position.contents().bindMemory(to: UInt32.self, capacity: 1).pointee = UInt32(model.position)
-            buffers.tokenIn.contents().bindMemory(to: Int32.self, capacity: 1).pointee = currentToken
-            let writeEnd = currentTimeNanoseconds()
-
+            // decodeSyncTimed handles CPU write, encode, submit, and wait internally.
+            // Granular CPU write vs encode vs wait breakdown is not available with Metal 4
+            // reusable command buffer. Measure total wall time and GPU time.
             let encodeStart = currentTimeNanoseconds()
-            guard let commandBuffer = model.commandQueue.makeCommandBuffer(),
-                  let encoder = commandBuffer.makeComputeCommandEncoder() else {
-                throw BenchError.noDevice
-            }
-            for step in model.decodePlan.steps {
-                step.bindings.bind(to: encoder)
-                step.descriptor.encode(on: encoder)
-            }
-            encoder.endEncoding()
-            commandBuffer.commit()
+            let timedResult = model.decodeSyncTimed(tokenID: currentToken)
             let submitEnd = currentTimeNanoseconds()
 
-            commandBuffer.waitUntilCompleted()
-            let waitEnd = currentTimeNanoseconds()
-
-            currentToken = buffers.tokenOut.contents().bindMemory(to: Int32.self, capacity: 1).pointee
-            model.position += 1
+            currentToken = timedResult.token
             let readEnd = currentTimeNanoseconds()
 
-            breakdown.cpuWriteMicroseconds += elapsedMicroseconds(from: writeStart, to: writeEnd)
             breakdown.encodeSubmitMicroseconds += elapsedMicroseconds(from: encodeStart, to: submitEnd)
-            breakdown.waitMicroseconds += elapsedMicroseconds(from: submitEnd, to: waitEnd)
-            breakdown.readbackMicroseconds += elapsedMicroseconds(from: waitEnd, to: readEnd)
+            breakdown.readbackMicroseconds += elapsedMicroseconds(from: submitEnd, to: readEnd)
             breakdown.totalMicroseconds += elapsedMicroseconds(from: totalStart, to: readEnd)
-            breakdown.gpuMicroseconds += (commandBuffer.gpuEndTime - commandBuffer.gpuStartTime) * 1_000_000
+            breakdown.gpuMicroseconds += (timedResult.gpuEndTime - timedResult.gpuStartTime) * 1_000_000
         }
 
         return breakdown.averaged(over: iterations)

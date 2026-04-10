@@ -160,6 +160,8 @@ struct WeightResolver {
     let entry: DispatchEntry
     let stafWeightStore: STAFWeightStore?
     let fallbackBuffer: MTLBuffer
+    let fallbackWeightFormat: WeightFormat
+    let minimumFallbackLength: Int
     let logsMisses: Bool
     let executionPhase: STAFWeightExecutionPhase
     let accessPolicyResolver: ProjectionWeightAccessPolicyResolver
@@ -182,7 +184,108 @@ struct WeightResolver {
             print("[Compiler] WEIGHT MISS: role='\(role)' tensorName='\(bindingName)' bindings=\(entry.parameterBindings.map(\.role))")
         }
 
-        return (fallbackBuffer, 0)
+        return (makeFallbackBuffer(for: role), 0)
+    }
+
+    private func makeFallbackBuffer(for role: String) -> MTLBuffer {
+        let length = max(requiredFallbackLength(for: role), minimumFallbackLength, 1)
+        guard let buffer = fallbackBuffer.device.makeBuffer(length: length, options: [.storageModeShared]) else {
+            return fallbackBuffer
+        }
+        memset(buffer.contents(), 0, length)
+        if role == "layer_scalar" {
+            switch fallbackWeightFormat {
+            case .float16:
+                buffer.contents().bindMemory(to: Float16.self, capacity: 1).pointee = 1
+            case .bfloat16:
+                buffer.contents().bindMemory(to: UInt16.self, capacity: 1).pointee = 0x3f80
+            case .float32:
+                buffer.contents().bindMemory(to: Float.self, capacity: 1).pointee = 1
+            case .quantized4Bit, .quantized8Bit:
+                break
+            }
+        }
+        buffer.label = "swift-lm.missing-weight.\(role)"
+        return buffer
+    }
+
+    private func requiredFallbackLength(for role: String) -> Int {
+        let bytesPerScalar = fallbackWeightFormat.storageByteSize
+        let minimumBytes = max(bytesPerScalar, 1)
+
+        switch entry.kind {
+        case .projection(let projection, _):
+            guard role == projection.field else { return minimumBytes }
+            return projection.inputDimension * projection.outputDimension * bytesPerScalar
+
+        case .fusedSwiGLUProjection(let fusedOperation):
+            guard role == fusedOperation.gateField || role == fusedOperation.upField else {
+                return minimumBytes
+            }
+            return fusedOperation.inputDimension * fusedOperation.outputDimension * bytesPerScalar
+
+        case .fusedCopyNorm(let fusedOperation):
+            return fusedOperation.dimension * bytesPerScalar
+
+        case .fusedResidualAddCopyNorm(let fusedOperation):
+            return fusedOperation.dimension * bytesPerScalar
+
+        case .fusedResidualAddNorm(let fusedOperation):
+            return fusedOperation.dimension * bytesPerScalar
+
+        case .batchedProjection(let batchedProjection):
+            guard let projection = batchedProjection.projections.first(where: { $0.field == role }) else {
+                return minimumBytes
+            }
+            return projection.inputDimension * projection.outputDimension * bytesPerScalar
+
+        case .fragment(let fragment):
+            return requiredFallbackLength(for: fragment, role: role, bytesPerScalar: bytesPerScalar)
+
+        case .batchedFragment(let batchedFragment):
+            guard let fragment = batchedFragment.fragments.first(where: { fragment in
+                fragment.weightSlots.contains { ($0.field ?? "weight") == role }
+            }) else {
+                return minimumBytes
+            }
+            return requiredFallbackLength(for: fragment, role: role, bytesPerScalar: bytesPerScalar)
+
+        case .structuralCopy, .structuralAdd:
+            return minimumBytes
+        }
+    }
+
+    private func requiredFallbackLength(
+        for fragment: any PrimitiveMetalKernelFragment,
+        role: String,
+        bytesPerScalar: Int
+    ) -> Int {
+        let minimumBytes = max(bytesPerScalar, 1)
+
+        if let gather = fragment as? GatherFragment {
+            return gather.vocabularySize * gather.embeddingDimension * bytesPerScalar
+        }
+        if let reduction = fragment as? Reduction {
+            return reduction.dimension * bytesPerScalar
+        }
+        if let qkNorm = fragment as? QKNormFragment {
+            return qkNorm.headCount * qkNorm.headDimension * bytesPerScalar
+        }
+        if let conv = fragment as? Conv1dFragment {
+            return conv.dimension * conv.kernelSize * bytesPerScalar
+        }
+        if let ssm = fragment as? SSMRecurrenceFragment {
+            switch role {
+            case "conv_weight":
+                return ssm.convDimension * ssm.convKernelSize * bytesPerScalar
+            case "scale", "dt_bias", "A_log":
+                return ssm.convDimension * bytesPerScalar
+            default:
+                return ssm.convDimension * bytesPerScalar
+            }
+        }
+
+        return minimumBytes
     }
 }
 
@@ -290,22 +393,25 @@ struct WalkContext {
     var entries: [DispatchEntry] = []
     var cacheSlots: [CacheSlotInfo] = []
     var nextIndex: Int = 0
+    var nextCompositeID: Int = 0
 
     mutating func emit(
         _ kind: DispatchKind,
         parameterBindings: [ParameterBinding] = [],
-        layerIndex: Int? = nil
+        layerIndex: Int? = nil,
+        compositeID: Int? = nil
     ) {
         entries.append(DispatchEntry(
             index: nextIndex,
             kind: kind,
             parameterBindings: parameterBindings,
-            layerIndex: layerIndex
+            layerIndex: layerIndex,
+            compositeID: compositeID
         ))
         nextIndex += 1
     }
 
-    mutating func emitOptimized(_ entry: OptimizedEntry) {
+    mutating func emitOptimized(_ entry: OptimizedEntry, compositeID: Int) {
         switch entry {
         case .single(let primitive):
             if case .gemv(let outputDimension, let inputDimension) = primitive.fragment.dispatchDimension {
@@ -318,21 +424,38 @@ struct WalkContext {
                 emit(
                     .projection(projection),
                     parameterBindings: primitive.parameterBindings,
-                    layerIndex: primitive.layerIndex
+                    layerIndex: primitive.layerIndex,
+                    compositeID: compositeID
                 )
             } else {
                 emit(
                     .fragment(primitive.fragment),
                     parameterBindings: primitive.parameterBindings,
-                    layerIndex: primitive.layerIndex
+                    layerIndex: primitive.layerIndex,
+                    compositeID: compositeID
                 )
             }
         case .batchedProjection(let batched, let bindings, let layer):
-            emit(.batchedProjection(batched), parameterBindings: bindings, layerIndex: layer)
+            emit(
+                .batchedProjection(batched),
+                parameterBindings: bindings,
+                layerIndex: layer,
+                compositeID: compositeID
+            )
         case .fusedSwiGLUProjection(let fused, let bindings, let layer):
-            emit(.fusedSwiGLUProjection(fused), parameterBindings: bindings, layerIndex: layer)
+            emit(
+                .fusedSwiGLUProjection(fused),
+                parameterBindings: bindings,
+                layerIndex: layer,
+                compositeID: compositeID
+            )
         case .batchedFragment(let batched, let bindings, let layer):
-            emit(.batchedFragment(batched), parameterBindings: bindings, layerIndex: layer)
+            emit(
+                .batchedFragment(batched),
+                parameterBindings: bindings,
+                layerIndex: layer,
+                compositeID: compositeID
+            )
         }
     }
 }

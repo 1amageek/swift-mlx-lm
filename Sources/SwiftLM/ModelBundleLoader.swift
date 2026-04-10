@@ -2,6 +2,7 @@ import Foundation
 import Metal
 import Hub
 import Tokenizers
+import LMIR
 import MetalCompiler
 
 /// Loads a model from HuggingFace and compiles it for Metal inference.
@@ -74,15 +75,18 @@ public struct ModelBundleLoader: Sendable {
         let resolvedGraph = ParameterResolver().resolve(graph: graph, convention: convention)
 
         // 4. Compile IR → MetalCompiledModel (includes Metal pipeline compilation)
-        // The current decode-specialized kernels benchmark best with the
-        // aggressive optimizer once fused SwiGLU uses the input=2048 family.
-        let compiler = MetalInferenceCompiler(optimizer: AggressiveOptimizer())
+        let compiler = Self.makeInferenceCompiler()
+        let resolvedInferencePolicy = Self.resolveInferencePolicy(
+            inferencePolicy,
+            for: resolvedGraph
+        )
+        let prefillInferencePolicy = Self.prefillInferencePolicy(for: resolvedInferencePolicy)
         var compiledModel = try compiler.compile(
             graph: resolvedGraph,
             hiddenSize: resources.config.hiddenSize,
             intermediateSize: resources.config.intermediateSize,
             vocabSize: resources.config.vocabSize,
-            inferencePolicy: inferencePolicy,
+            inferencePolicy: resolvedInferencePolicy,
             stafWeightStore: weightStore,
             device: device
         )
@@ -93,9 +97,12 @@ public struct ModelBundleLoader: Sendable {
             hiddenSize: resources.config.hiddenSize,
             intermediateSize: resources.config.intermediateSize,
             vocabSize: resources.config.vocabSize,
-            inferencePolicy: inferencePolicy,
+            inferencePolicy: prefillInferencePolicy,
             stafWeightStore: weightStore,
-            sharedKVCache: compiledModel.buffers.kvCache,
+            sharedKVCache: Self.shouldShareKVCache(
+                decodePolicy: resolvedInferencePolicy,
+                prefillPolicy: prefillInferencePolicy
+            ) ? compiledModel.buffers.kvCache : nil,
             sharedConvState: compiledModel.buffers.convState,
             sharedConvStateDimension: compiledModel.buffers.convStateDimension,
             sharedConvStateKernelSize: compiledModel.buffers.convStateKernelSize,
@@ -168,9 +175,125 @@ public struct ModelBundleLoader: Sendable {
             tokenizer: tokenizer,
             configuration: modelConfig,
             chatTemplate: resources.chatTemplate,
+            chatTemplateSource: resources.chatTemplateSource,
+            vocabularySize: resources.config.vocabSize,
+            finalLogitSoftcapping: resources.config.finalLogitSoftcapping,
             visionRuntime: visionRuntime,
             gemma4Runtime: gemma4Runtime
         )
+    }
+
+    static func resolveInferencePolicy(
+        _ requestedPolicy: InferencePolicy,
+        for graph: ModelGraph
+    ) -> InferencePolicy {
+        guard Self.isLoaderDefaultPolicy(requestedPolicy) else {
+            return requestedPolicy
+        }
+        guard graph.rootRegion.isRotorQuantDefaultCandidate else {
+            return requestedPolicy
+        }
+
+        return InferencePolicy(
+            maximumSequenceLength: requestedPolicy.maximumSequenceLength,
+            kvCache: KVCachePolicy(
+                keyScheme: .fixed(.rotorQ4Group64ScaleF16),
+                valueScheme: .fixed(.rotorQ4Group64ScaleF16)
+            )
+        )
+    }
+
+    private static func isLoaderDefaultPolicy(_ policy: InferencePolicy) -> Bool {
+        policy.maximumSequenceLength == InferencePolicy.default.maximumSequenceLength &&
+        policy.kvCache == InferencePolicy.default.kvCache
+    }
+
+    private static func prefillInferencePolicy(for decodePolicy: InferencePolicy) -> InferencePolicy {
+        guard decodePolicy.kvCache.usesRotorQuant else {
+            return decodePolicy
+        }
+
+        return InferencePolicy(
+            maximumSequenceLength: decodePolicy.maximumSequenceLength,
+            kvCache: KVCachePolicy(
+                keyScheme: .automatic,
+                valueScheme: .automatic,
+                layoutMode: decodePolicy.kvCache.layoutMode,
+                qjlDimension: 0
+            )
+        )
+    }
+
+    private static func shouldShareKVCache(
+        decodePolicy: InferencePolicy,
+        prefillPolicy: InferencePolicy
+    ) -> Bool {
+        decodePolicy.kvCache == prefillPolicy.kvCache
+    }
+
+    private static func makeInferenceCompiler() -> MetalInferenceCompiler {
+        let environment = ProcessInfo.processInfo.environment
+        guard let rawValue = environment["SWIFTLM_METAL_OPTIMIZER"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased(),
+            !rawValue.isEmpty else {
+            return MetalInferenceCompiler(optimizer: AggressiveOptimizer())
+        }
+
+        let optimizer: any DispatchOptimizer
+        switch rawValue {
+        case "aggressive":
+            optimizer = AggressiveOptimizer()
+        case "standard":
+            optimizer = StandardOptimizer()
+        case "none":
+            optimizer = NoOptimizer()
+        default:
+            print("[ModelBundleLoader] unknown SWIFTLM_METAL_OPTIMIZER=\(rawValue); using aggressive")
+            optimizer = AggressiveOptimizer()
+        }
+        print("[ModelBundleLoader] optimizer override: \(optimizer.name)")
+        return MetalInferenceCompiler(optimizer: optimizer)
+    }
+}
+
+private extension Region {
+    var isRotorQuantDefaultCandidate: Bool {
+        containsAttention && !containsStatefulSequenceState
+    }
+
+    var containsAttention: Bool {
+        operations.contains { operation in
+            switch operation.kind {
+            case .primitive(let attributes):
+                return attributes is AttentionAttributes
+            case .residual(_, let body):
+                return body.containsAttention
+            case .parallel(_, let branches):
+                return branches.contains { $0.containsAttention }
+            case .repeating(_, let body):
+                return body.containsAttention
+            case .conditional(_, let thenBody, let elseBody):
+                return thenBody.containsAttention || elseBody.containsAttention
+            }
+        }
+    }
+
+    var containsStatefulSequenceState: Bool {
+        operations.contains { operation in
+            switch operation.kind {
+            case .primitive(let attributes):
+                return attributes is StateSpaceAttributes || attributes is ShortConvAttributes
+            case .residual(_, let body):
+                return body.containsStatefulSequenceState
+            case .parallel(_, let branches):
+                return branches.contains { $0.containsStatefulSequenceState }
+            case .repeating(_, let body):
+                return body.containsStatefulSequenceState
+            case .conditional(_, let thenRegion, let elseRegion):
+                return thenRegion.containsStatefulSequenceState || elseRegion.containsStatefulSequenceState
+            }
+        }
     }
 }
 

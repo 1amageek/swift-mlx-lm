@@ -19,25 +19,44 @@ public struct MetalInferenceCompiler: Sendable {
     /// The optimization strategy used for dispatch entry generation.
     public let optimizer: any DispatchOptimizer
     private let weightAccessPolicyOverride: ProjectionWeightAccessPolicyOverride?
+    private let decodeBufferPrecisionOverride: BufferPrecision?
     private let bufferAllocator = MetalBufferAllocator()
     private let dispatchStepBuilder = MetalDispatchStepBuilder()
     private let prefillStepBuilder = MetalPrefillStepBuilder()
 
+    private var effectiveOptimizer: any DispatchOptimizer {
+        let environment = ProcessInfo.processInfo.environment
+        if environment["SWIFTLM_FORCE_AGGRESSIVE_OPTIMIZER"] == "1"
+            || environment["SWIFTLM_FORCE_AGGRESSIVE_PREFILL"] == "1" {
+            return optimizer
+        }
+        // Aggressive optimization is currently not numerically equivalent
+        // to the standard plan on real-model graphs. Default to the proven
+        // standard optimizer until the aggressive path is fixed end-to-end.
+        if optimizer.name == "aggressive" {
+            return StandardOptimizer()
+        }
+        return optimizer
+    }
+
     private var entryCollector: MetalEntryCollector {
-        MetalEntryCollector(optimizer: optimizer)
+        MetalEntryCollector(optimizer: effectiveOptimizer)
     }
 
     public init(optimizer: (any DispatchOptimizer)? = nil) {
         self.optimizer = optimizer ?? AggressiveOptimizer()
         self.weightAccessPolicyOverride = nil
+        self.decodeBufferPrecisionOverride = nil
     }
 
     init(
         optimizer: (any DispatchOptimizer)? = nil,
-        weightAccessPolicyOverride: ProjectionWeightAccessPolicyOverride
+        weightAccessPolicyOverride: ProjectionWeightAccessPolicyOverride? = nil,
+        decodeBufferPrecisionOverride: BufferPrecision? = nil
     ) {
         self.optimizer = optimizer ?? AggressiveOptimizer()
         self.weightAccessPolicyOverride = weightAccessPolicyOverride
+        self.decodeBufferPrecisionOverride = decodeBufferPrecisionOverride
     }
 
     private func makeCompileContext(
@@ -54,6 +73,8 @@ public struct MetalInferenceCompiler: Sendable {
             weightAccessPolicyOverride: weightAccessPolicyOverride
         )
         let weightFormat = kernelNameResolver.resolveModelWeightFormat()
+        let decodeBufferPrecision = decodeBufferPrecisionOverride
+            ?? kernelNameResolver.preferredDecodeBufferPrecision(for: weightFormat)
         return CompileContext(
             graph: graph,
             hiddenSize: hiddenSize,
@@ -63,7 +84,7 @@ public struct MetalInferenceCompiler: Sendable {
             stafWeightStore: stafWeightStore,
             device: device,
             weightFormat: weightFormat,
-            decodeBufferPrecision: kernelNameResolver.preferredDecodeBufferPrecision(for: weightFormat),
+            decodeBufferPrecision: decodeBufferPrecision,
             accessPolicyResolver: ProjectionWeightAccessPolicyResolver(
                 override: weightAccessPolicyOverride
             )
@@ -131,10 +152,15 @@ public struct MetalInferenceCompiler: Sendable {
     ) {
         let resolved = try resolvedPipeline(for: entry, using: context)
         let dimension = entry.kind.dispatchDimension
-        let config = context.dispatchHeuristics.config(
+        var config = context.dispatchHeuristics.config(
             for: dimension,
             pipeline: resolved.pipeline,
             roundUp: roundUp(_:to:))
+        if case .fragment(let fragment) = entry.kind,
+           fragment is FlashAttentionFragment {
+            let simdWidth = max(resolved.pipeline.threadExecutionWidth, 1)
+            config.threadgroup = MTLSize(width: min(simdWidth, resolved.pipeline.maxTotalThreadsPerThreadgroup), height: 1, depth: 1)
+        }
         return (
             resolved.name,
             resolved.pipeline,
@@ -493,7 +519,8 @@ public struct MetalInferenceCompiler: Sendable {
             fusedEntries: fusedEntries)
         let bufferSet = allocation.bufferSet
         let decodeSlotDimension = allocation.slotDimension
-        print("[Compiler] \(fusedEntries.count) dispatch entries (\(optimizer.name) optimizer)")
+        let effectiveOptimizerName = effectiveOptimizer.name
+        print("[Compiler] \(fusedEntries.count) dispatch entries (\(effectiveOptimizerName) optimizer)")
         let decodePlan = try dispatchStepBuilder.buildDecodePlan(
             fusedEntries: fusedEntries,
             unfusedCount: unfusedCount,

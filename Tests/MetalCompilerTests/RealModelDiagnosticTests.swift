@@ -11,7 +11,8 @@ import LMIR
 @Suite("Real Scale Diagnostic")
 struct RealModelDiagnosticTests {
 
-    @Test("Step-by-step prefill at real scale (hiddenSize=2048, 16 layers)")
+    @Test("Step-by-step prefill at real scale (hiddenSize=2048, 16 layers)",
+          .disabled("Pre-migration diagnostic: accesses storageModePrivate scratch buffer via contents()"))
     func realScaleStepByStep() throws {
         guard let device = MTLCreateSystemDefaultDevice() else {
             Issue.record("No Metal device")
@@ -108,7 +109,12 @@ struct RealModelDiagnosticTests {
                         enc.setBytes(ptr.baseAddress!, length: ptr.count, index: index)
                     }
                 }
-                step.bindRuntimeArguments(encoder: enc, sequenceLength: UInt32(seqLen))
+                if let bindingIndex = step.sequenceLengthPolicy.bindingIndex {
+                    var seqLenValue = UInt32(seqLen)
+                    withUnsafeBytes(of: &seqLenValue) { raw in
+                        enc.setBytes(raw.baseAddress!, length: raw.count, index: bindingIndex)
+                    }
+                }
                 let grid = step.resolvedGridSize(sequenceLength: seqLen)
                 enc.dispatchThreadgroups(grid, threadsPerThreadgroup: step.threadgroupSize)
 

@@ -18,26 +18,34 @@ public struct Attention: ModelComponent {
     public let headCount: Int
     public let kvHeadCount: Int
     public let headDimension: Int
+    public let attentionScale: Float?
     public let bias: Bool
     public let causal: Bool
     public let rope: RoPEAttributes?
     public let qkNorm: QKNormKind?
+    public let valueNorm: AttentionValueNormKind?
+    public let valueProjectionSource: AttentionValueProjectionSource
     public let window: AttentionWindow?
     public let implementationHint: AttentionImplementationHint?
     public let outputGate: AttentionGateKind?
+    public let sharedKeyValueSourceLayerIndex: Int?
 
     public init(
         hiddenSize: Int,
         headCount: Int,
         kvHeadCount: Int,
         headDimension: Int? = nil,
+        attentionScale: Float? = nil,
         bias: Bool = false,
         causal: Bool = true,
         rope: RoPEAttributes? = nil,
         qkNorm: QKNormKind? = nil,
+        valueNorm: AttentionValueNormKind? = nil,
+        valueProjectionSource: AttentionValueProjectionSource = .dedicatedProjection,
         window: AttentionWindow? = nil,
         implementationHint: AttentionImplementationHint? = nil,
-        outputGate: AttentionGateKind? = nil
+        outputGate: AttentionGateKind? = nil,
+        sharedKeyValueSourceLayerIndex: Int? = nil
     ) {
         precondition(hiddenSize > 0, "hiddenSize must be positive")
         precondition(headCount > 0, "headCount must be positive")
@@ -53,13 +61,17 @@ public struct Attention: ModelComponent {
         self.headCount = headCount
         self.kvHeadCount = kvHeadCount
         self.headDimension = headDimension ?? (hiddenSize / headCount)
+        self.attentionScale = attentionScale
         self.bias = bias
         self.causal = causal
         self.rope = rope
         self.qkNorm = qkNorm
+        self.valueNorm = valueNorm
+        self.valueProjectionSource = valueProjectionSource
         self.window = window
         self.implementationHint = implementationHint
         self.outputGate = outputGate
+        self.sharedKeyValueSourceLayerIndex = sharedKeyValueSourceLayerIndex
     }
 }
 
@@ -71,13 +83,17 @@ extension Attention: PrimitiveComponent {
             headCount: headCount,
             kvHeadCount: kvHeadCount,
             headDimension: headDimension,
+            attentionScale: attentionScale,
             bias: bias,
             causal: causal,
             rope: rope,
             qkNorm: qkNorm,
+            valueNorm: valueNorm,
+            valueProjectionSource: valueProjectionSource,
             window: window,
             implementationHint: implementationHint,
-            outputGate: outputGate
+            outputGate: outputGate,
+            sharedKeyValueSourceLayerIndex: sharedKeyValueSourceLayerIndex
         ))
     }
 

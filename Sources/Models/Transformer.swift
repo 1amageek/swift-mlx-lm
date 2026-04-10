@@ -60,7 +60,7 @@ struct TransformerDecoderLayer: ModelComponent {
                     scaling: config.ropeScaling
                 ),
                 qkNorm: config.qkNorm ? .rmsNorm : nil,
-                window: config.slidingWindow.map { AttentionWindow(left: $0, right: $0) }
+                window: config.slidingWindow.map { AttentionWindow(left: $0, right: 0) }
             )
         }
         Residual {

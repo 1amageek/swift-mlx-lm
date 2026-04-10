@@ -126,8 +126,10 @@ struct MetalEntryCollector {
                 )
                 let optimized = optimizer.optimizeFragment(primitives)
                 let startIndex = context.entries.count
+                let compositeID = context.nextCompositeID
+                context.nextCompositeID += 1
                 for entry in optimized {
-                    context.emitOptimized(entry)
+                    context.emitOptimized(entry, compositeID: compositeID)
                 }
                 markLastProjectionAsOutput(entries: &context.entries, from: startIndex)
             }
@@ -221,7 +223,8 @@ struct MetalEntryCollector {
                     index: entries[index].index,
                     kind: .projection(projection, isOutput: true),
                     parameterBindings: entries[index].parameterBindings,
-                    layerIndex: entries[index].layerIndex
+                    layerIndex: entries[index].layerIndex,
+                    compositeID: entries[index].compositeID
                 )
                 break
             }

@@ -434,6 +434,18 @@ private func validatePrimitiveAttributes(
         }
         return a.hiddenSize
 
+    case let a as LayerScaleAttributes:
+        try requirePositive("layerScale.dimension", a.dimension, key: key)
+        if let dim = currentDim {
+            try checkDimensionMatch(
+                expected: dim,
+                actual: a.dimension,
+                field: "layerScale.dimension",
+                key: key
+            )
+        }
+        return a.dimension
+
     case let a as OutputHeadAttributes:
         try requirePositive("outputHead.inputSize", a.inputSize, key: key)
         try requirePositive("outputHead.vocabSize", a.vocabSize, key: key)

@@ -426,13 +426,8 @@ struct QwenVisionParityFixture: Decodable {
 
 private actor QwenVisionSyntheticContainerCache {
     static let shared = QwenVisionSyntheticContainerCache()
-    private var cachedContainer: ModelContainer?
 
     func container() async throws -> ModelContainer? {
-        if let cachedContainer {
-            cachedContainer.resetCaches()
-            return cachedContainer
-        }
         guard let device = MTLCreateSystemDefaultDevice() else {
             return nil
         }
@@ -503,9 +498,9 @@ private actor QwenVisionSyntheticContainerCache {
             inferenceModel: inferenceModel,
             tokenizer: QwenVisionTestTokenizer(),
             configuration: configuration,
+            vocabularySize: config.vocabSize,
             visionRuntime: runtime
         )
-        cachedContainer = container
         return container
     }
 }

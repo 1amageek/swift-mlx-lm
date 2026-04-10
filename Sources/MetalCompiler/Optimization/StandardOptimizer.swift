@@ -10,6 +10,7 @@
 /// 1. gate_proj + up_proj + SwiGLU → fusedSwiGLUProjection (3→1)
 /// 2. structuralAdd + structuralCopy + Reduction → fusedResidualAddCopyNorm (3→1)
 /// 3. structuralCopy + Reduction → fusedCopyNorm (2→1)
+/// 4. structuralAdd + Reduction → fusedResidualAddNorm (2→1)
 public struct StandardOptimizer: DispatchOptimizer {
     public let name = "standard"
 
@@ -48,7 +49,8 @@ public struct StandardOptimizer: DispatchOptimizer {
                     guard case .fragment(let frag) = result[i].kind,
                           frag.isFusable,
                           case .reduction(let dim) = frag.dispatchDimension,
-                          let epsilon = frag.normEpsilon else {
+                          let epsilon = frag.normEpsilon,
+                          (frag.normWeightBias ?? 0) == 0 else {
                         return nil
                     }
                     return (dim, epsilon)
@@ -64,7 +66,8 @@ public struct StandardOptimizer: DispatchOptimizer {
                         kind: .fusedResidualAddCopyNorm(FusedResidualAddCopyNorm(
                             dimension: addDimension, epsilon: reduction.epsilon)),
                         parameterBindings: result[index + 2].parameterBindings,
-                        layerIndex: result[index].layerIndex)
+                        layerIndex: result[index].layerIndex,
+                        compositeID: nil)
                     result.replaceSubrange(index...index + 2, with: [fused])
                     changed = true
                     continue
@@ -79,7 +82,24 @@ public struct StandardOptimizer: DispatchOptimizer {
                         kind: .fusedCopyNorm(FusedCopyNorm(
                             dimension: reduction.dimension, epsilon: reduction.epsilon)),
                         parameterBindings: result[index + 1].parameterBindings,
-                        layerIndex: result[index].layerIndex)
+                        layerIndex: result[index].layerIndex,
+                        compositeID: nil)
+                    result.replaceSubrange(index...index + 1, with: [fused])
+                    changed = true
+                    continue
+                }
+
+                // Pattern 3: structuralAdd + fusable reduction → 2→1 (no copy)
+                if index + 1 < result.count,
+                   case .structuralAdd(let addDimension) = result[index].kind,
+                   let reduction = isFusableReduction(at: index + 1) {
+                    let fused = DispatchEntry(
+                        index: result[index].index,
+                        kind: .fusedResidualAddNorm(FusedResidualAddNorm(
+                            dimension: addDimension, epsilon: reduction.epsilon)),
+                        parameterBindings: result[index + 1].parameterBindings,
+                        layerIndex: result[index].layerIndex,
+                        compositeID: nil)
                     result.replaceSubrange(index...index + 1, with: [fused])
                     changed = true
                     continue

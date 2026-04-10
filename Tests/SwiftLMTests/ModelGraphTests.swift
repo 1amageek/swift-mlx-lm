@@ -1034,7 +1034,7 @@ struct ModelGraphTests {
 
     @Test("QKNormKind all cases roundtrip through JSON")
     func qkNormKindCodable() throws {
-        let cases: [QKNormKind] = [.none, .rmsNorm, .layerNorm, .custom("my-norm")]
+        let cases: [QKNormKind] = [.none, .rmsNorm, .rmsNormUnitOffset, .layerNorm, .custom("my-norm")]
         for kind in cases {
             let data = try JSONEncoder().encode(kind)
             let decoded = try JSONDecoder().decode(QKNormKind.self, from: data)

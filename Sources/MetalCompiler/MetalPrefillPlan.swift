@@ -118,23 +118,23 @@ public struct MetalPrefillStep: @unchecked Sendable {
     }
 
     public func bindRuntimeArguments(
-        encoder: MTLComputeCommandEncoder,
-        sequenceLength: UInt32
+        argumentTable: MTL4ArgumentTable,
+        runtimeConstantBuffer: MTLBuffer,
+        sequenceLengthOffset: Int
     ) {
-        if let bindingIndex = sequenceLengthPolicy.bindingIndex {
-            var runtimeSequenceLength = sequenceLength
-            withUnsafeBytes(of: &runtimeSequenceLength) {
-                encoder.setBytes($0.baseAddress!, length: $0.count, index: bindingIndex)
-            }
-        }
+        guard let bindingIndex = sequenceLengthPolicy.bindingIndex else { return }
+        argumentTable.setAddress(
+            runtimeConstantBuffer.gpuAddress + UInt64(sequenceLengthOffset),
+            index: bindingIndex
+        )
     }
 
     public func bindStaticArguments(
-        encoder: MTLComputeCommandEncoder,
+        argumentTable: MTL4ArgumentTable,
         position: Int? = nil
     ) {
         guard let position else {
-            bindings.bind(to: encoder)
+            bindings.bind(to: argumentTable)
             return
         }
         var adjustedOffsets: [Int: Int] = [:]
@@ -142,7 +142,7 @@ public struct MetalPrefillStep: @unchecked Sendable {
         for binding in bindings.buffers {
             adjustedOffsets[binding.index] = binding.offset + position * (perPositionStrides[binding.index] ?? 0)
         }
-        bindings.bind(to: encoder, adjustedBufferOffsets: adjustedOffsets)
+        bindings.bind(to: argumentTable, adjustedBufferOffsets: adjustedOffsets)
     }
 
     public func resolvedGridSize(sequenceLength: Int) -> MTLSize {
@@ -161,8 +161,18 @@ public struct MetalPrefillStep: @unchecked Sendable {
 public struct MetalPrefillPlan: @unchecked Sendable {
     public let steps: [MetalPrefillStep]
     public let buffers: PrefillBufferSet
+    public let slotDimension: Int
     public let maximumSequenceLength: Int
     public let stepCount: Int
+    let finalHiddenBuffer: MTLBuffer
+    let finalHiddenBaseOffset: Int
+    let finalHiddenRowStride: Int
+    let supplementalResidencyBuffers: [MTLBuffer]
+
+    package func finalHiddenSource(sequenceLength: Int) -> (buffer: MTLBuffer, offset: Int) {
+        let positionOffset = max(sequenceLength - 1, 0) * finalHiddenRowStride
+        return (buffer: finalHiddenBuffer, offset: finalHiddenBaseOffset + positionOffset)
+    }
 }
 
 /// Prefill buffer set ([maxSeqLen × dim] layout).
@@ -186,4 +196,45 @@ public struct PrefillBufferSet: @unchecked Sendable {
     public let positions: MTLBuffer
     public let ropePositionAxes: MTLBuffer
     public let tokenOut: MTLBuffer
+
+    /// Shared buffer for runtime constants (sequenceLength, positions, etc.)
+    /// that replace `setBytes()` calls in Metal 4 prefill encoding.
+    ///
+    /// Layout:
+    /// - Offset 0: sequenceLength (UInt32)
+    /// - Offset 4: hiddenConversionCount (UInt32)
+    /// - Offset 8..<(8 + 4 * maxSeqLen): per-position values (UInt32 each)
+    public let runtimeConstantBuffer: MTLBuffer
+
+    public static let sequenceLengthOffset = 0
+    public static let hiddenConversionCountOffset = 4
+    public static let positionBaseOffset = 8
+
+    public static func positionOffset(at index: Int) -> Int {
+        positionBaseOffset + index * MemoryLayout<UInt32>.stride
+    }
+
+    public static func runtimeConstantBufferSize(maximumSequenceLength: Int) -> Int {
+        positionBaseOffset + maximumSequenceLength * MemoryLayout<UInt32>.stride
+    }
+
+    var runtimeResidencyBuffers: [MTLBuffer] {
+        var buffers: [MTLBuffer] = [
+            hidden, residual, scratch, logits,
+            tokenIDs, positions, ropePositionAxes, tokenOut, runtimeConstantBuffer,
+        ]
+        if let convState { buffers.append(convState) }
+        if let recurrentState { buffers.append(recurrentState) }
+        if let perLayerInputs { buffers.append(perLayerInputs) }
+        if let kvCache {
+            buffers.append(kvCache.keys)
+            buffers.append(kvCache.values)
+            if let rotors = kvCache.rotorParameters { buffers.append(rotors) }
+            if let qjl = kvCache.qjlMatrix { buffers.append(qjl) }
+            if let qjlRes = kvCache.qjlResidualK { buffers.append(qjlRes) }
+        }
+        return buffers
+    }
+
+    var weightResidencyBuffers: [MTLBuffer] { weights }
 }

@@ -159,6 +159,9 @@ public enum ModelGraphDumper {
         case let a as PerLayerInputAttributes:
             return "perLayerInput(hidden=\(a.hiddenSize), layerInput=\(a.perLayerInputSize), vocab=\(a.vocabSize), activation=\(a.activation))"
 
+        case let a as LayerScaleAttributes:
+            return "layerScale(dim=\(a.dimension))"
+
         case let a as PositionalEmbeddingAttributes:
             return "positionalEmbedding(\(a.kind), dim=\(a.embeddingSize), maxPos=\(a.maxPositions))"
 
@@ -175,13 +178,20 @@ public enum ModelGraphDumper {
                 "kvHeads=\(a.kvHeadCount)",
                 "headDim=\(a.headDimension)"
             ]
+            if let attentionScale = a.attentionScale {
+                parts.append("scale=\(formatFloat(attentionScale))")
+            }
             if a.bias { parts.append("bias") }
             if let rope = a.rope {
                 parts.append("rope(dim=\(rope.dimension), base=\(formatFloat(rope.base)))")
             }
             if let qk = a.qkNorm { parts.append("qkNorm=\(qk)") }
+            if let valueNorm = a.valueNorm { parts.append("valueNorm=\(valueNorm)") }
             if let w = a.window { parts.append("window=\(windowStr(w))") }
             if let g = a.outputGate { parts.append("gate=\(g)") }
+            if let sourceLayer = a.sharedKeyValueSourceLayerIndex {
+                parts.append("sharedKV=L\(sourceLayer)")
+            }
             if verbose {
                 if let hint = a.implementationHint { parts.append("hint=\(hint)") }
             }

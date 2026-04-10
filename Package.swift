@@ -1,5 +1,11 @@
 // swift-tools-version: 6.2
 import PackageDescription
+import Foundation
+
+let enableMetalProbes = ProcessInfo.processInfo.environment["ENABLE_METAL_PROBES"] == "1"
+let metalProbeSwiftSettings: [SwiftSetting] = enableMetalProbes
+    ? [.define("ENABLE_METAL_PROBES")]
+    : []
 
 let package = Package(
     name: "swift-lm",
@@ -36,11 +42,13 @@ let package = Package(
             exclude: [
                 "STAF/KVCacheSpec.md",
                 "STAF/README.md",
-            ]
+            ],
+            swiftSettings: metalProbeSwiftSettings
         ),
         .target(
             name: "SwiftLM",
             dependencies: [
+                "LMIR",
                 "LMArchitecture",
                 "MetalCompiler",
                 "ModelDeclarations",
@@ -51,7 +59,7 @@ let package = Package(
             ],
             swiftSettings: [
                 .define("ACCELERATE_NEW_LAPACK"),
-            ]
+            ] + metalProbeSwiftSettings
         ),
         .testTarget(name: "MetalCompilerTests", dependencies: [
             "MetalCompiler", "LMArchitecture", "ModelDeclarations", "SwiftLM",
@@ -59,7 +67,7 @@ let package = Package(
             .product(name: "Tokenizers", package: "swift-transformers"),
             .product(name: "Jinja", package: "swift-jinja"),
             .product(name: "OrderedCollections", package: "swift-collections"),
-        ]),
+        ], swiftSettings: metalProbeSwiftSettings),
         .testTarget(name: "ModelsTests", dependencies: [
             "ModelDeclarations", "LMArchitecture",
             .product(name: "TestHeartbeat", package: "swift-testing-heartbeat"),
@@ -69,6 +77,6 @@ let package = Package(
             .product(name: "TestHeartbeat", package: "swift-testing-heartbeat"),
         ], exclude: ["DSLLoweringTests.swift", "IRInvariantTests.swift", "PerformanceTests.swift", "ModelGraphTests.swift", "DimensionValidatorTests.swift"], resources: [
             .process("TestData")
-        ]),
+        ], swiftSettings: metalProbeSwiftSettings),
     ]
 )

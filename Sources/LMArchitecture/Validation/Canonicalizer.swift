@@ -93,12 +93,16 @@ private func canonicalizePrimitiveAttributes(_ attrs: any OperationAttributes) -
             headCount: a.headCount,
             kvHeadCount: a.kvHeadCount,
             headDimension: a.headDimension,
+            attentionScale: a.attentionScale,
             bias: a.bias,
             causal: a.causal,
             rope: a.rope.map { canonicalizeRoPE($0) },
             qkNorm: a.qkNorm,
+            valueNorm: a.valueNorm,
             window: a.window,
-            implementationHint: nil
+            implementationHint: nil,
+            outputGate: a.outputGate,
+            sharedKeyValueSourceLayerIndex: a.sharedKeyValueSourceLayerIndex
         )
     case let a as RoPEAttributes:
         return canonicalizeRoPE(a)
@@ -112,9 +116,11 @@ private func canonicalizePrimitiveAttributes(_ attrs: any OperationAttributes) -
             bias: a.bias
         )
     case let a as RMSNormAttributes:
-        return RMSNormAttributes(dimension: a.dimension, epsilon: a.epsilon)
+        return RMSNormAttributes(dimension: a.dimension, epsilon: a.epsilon, weightBias: a.weightBias)
     case let a as LayerNormAttributes:
         return LayerNormAttributes(dimension: a.dimension, epsilon: a.epsilon, affine: a.affine)
+    case let a as LayerScaleAttributes:
+        return LayerScaleAttributes(dimension: a.dimension)
     default:
         return attrs
     }

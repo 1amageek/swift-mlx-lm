@@ -62,15 +62,25 @@ public struct MetalDispatchStep: @unchecked Sendable {
 
 public struct MetalDispatchStepMetadata: Sendable, Equatable {
     public let kernelName: String?
+    public let entryIndex: Int?
     public let layerIndex: Int?
+    public let weightTensorName: String?
     /// Buffer binding access pattern declared by the fragment that created this step.
     /// The optimizer uses this to determine whether a memory barrier is needed between steps.
     /// When nil, the optimizer conservatively treats all bindings as both read and written.
     public let bufferAccessPattern: BufferAccessPattern?
 
-    public init(kernelName: String? = nil, layerIndex: Int? = nil, bufferAccessPattern: BufferAccessPattern? = nil) {
+    public init(
+        kernelName: String? = nil,
+        entryIndex: Int? = nil,
+        layerIndex: Int? = nil,
+        weightTensorName: String? = nil,
+        bufferAccessPattern: BufferAccessPattern? = nil
+    ) {
         self.kernelName = kernelName
+        self.entryIndex = entryIndex
         self.layerIndex = layerIndex
+        self.weightTensorName = weightTensorName
         self.bufferAccessPattern = bufferAccessPattern
     }
 
@@ -92,6 +102,21 @@ public struct MetalDispatchPlan: @unchecked Sendable {
     public let buffers: MetalBufferSet
     public let unfusedEntryCount: Int
     public let fusedEntryCount: Int
+    let supplementalResidencyBuffers: [MTLBuffer]
+
+    package var outputHeadSteps: ArraySlice<MetalDispatchStep> {
+        steps.suffix(2)
+    }
+
+    package func outputHeadInputBinding() -> MetalBufferBinding {
+        precondition(steps.count >= 2, "Decode plan missing output head steps")
+        let projectionStepIndex = steps.count - 2
+        let projectionStep = steps[projectionStepIndex]
+        guard let binding = projectionStep.bindings.buffers.first(where: { $0.index == 0 }) else {
+            preconditionFailure("Output head projection missing input buffer binding")
+        }
+        return binding
+    }
 }
 
 /// Decode buffer set (single-token layout).
@@ -115,4 +140,24 @@ public struct MetalBufferSet: @unchecked Sendable {
     public let ropePositionAxes: MTLBuffer
     public let tokenIn: MTLBuffer
     public let tokenOut: MTLBuffer
+
+    var runtimeResidencyBuffers: [MTLBuffer] {
+        var buffers: [MTLBuffer] = [
+            hidden, residual, scratch, logits,
+            position, ropePositionAxes, tokenIn, tokenOut,
+        ]
+        if let convState { buffers.append(convState) }
+        if let recurrentState { buffers.append(recurrentState) }
+        if let perLayerInputs { buffers.append(perLayerInputs) }
+        if let kvCache {
+            buffers.append(kvCache.keys)
+            buffers.append(kvCache.values)
+            if let rotors = kvCache.rotorParameters { buffers.append(rotors) }
+            if let qjl = kvCache.qjlMatrix { buffers.append(qjl) }
+            if let qjlRes = kvCache.qjlResidualK { buffers.append(qjlRes) }
+        }
+        return buffers
+    }
+
+    var weightResidencyBuffers: [MTLBuffer] { weights }
 }

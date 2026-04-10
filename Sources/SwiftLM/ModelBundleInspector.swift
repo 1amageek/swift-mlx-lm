@@ -9,7 +9,7 @@ struct ModelBundleInspector {
         let config = try decoder.decode(from: configData)
         let modelType = try decoder.modelType(from: configData)
         let safetensorsURLs = try findSafetensorsFiles(in: directory)
-        let chatTemplate = try loadChatTemplate(from: directory)
+        let chatTemplate = try loadChatTemplate(from: directory, modelType: modelType)
         let preprocessorConfigData = try loadProcessorConfigData(from: directory)
         let visionConfiguration = try decoder.visionConfiguration(
             from: configData,
@@ -26,7 +26,8 @@ struct ModelBundleInspector {
             config: config,
             modelType: modelType,
             safetensorsURLs: safetensorsURLs,
-            chatTemplate: chatTemplate,
+            chatTemplate: chatTemplate.template,
+            chatTemplateSource: chatTemplate.source,
             preprocessorConfigData: preprocessorConfigData,
             inputCapabilities: inputCapabilities,
             visionConfiguration: visionConfiguration
@@ -45,12 +46,12 @@ struct ModelBundleInspector {
         return files
     }
 
-    func loadChatTemplate(from directory: URL) throws -> Template? {
+    func loadChatTemplate(from directory: URL, modelType: String) throws -> (template: Template?, source: String?) {
         let jinjaURL = directory.appendingPathComponent("chat_template.jinja")
         if FileManager.default.fileExists(atPath: jinjaURL.path) {
             let templateString = try String(contentsOf: jinjaURL, encoding: .utf8)
             do {
-                return try Template(templateString)
+                return (try Template(templateString), templateString)
             } catch {
                 throw ModelBundleLoaderError.invalidConfig(
                     "Invalid chat_template.jinja: \(error)"
@@ -68,16 +69,71 @@ struct ModelBundleInspector {
             }
             if let templateString = json["chat_template"] as? String {
                 do {
-                    return try Template(templateString)
+                    return (try Template(templateString), templateString)
                 } catch {
                     throw ModelBundleLoaderError.invalidConfig(
                         "Invalid tokenizer_config.json chat_template: \(error)"
                     )
                 }
             }
+            if let templateString = synthesizedChatTemplate(
+                tokenizerConfigJSON: json,
+                modelType: modelType
+            ) {
+                do {
+                    return (try Template(templateString), templateString)
+                } catch {
+                    throw ModelBundleLoaderError.invalidConfig(
+                        "Invalid synthesized chat template: \(error)"
+                    )
+                }
+            }
         }
 
-        return nil
+        return (nil, nil)
+    }
+
+    private func synthesizedChatTemplate(
+        tokenizerConfigJSON json: [String: Any],
+        modelType: String
+    ) -> String? {
+        guard modelType.lowercased() == "gemma4" || modelType.lowercased() == "gemma4_text" else {
+            return nil
+        }
+        let bosToken = (json["bos_token"] as? String) ?? "<bos>"
+
+        // Gemma 4 instruction bundles use `<|turn>{role}\n...` formatting.
+        // Some local bundles omit `chat_template.jinja`, so synthesize the
+        // upstream structure instead of falling back to raw prompt completion.
+        return """
+        {%- macro render_content(content) -%}
+            {%- if content is string -%}
+                {{- content -}}
+            {%- elif content is iterable and content is not mapping -%}
+                {%- for item in content -%}
+                    {%- if item.type == 'text' or 'text' in item -%}
+                        {{- item.text -}}
+                    {%- elif item.type == 'image' -%}
+                        {{- '\n\n<|image|>\n\n' -}}
+                    {%- elif item.type == 'video' -%}
+                        {{- '\n\n<|video|>\n\n' -}}
+                    {%- endif -%}
+                {%- endfor -%}
+            {%- elif content is none or content is undefined -%}
+                {{- '' -}}
+            {%- endif -%}
+        {%- endmacro -%}
+        {{- '\(bosToken)' -}}
+        {%- for message in messages -%}
+            {%- set role = 'model' if message.role == 'assistant' else message.role -%}
+            {{- '<|turn>' + role + '\n' -}}
+            {{- render_content(message.content)|trim -}}
+            {{- '\n' -}}
+        {%- endfor -%}
+        {%- if add_generation_prompt -%}
+            {{- '<|turn>model\n' -}}
+        {%- endif -%}
+        """
     }
 
     func loadOptionalData(from url: URL) throws -> Data? {

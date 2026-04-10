@@ -77,7 +77,7 @@ public struct Qwen35: ModelComponent {
             }
         }
 
-        RMSNorm(dimension: config.hiddenSize, epsilon: config.normEps)
+        RMSNorm(dimension: config.hiddenSize, epsilon: config.normEps, weightBias: 1)
         OutputHead(
             inputSize: config.hiddenSize,
             vocabSize: config.vocabSize,
@@ -98,7 +98,7 @@ struct Qwen35DeltaNetDecoderLayer: ModelComponent {
     @ModelComponentBuilder
     var body: some ModelComponent {
         Residual {
-            RMSNorm(dimension: config.hiddenSize, epsilon: config.normEps)
+            RMSNorm(dimension: config.hiddenSize, epsilon: config.normEps, weightBias: 1)
             DeltaNet(
                 hiddenSize: config.hiddenSize,
                 numHeads: config.ssmNumHeads ?? config.attentionHeads,
@@ -110,7 +110,7 @@ struct Qwen35DeltaNetDecoderLayer: ModelComponent {
             )
         }
         Residual {
-            RMSNorm(dimension: config.hiddenSize, epsilon: config.normEps)
+            RMSNorm(dimension: config.hiddenSize, epsilon: config.normEps, weightBias: 1)
             MLP(inputSize: config.hiddenSize, intermediateSize: config.intermediateSize)
         }
     }
@@ -128,7 +128,7 @@ struct Qwen35AttnDecoderLayer: ModelComponent {
     @ModelComponentBuilder
     var body: some ModelComponent {
         Residual {
-            RMSNorm(dimension: config.hiddenSize, epsilon: config.normEps)
+            RMSNorm(dimension: config.hiddenSize, epsilon: config.normEps, weightBias: 1)
             Attention(
                 hiddenSize: config.hiddenSize,
                 headCount: config.attentionHeads,
@@ -140,12 +140,12 @@ struct Qwen35AttnDecoderLayer: ModelComponent {
                     scaling: config.ropeScaling,
                     mropeAxes: config.mropeAxes
                 ),
-                qkNorm: .rmsNorm,
+                qkNorm: .rmsNormUnitOffset,
                 outputGate: .sigmoidPackedInQProj
             )
         }
         Residual {
-            RMSNorm(dimension: config.hiddenSize, epsilon: config.normEps)
+            RMSNorm(dimension: config.hiddenSize, epsilon: config.normEps, weightBias: 1)
             MLP(inputSize: config.hiddenSize, intermediateSize: config.intermediateSize)
         }
     }

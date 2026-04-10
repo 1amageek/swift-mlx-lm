@@ -17,7 +17,8 @@ struct LiveModelDiagnosticTests {
 
     static let stafPath = "/Users/1amageek/Desktop/swift-lm/TestData/LFM2.5-1.2B-Thinking/model.staf"
 
-    @Test("Single command buffer prefill with real STAF (matches app behavior)")
+    @Test("Single command buffer prefill with real STAF (matches app behavior)",
+          .disabled("Pre-migration diagnostic: uses Metal 3 encoder on private untracked buffers"))
     func liveModelSingleCommandBuffer() throws {
         guard let resources = try RealModelTestSupport.loadOrSkip(skipMessage: "[Live CB] STAF not found — skipping") else {
             return
@@ -61,7 +62,12 @@ struct LiveModelDiagnosticTests {
                 enc.setComputePipelineState(step.pipeline)
                 for (index, buffer, offset) in step.bufferBindings { enc.setBuffer(buffer, offset: offset, index: index) }
                 for (index, value) in step.bytesBindings { value.withUnsafeBufferPointer { enc.setBytes($0.baseAddress!, length: $0.count, index: index) } }
-                step.bindRuntimeArguments(encoder: enc, sequenceLength: UInt32(seqLen))
+                if let bindingIndex = step.sequenceLengthPolicy.bindingIndex {
+                    var seqLenValue = UInt32(seqLen)
+                    withUnsafeBytes(of: &seqLenValue) { raw in
+                        enc.setBytes(raw.baseAddress!, length: raw.count, index: bindingIndex)
+                    }
+                }
                 let grid = step.resolvedGridSize(sequenceLength: seqLen)
                 enc.dispatchThreadgroups(grid, threadsPerThreadgroup: step.threadgroupSize)
 
@@ -131,7 +137,8 @@ struct LiveModelDiagnosticTests {
         )
     }
 
-    @Test("Compile prefill plan and dump projection details")
+    @Test("Compile prefill plan and dump projection details",
+          .disabled("Pre-migration diagnostic: accesses storageModePrivate scratch buffer via contents()"))
     func dumpProjectionDetails() throws {
         guard let resources = try RealModelTestSupport.loadOrSkip(skipMessage: "[Proj dump] STAF not found") else {
             return
@@ -178,7 +185,12 @@ struct LiveModelDiagnosticTests {
                 enc.setComputePipelineState(step.pipeline)
                 for (i, buf, off) in step.bufferBindings { enc.setBuffer(buf, offset: off, index: i) }
                 for (i, val) in step.bytesBindings { val.withUnsafeBufferPointer { enc.setBytes($0.baseAddress!, length: $0.count, index: i) } }
-                step.bindRuntimeArguments(encoder: enc, sequenceLength: UInt32(seqLen))
+                if let bindingIndex = step.sequenceLengthPolicy.bindingIndex {
+                    var seqLenValue = UInt32(seqLen)
+                    withUnsafeBytes(of: &seqLenValue) { raw in
+                        enc.setBytes(raw.baseAddress!, length: raw.count, index: bindingIndex)
+                    }
+                }
                 let g = step.resolvedGridSize(sequenceLength: seqLen)
                 enc.dispatchThreadgroups(g, threadsPerThreadgroup: step.threadgroupSize)
             case .perPosition:
@@ -350,7 +362,8 @@ struct LiveModelDiagnosticTests {
         #expect(model.position == realTokens.count, "Prefill should advance position to \(realTokens.count)")
     }
 
-    @Test("Step-by-step prefill with real STAF finds NaN source")
+    @Test("Step-by-step prefill with real STAF finds NaN source",
+          .disabled("Pre-migration diagnostic: accesses storageModePrivate scratch buffer via contents()"))
     func liveModelStepByStep() throws {
         guard let resources = try RealModelTestSupport.loadOrSkip(skipMessage: "[Live diag] STAF file not found — skipping") else {
             return
@@ -412,7 +425,12 @@ struct LiveModelDiagnosticTests {
                         enc.setBytes(ptr.baseAddress!, length: ptr.count, index: index)
                     }
                 }
-                step.bindRuntimeArguments(encoder: enc, sequenceLength: UInt32(seqLen))
+                if let bindingIndex = step.sequenceLengthPolicy.bindingIndex {
+                    var seqLenValue = UInt32(seqLen)
+                    withUnsafeBytes(of: &seqLenValue) { raw in
+                        enc.setBytes(raw.baseAddress!, length: raw.count, index: bindingIndex)
+                    }
+                }
                 let grid = step.resolvedGridSize(sequenceLength: seqLen)
                 enc.dispatchThreadgroups(grid, threadsPerThreadgroup: step.threadgroupSize)
 

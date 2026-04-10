@@ -141,6 +141,7 @@ struct HFConfigDecoder {
                 }
                 return RoPEScaling(kind: .custom(ropeType), factor: 1.0)
             }(),
+            finalLogitSoftcapping: (json["final_logit_softcapping"] as? Double).map { Float($0) },
             numDenseLayers: json["num_dense_layers"] as? Int ?? 0,
             mropeAxes: mropeAxes
         )

@@ -37,6 +37,9 @@ struct ProjectionWeightAccessPolicyResolver: Sendable {
         guard role == binding.role else {
             return .canonicalRowMajor
         }
+        guard executionPhase == .decode else {
+            return .canonicalRowMajor
+        }
         guard case .projection(let projection, _) = entry.kind,
               projection.field == role else {
             return .canonicalRowMajor

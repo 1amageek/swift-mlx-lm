@@ -17,6 +17,16 @@ enum Gemma4TestSupport {
     }
 
     static func optionalRealGemma4Directory() throws -> URL? {
+        let directCandidates = [
+            "/Users/1amageek/Desktop/swift-lm/TestData/gemma-4-E2B-it",
+        ]
+        for candidate in directCandidates {
+            let directory = URL(fileURLWithPath: candidate)
+            if try isUsableModelDirectory(directory) {
+                return directory
+            }
+        }
+
         let envCandidates = [
             ProcessInfo.processInfo.environment["SWIFTLM_GEMMA4_DIR"],
             ProcessInfo.processInfo.environment["SWIFTLM_GEMMA4_E2B_DIR"],
@@ -135,7 +145,7 @@ enum Gemma4TestSupport {
             globalKVHeads: nil,
             numKVSharedLayers: 1,
             useDoubleWideMLP: false,
-            attentionKEqualsV: false,
+            attentionKEqualsV: true,
             fullAttentionRopeTheta: 1_000_000.0,
             fullAttentionPartialRotaryFactor: 0.25,
             fullAttentionRoPEScaling: RoPEScaling(kind: .custom("proportional"), factor: 1.0)
@@ -199,28 +209,98 @@ enum Gemma4TestSupport {
         ]
 
         for layerIndex in 0..<layerCount {
-            let prefix = "model.vision_tower.encoder.layers.\(layerIndex)"
+            let prefix = "model.language_model.layers.\(layerIndex)"
             tensors["\(prefix).input_layernorm.weight"] = .init(
-                values: Array(repeating: 1, count: visionHidden),
-                shape: [visionHidden]
+                values: Array(repeating: 1, count: hiddenSize),
+                shape: [hiddenSize]
             )
             tensors["\(prefix).post_attention_layernorm.weight"] = .init(
-                values: Array(repeating: 1, count: visionHidden),
-                shape: [visionHidden]
+                values: Array(repeating: 1, count: hiddenSize),
+                shape: [hiddenSize]
             )
             tensors["\(prefix).pre_feedforward_layernorm.weight"] = .init(
-                values: Array(repeating: 1, count: visionHidden),
-                shape: [visionHidden]
+                values: Array(repeating: 1, count: hiddenSize),
+                shape: [hiddenSize]
             )
             tensors["\(prefix).post_feedforward_layernorm.weight"] = .init(
+                values: Array(repeating: 1, count: hiddenSize),
+                shape: [hiddenSize]
+            )
+            tensors["\(prefix).self_attn.q_norm.weight"] = .init(
+                values: Array(repeating: 1, count: 16),
+                shape: [16]
+            )
+            tensors["\(prefix).self_attn.k_norm.weight"] = .init(
+                values: Array(repeating: 1, count: 16),
+                shape: [16]
+            )
+            tensors["\(prefix).self_attn.q_proj.weight"] = .init(
+                values: repeatingRamp(count: hiddenSize * hiddenSize, scale: 0.0002),
+                shape: [hiddenSize, hiddenSize]
+            )
+            tensors["\(prefix).self_attn.k_proj.weight"] = .init(
+                values: repeatingRamp(count: 16 * hiddenSize, scale: 0.0002),
+                shape: [16, hiddenSize]
+            )
+            tensors["\(prefix).self_attn.v_proj.weight"] = .init(
+                values: repeatingRamp(count: 16 * hiddenSize, scale: 0.00015),
+                shape: [16, hiddenSize]
+            )
+            tensors["\(prefix).self_attn.o_proj.weight"] = .init(
+                values: repeatingRamp(count: hiddenSize * hiddenSize, scale: 0.00018),
+                shape: [hiddenSize, hiddenSize]
+            )
+            tensors["\(prefix).mlp.gate_proj.weight"] = .init(
+                values: repeatingRamp(count: 128 * hiddenSize, scale: 0.00017),
+                shape: [128, hiddenSize]
+            )
+            tensors["\(prefix).mlp.up_proj.weight"] = .init(
+                values: repeatingRamp(count: 128 * hiddenSize, scale: 0.00013),
+                shape: [128, hiddenSize]
+            )
+            tensors["\(prefix).mlp.down_proj.weight"] = .init(
+                values: repeatingRamp(count: hiddenSize * 128, scale: 0.00019),
+                shape: [hiddenSize, 128]
+            )
+            tensors["\(prefix).per_layer_input_gate.weight"] = .init(
+                values: repeatingRamp(count: perLayerSize * hiddenSize, scale: 0.00011),
+                shape: [perLayerSize, hiddenSize]
+            )
+            tensors["\(prefix).per_layer_projection.weight"] = .init(
+                values: repeatingRamp(count: hiddenSize * perLayerSize, scale: 0.00009),
+                shape: [hiddenSize, perLayerSize]
+            )
+            tensors["\(prefix).post_per_layer_input_norm.weight"] = .init(
+                values: Array(repeating: 1, count: hiddenSize),
+                shape: [hiddenSize]
+            )
+            tensors["\(prefix).layer_scalar"] = .init(
+                values: [1],
+                shape: [1]
+            )
+
+            let visionPrefix = "model.vision_tower.encoder.layers.\(layerIndex)"
+            tensors["\(visionPrefix).input_layernorm.weight"] = .init(
                 values: Array(repeating: 1, count: visionHidden),
                 shape: [visionHidden]
             )
-            tensors["\(prefix).self_attn.q_norm.weight"] = .init(
+            tensors["\(visionPrefix).post_attention_layernorm.weight"] = .init(
+                values: Array(repeating: 1, count: visionHidden),
+                shape: [visionHidden]
+            )
+            tensors["\(visionPrefix).pre_feedforward_layernorm.weight"] = .init(
+                values: Array(repeating: 1, count: visionHidden),
+                shape: [visionHidden]
+            )
+            tensors["\(visionPrefix).post_feedforward_layernorm.weight"] = .init(
+                values: Array(repeating: 1, count: visionHidden),
+                shape: [visionHidden]
+            )
+            tensors["\(visionPrefix).self_attn.q_norm.weight"] = .init(
                 values: Array(repeating: 1, count: visionHidden / 4),
                 shape: [visionHidden / 4]
             )
-            tensors["\(prefix).self_attn.k_norm.weight"] = .init(
+            tensors["\(visionPrefix).self_attn.k_norm.weight"] = .init(
                 values: Array(repeating: 1, count: visionHidden / 4),
                 shape: [visionHidden / 4]
             )
@@ -230,24 +310,29 @@ enum Gemma4TestSupport {
                 "self_attn.v_proj.linear.weight",
                 "self_attn.o_proj.linear.weight",
             ] {
-                tensors["\(prefix).\(name)"] = .init(
+                tensors["\(visionPrefix).\(name)"] = .init(
                     values: repeatingRamp(count: visionHidden * visionHidden, scale: 0.0002),
                     shape: [visionHidden, visionHidden]
                 )
             }
-            tensors["\(prefix).mlp.gate_proj.linear.weight"] = .init(
+            tensors["\(visionPrefix).mlp.gate_proj.linear.weight"] = .init(
                 values: repeatingRamp(count: visionIntermediate * visionHidden, scale: 0.0002),
                 shape: [visionIntermediate, visionHidden]
             )
-            tensors["\(prefix).mlp.up_proj.linear.weight"] = .init(
+            tensors["\(visionPrefix).mlp.up_proj.linear.weight"] = .init(
                 values: repeatingRamp(count: visionIntermediate * visionHidden, scale: 0.0001),
                 shape: [visionIntermediate, visionHidden]
             )
-            tensors["\(prefix).mlp.down_proj.linear.weight"] = .init(
+            tensors["\(visionPrefix).mlp.down_proj.linear.weight"] = .init(
                 values: repeatingRamp(count: visionHidden * visionIntermediate, scale: 0.0002),
                 shape: [visionHidden, visionIntermediate]
             )
         }
+
+        tensors["model.language_model.norm.weight"] = .init(
+            values: Array(repeating: 1, count: hiddenSize),
+            shape: [hiddenSize]
+        )
 
         return tensors
     }
@@ -283,13 +368,8 @@ enum Gemma4TestSupport {
 
 private actor Gemma4SyntheticContainerCache {
     static let shared = Gemma4SyntheticContainerCache()
-    private var cachedContainer: ModelContainer?
 
     func container() async throws -> ModelContainer? {
-        if let cachedContainer {
-            cachedContainer.resetCaches()
-            return cachedContainer
-        }
         guard let device = MTLCreateSystemDefaultDevice() else {
             return nil
         }
@@ -326,9 +406,9 @@ private actor Gemma4SyntheticContainerCache {
             inferenceModel: inferenceModel,
             tokenizer: Gemma4TestTokenizer(),
             configuration: Gemma4TestSupport.modelConfiguration(hiddenSize: hiddenSize),
+            vocabularySize: config.vocabSize,
             gemma4Runtime: try Gemma4TestSupport.syntheticRuntime(hiddenSize: hiddenSize)
         )
-        cachedContainer = container
         return container
     }
 }

@@ -135,6 +135,26 @@ MetalKernelFragment (protocol)
 └── ConditionalFragment             // if-else 分岐
 ```
 
+### Fragment Correctness Contract
+
+`swift-lm` は fragment と compiler routing の合成で成立する。局所的な最適化や emit 順序より、まず graph semantics を守ること。
+
+必須ルール:
+
+- 並列な sibling projection は、明示的に依存関係がない限り同じ入力 source を読む。
+- dispatch entry の並び順をそのままデータ依存とみなしてはいけない。compiler が元の IR 意味論を保持する。
+- `isOutput` や最終出力マークは「最後に emit された projection」ではなく「意味的に hidden へ戻る projection」に対して付与する。
+- prefill と decode の routing state は別物として検証する。片方が正しくてももう片方は壊れうる。
+- fragment 追加時は kernel 本体だけでなく、入力 source、出力 destination、write set、barrier 要件まで contract として定義する。
+
+破損時の調査順序:
+
+1. declaration が正しい graph を作っているか
+2. fragment expansion が期待どおりか
+3. dispatch entries が意味的依存を保っているか
+4. prefill/decode step builder の buffer routing が一致しているか
+5. optimizer の有無で出力が変わらないか
+
 ### Compiler の IR walk → dispatch plan 生成
 
 #### Phase 1: IR walk (walkRegion)
@@ -415,6 +435,31 @@ swift build
 
 `swift test` は使わない（Metal metallib が見つからずクラッシュ）。`xcodebuild test` を使用。複数モジュールの同時実行はハングする（Metal/GPU リソース競合）。モジュール単位で分割実行。
 
+### Correctness-First Test Procedure
+
+性能測定の前に、次の順で検証する:
+
+1. fragment / planner の contract test
+2. focused real-model output test
+3. optimizer-mode regression test
+4. benchmark
+
+追加ルール:
+
+- 出力が壊れている状態で benchmark を進めない。
+- sampling 経路と argmax 経路は別に確認する。`temperature` が変わるだけで壊れる場合、sampling path の所有権や CPU 読み出し前提を疑う。
+- `storageModePrivate` のバッファを host sampling に渡してはいけない。CPU readable な logits source を明示的に使う。
+- 比較時は `none` / `standard` / `aggressive` の実効 optimizer を確認する。ラベルではなく実際に有効な plan を基準にする。
+- end-to-end の弱い文字列一致だけで合格にしない。可能なら token IDs、先頭トークン列、reference 実装との一致を取る。
+
+### Crash-Resistant Real-Model Test Procedure
+
+- `build-for-testing` を 1 回だけ実行し、その後は `test-without-building` で 1 case ずつ流す。
+- 1 プロセスに複数の重い bundle test を詰め込まない。
+- 同期 helper で大きな bundle や container を繰り返し作る場合は `autoreleasepool` で寿命を切る。
+- クラッシュ時に最初に疑うのは Metal compiler ではなく、GPU resource retention、unfinished stream、state restore、複数 model の同時生存。
+- output 調査用の probe は `ENABLE_METAL_PROBES` で制御し、常時 `DEBUG` 出力にはしない。
+
 ## Design Rules
 
 - HF ディレクトリ (config.json + safetensors + tokenizer.json) が正規ソース
@@ -500,6 +545,12 @@ scratch buffer は単一 MTLBuffer に複数 slot を offset で配置する。`
 各 `PrimitiveMetalKernelFragment` は `decodeBindings()` で `writeBufferIndices: Set<Int>` を宣言し、どのバッファ binding が write されるかを明示する。宣言がない場合は conservative fallback（全 binding を read+write）になり、barrier が急増する。
 
 **新しい fragment を追加するときは必ず `writeBufferIndices` を宣言する。** 省略は conservative fallback を引き起こし、decode 性能が大幅に劣化する。
+
+さらに:
+
+- `writeBufferIndices` が正しくても source routing が壊れていれば出力は壊れる。barrier 最適化テストだけで fragment correctness を証明したことにはならない。
+- equality や diagnostics に使う policy 型は resource identity を保持する。resource count のみで同値とみなしてはいけない。
+- residency は ownership とセットで設計する。long-lived buffer と ephemeral snapshot buffer を同じ経路で扱わない。
 
 #### 残存する barrier overhead
 

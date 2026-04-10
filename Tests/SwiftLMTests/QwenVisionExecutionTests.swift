@@ -152,4 +152,196 @@ struct QwenVisionExecutionTests {
         #expect(direct.chunks == restored.chunks)
         #expect(direct.completion?.tokenCount == restored.completion?.tokenCount)
     }
+
+    @Test("Prompt state restore reproduces multimodal prefill logits and tokenOut", .timeLimit(.minutes(2)))
+    func promptStateRestoreReproducesMultimodalPrefillState() async throws {
+        guard let container = try await QwenVisionTestSupport.syntheticMultimodalContainer() else {
+            print("[Skip] No local text bundle available for synthetic multimodal runtime tests")
+            return
+        }
+        container.resetCaches()
+
+        let imageData = try TestImageFixtures.makeOnePixelPNGData()
+        let prepared = try await container.prepare(
+            input: ModelInput(chat: [
+                .user([
+                    .text("Reuse"),
+                    .image(InputImage(data: imageData, mimeType: "image/png")),
+                    .text("prompt"),
+                ])
+            ])
+        )
+        let executable = try container.makeExecutablePrompt(from: prepared)
+        let diagnostics = try container.debugPromptStateRestoreDiagnostics(prompt: executable, topK: 5)
+
+        #expect(diagnostics.directTokenOut == diagnostics.promptStateFirstToken)
+        #expect(diagnostics.directTokenOut == diagnostics.restoredTokenOut)
+        #expect(diagnostics.directTopLogits.map(\.tokenID) == diagnostics.restoredTopLogits.map(\.tokenID))
+    }
+
+    @Test("Prompt state reuse preserves first sampled multimodal token", .timeLimit(.minutes(2)))
+    func promptStateReusePreservesFirstSampledMultimodalToken() async throws {
+        guard let container = try await QwenVisionTestSupport.syntheticMultimodalContainer() else {
+            print("[Skip] No local text bundle available for synthetic multimodal runtime tests")
+            return
+        }
+        container.resetCaches()
+
+        let imageData = try TestImageFixtures.makeOnePixelPNGData()
+        let prepared = try await container.prepare(
+            input: ModelInput(chat: [
+                .user([
+                    .text("Reuse"),
+                    .image(InputImage(data: imageData, mimeType: "image/png")),
+                    .text("prompt"),
+                ])
+            ])
+        )
+        let executable = try container.makeExecutablePrompt(from: prepared)
+        let parameters = GenerateParameters(maxTokens: 1, streamChunkTokenCount: 1)
+
+        let direct = await QwenVisionTestSupport.collectGeneration(
+            from: try container.generate(prompt: executable, parameters: parameters)
+        )
+
+        container.resetCaches()
+        let promptState = try container.makePromptState(prompt: executable)
+        let restored = await QwenVisionTestSupport.collectGeneration(
+            from: try container.generate(from: promptState, parameters: parameters)
+        )
+
+        #expect(direct.chunks == restored.chunks)
+    }
+
+    @Test("Reset caches restores multimodal prefill determinism", .timeLimit(.minutes(2)))
+    func resetCachesRestoresMultimodalPrefillDeterminism() async throws {
+        guard let container = try await QwenVisionTestSupport.syntheticMultimodalContainer() else {
+            print("[Skip] No local text bundle available for synthetic multimodal runtime tests")
+            return
+        }
+        container.resetCaches()
+
+        let imageData = try TestImageFixtures.makeOnePixelPNGData()
+        let prepared = try await container.prepare(
+            input: ModelInput(chat: [
+                .user([
+                    .text("Reuse"),
+                    .image(InputImage(data: imageData, mimeType: "image/png")),
+                    .text("prompt"),
+                ])
+            ])
+        )
+        let executable = try container.makeExecutablePrompt(from: prepared)
+        let initial = try container.debugPrefillTopLogits(prompt: executable, topK: 5)
+
+        _ = await QwenVisionTestSupport.collectGeneration(
+            from: try container.generate(
+                prompt: executable,
+                parameters: GenerateParameters(maxTokens: 1, streamChunkTokenCount: 1)
+            )
+        )
+
+        container.resetCaches()
+        let replayed = try container.debugPrefillTopLogits(prompt: executable, topK: 5)
+
+        #expect(initial.map(\.tokenID) == replayed.map(\.tokenID))
+    }
+
+    @Test("Prompt state sampling state matches direct multimodal prefill", .timeLimit(.minutes(2)))
+    func promptStateSamplingStateMatchesDirectMultimodalPrefill() async throws {
+        guard let container = try await QwenVisionTestSupport.syntheticMultimodalContainer() else {
+            print("[Skip] No local text bundle available for synthetic multimodal runtime tests")
+            return
+        }
+        container.resetCaches()
+
+        let imageData = try TestImageFixtures.makeOnePixelPNGData()
+        let prepared = try await container.prepare(
+            input: ModelInput(chat: [
+                .user([
+                    .text("Reuse"),
+                    .image(InputImage(data: imageData, mimeType: "image/png")),
+                    .text("prompt"),
+                ])
+            ])
+        )
+        let executable = try container.makeExecutablePrompt(from: prepared)
+        let sampled = try container.debugPromptStateSampledFirstTokens(
+            prompt: executable,
+            parameters: GenerateParameters(maxTokens: 1, streamChunkTokenCount: 1)
+        )
+
+        #expect(sampled.directRecentTokenIDs == sampled.restoredRecentTokenIDs)
+        #expect(sampled.directTopLogits.map(\.tokenID) == sampled.restoredTopLogits.map(\.tokenID))
+        #expect(sampled.directTopLogits.map(\.logit) == sampled.restoredTopLogits.map(\.logit))
+        #expect(sampled.direct == sampled.restored)
+    }
+
+    @Test("Repeated multimodal prefills preserve sampled first token", .timeLimit(.minutes(2)))
+    func repeatedMultimodalPrefillsPreserveSampledFirstToken() async throws {
+        guard let container = try await QwenVisionTestSupport.syntheticMultimodalContainer() else {
+            print("[Skip] No local text bundle available for synthetic multimodal runtime tests")
+            return
+        }
+        container.resetCaches()
+
+        let imageData = try TestImageFixtures.makeOnePixelPNGData()
+        let prepared = try await container.prepare(
+            input: ModelInput(chat: [
+                .user([
+                    .text("Reuse"),
+                    .image(InputImage(data: imageData, mimeType: "image/png")),
+                    .text("prompt"),
+                ])
+            ])
+        )
+        let executable = try container.makeExecutablePrompt(from: prepared)
+        let repeated = try container.debugRepeatedPrefillSampledFirstTokens(
+            prompt: executable,
+            parameters: GenerateParameters(maxTokens: 1, streamChunkTokenCount: 1)
+        )
+        print(
+            "[Qwen repeated prefill] nanCounts=(\(repeated.firstNaNCount), \(repeated.secondNaNCount)) "
+                + "diffEntries=\(repeated.firstDifferingEntries)"
+        )
+
+        #expect(repeated.firstTopLogits.map(\.tokenID) == repeated.secondTopLogits.map(\.tokenID))
+        #expect(repeated.firstTopLogits.map(\.logit) == repeated.secondTopLogits.map(\.logit))
+        #expect(repeated.firstLogitFingerprint == repeated.secondLogitFingerprint)
+        #expect(repeated.maxAbsDiff == 0)
+        #expect(repeated.differingCount == 0)
+        #expect(repeated.first == repeated.second)
+    }
+
+    @Test("Repeated multimodal prefills preserve final hidden before output head", .timeLimit(.minutes(2)))
+    func repeatedMultimodalPrefillsPreserveFinalHidden() async throws {
+        guard let container = try await QwenVisionTestSupport.syntheticMultimodalContainer() else {
+            print("[Skip] No local text bundle available for synthetic multimodal runtime tests")
+            return
+        }
+        container.resetCaches()
+
+        let imageData = try TestImageFixtures.makeOnePixelPNGData()
+        let prepared = try await container.prepare(
+            input: ModelInput(chat: [
+                .user([
+                    .text("Reuse"),
+                    .image(InputImage(data: imageData, mimeType: "image/png")),
+                    .text("prompt"),
+                ])
+            ])
+        )
+        let executable = try container.makeExecutablePrompt(from: prepared)
+        let diagnostics = try container.debugRepeatedPrefillFinalHiddenDiagnostics(prompt: executable)
+        print(
+            "[Qwen repeated hidden] nanCounts=(\(diagnostics.firstNaNCount), \(diagnostics.secondNaNCount)) "
+                + "fingerprints=(\(diagnostics.firstFingerprint), \(diagnostics.secondFingerprint)) "
+                + "differingCount=\(diagnostics.differingCount)"
+        )
+
+        #expect(diagnostics.firstNaNCount == diagnostics.secondNaNCount)
+        #expect(diagnostics.differingCount == 0)
+        #expect(diagnostics.firstFingerprint == diagnostics.secondFingerprint)
+    }
+
 }

@@ -106,6 +106,7 @@ extension MetalSourceGenerator {
         sources.append(generateQKNorm(name: "qk_rms_norm_bf16", bufferPrecision: decode, weightFormat: .bfloat16))
         sources.append(generateQKNormArgumentTableVariant(name: "qk_rms_norm_argbuf", argumentBufferIndex: 30, bufferPrecision: decode, weightFormat: .float16))
         sources.append(generateQKNormArgumentTableVariant(name: "qk_rms_norm_bf16_argbuf", argumentBufferIndex: 30, bufferPrecision: decode, weightFormat: .bfloat16))
+        sources.append(generatePerHeadRMSNorm(name: "per_head_rms_norm", bufferPrecision: decode, isSequence: false))
         sources.append(generateReductionArgumentTableVariant(name: "rms_norm_argbuf", argumentBufferIndex: 30, bufferPrecision: decode, weightFormat: .float16))
         sources.append(generateReductionArgumentTableVariant(name: "rms_norm_bf16_argbuf", argumentBufferIndex: 30, bufferPrecision: decode, weightFormat: .bfloat16))
         sources.append(generateRoPE(name: "rope", bufferPrecision: decode))
@@ -129,9 +130,12 @@ extension MetalSourceGenerator {
         sources.append(generateResidualAdd(name: "residual_add_seq_f32", bufferPrecision: prefill))
         sources.append(generateGEMM(name: "gemm_f32s", bufferPrecision: prefill, weightFormat: .float16))
         sources.append(generateGEMM(name: "gemm_bf16_f32s", bufferPrecision: prefill, weightFormat: .bfloat16))
+        sources.append(generateGEMV(name: "gemv_f32s", bufferPrecision: prefill, weightFormat: .float16, tileElements: 256))
+        sources.append(generateGEMV(name: "gemv_bf16_f32s", bufferPrecision: prefill, weightFormat: .bfloat16, tileElements: 256))
         sources.append(generateEmbeddingLookup(name: "embedding_lookup_seq_f32", bufferPrecision: prefill, weightFormat: .float16))
         sources.append(generateEmbeddingLookup(name: "embedding_lookup_seq_bf16_f32", bufferPrecision: prefill, weightFormat: .bfloat16))
         sources.append(generateQKNormSeq(name: "qk_rms_norm_seq_f32", bufferPrecision: prefill, weightFormat: .bfloat16))
+        sources.append(generatePerHeadRMSNorm(name: "per_head_rms_norm_seq_f32", bufferPrecision: prefill, isSequence: true))
         sources.append(generateRoPESeq(name: "rope_seq_f32", bufferPrecision: prefill))
         sources.append(generateConv1dCausalSeq(name: "conv1d_causal_seq_f32", bufferPrecision: prefill, weightFormat: .bfloat16))
         sources.append(generateExtractConvState(name: "extract_conv_state_f32", bufferPrecision: prefill))
@@ -178,6 +182,10 @@ extension MetalSourceGenerator {
 
         // === Misc decode kernels ===
         sources.append(generateSigmoidGate(name: "sigmoid_gate", bufferPrecision: decode))
+        sources.append(generatePackedSigmoidGate(name: "packed_sigmoid_gate", bufferPrecision: decode, isSequence: false))
+        sources.append(generatePackedSigmoidGate(name: "packed_sigmoid_gate_seq_f32", bufferPrecision: prefill))
+        sources.append(generatePackedQueryExtract(name: "packed_query_extract", bufferPrecision: decode, isSequence: false))
+        sources.append(generatePackedQueryExtract(name: "packed_query_extract_seq_f32", bufferPrecision: prefill))
         sources.append(generateLayerNorm(name: "layer_norm", bufferPrecision: decode, weightFormat: .float16))
 
         // === Mixed-precision GEMM variants ===
@@ -186,7 +194,9 @@ extension MetalSourceGenerator {
         // These are transitional — will be replaced by F32 prefill path
 
         // === SSM recurrence (DeltaNet/Mamba) ===
-        sources.append(generateSSMHelperSource(weightFormat: .float16))
+        sources.append(generateSSMWeightIndependentHelpers())
+        sources.append(generateSSMConvSiluHelper(weightFormat: .float16))
+        sources.append(generateSSMConvSiluHelper(weightFormat: .bfloat16))
         // Default convDimension for library generation (LFM2-style: 16 groups × 128 dk, 16 heads × 128 dv)
         let defaultConvDimension = 2 * 16 * 128 + 16 * 128
         let defaultMaxThreadgroupSize = SSMRecurrenceFragment.maxThreadgroupSize
@@ -194,6 +204,10 @@ extension MetalSourceGenerator {
         sources.append(generateSSMRecurrence(name: "ssm_recurrence_f32", bufferPrecision: prefill, weightFormat: .float16, convDimension: defaultConvDimension, maxThreadgroupSize: defaultMaxThreadgroupSize))
         sources.append(generateSSMRecurrenceSequence(name: "ssm_recurrence_seq", bufferPrecision: decode, weightFormat: .float16, convDimension: defaultConvDimension, maxThreadgroupSize: defaultMaxThreadgroupSize))
         sources.append(generateSSMRecurrenceSequence(name: "ssm_recurrence_seq_f32", bufferPrecision: prefill, weightFormat: .float16, convDimension: defaultConvDimension, maxThreadgroupSize: defaultMaxThreadgroupSize))
+        sources.append(generateSSMRecurrence(name: "ssm_recurrence_bf16", bufferPrecision: decode, weightFormat: .bfloat16, convDimension: defaultConvDimension, maxThreadgroupSize: defaultMaxThreadgroupSize))
+        sources.append(generateSSMRecurrence(name: "ssm_recurrence_bf16_f32", bufferPrecision: prefill, weightFormat: .bfloat16, convDimension: defaultConvDimension, maxThreadgroupSize: defaultMaxThreadgroupSize))
+        sources.append(generateSSMRecurrenceSequence(name: "ssm_recurrence_seq_bf16", bufferPrecision: decode, weightFormat: .bfloat16, convDimension: defaultConvDimension, maxThreadgroupSize: defaultMaxThreadgroupSize))
+        sources.append(generateSSMRecurrenceSequence(name: "ssm_recurrence_seq_bf16_f32", bufferPrecision: prefill, weightFormat: .bfloat16, convDimension: defaultConvDimension, maxThreadgroupSize: defaultMaxThreadgroupSize))
 
         // === KV cache quantization ===
         sources.append(kvQuantizationSource)

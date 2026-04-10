@@ -21,6 +21,10 @@ public struct AggressiveOptimizer: DispatchOptimizer {
         var result: [OptimizedEntry] = []
         var i = 0
 
+        func supportsInPlaceBatching(_ fragment: any PrimitiveMetalKernelFragment) -> Bool {
+            fragment.supportsInPlaceBatching && (fragment.normWeightBias ?? 0) == 0
+        }
+
         while i < primitives.count {
             if let fused = FusedSwiGLUProjectionRule.match(at: i, primitives: primitives) {
                 result.append(fused)
@@ -71,13 +75,17 @@ public struct AggressiveOptimizer: DispatchOptimizer {
             }
 
             // Rule 2: Batch consecutive in-place, fusable fragments with same dispatchDimension
-            if primitives[i].fragment.isFusable && primitives[i].fragment.isInPlace {
+            if primitives[i].fragment.isFusable
+                && primitives[i].fragment.isInPlace
+                && supportsInPlaceBatching(primitives[i].fragment)
+            {
                 let baseDimension = primitives[i].fragment.dispatchDimension
                 var batch: [CollectedPrimitive] = [primitives[i]]
                 var j = i + 1
                 while j < primitives.count,
                       primitives[j].fragment.isFusable,
                       primitives[j].fragment.isInPlace,
+                      supportsInPlaceBatching(primitives[j].fragment),
                       isSameDimensionKind(baseDimension, primitives[j].fragment.dispatchDimension) {
                     batch.append(primitives[j])
                     j += 1
@@ -122,7 +130,8 @@ public struct AggressiveOptimizer: DispatchOptimizer {
                     guard case .fragment(let frag) = result[i].kind,
                           frag.isFusable,
                           case .reduction(let dim) = frag.dispatchDimension,
-                          let epsilon = frag.normEpsilon else {
+                          let epsilon = frag.normEpsilon,
+                          (frag.normWeightBias ?? 0) == 0 else {
                         return nil
                     }
                     return (dim, epsilon)
@@ -138,7 +147,8 @@ public struct AggressiveOptimizer: DispatchOptimizer {
                         kind: .fusedResidualAddCopyNorm(FusedResidualAddCopyNorm(
                             dimension: addDimension, epsilon: reduction.epsilon)),
                         parameterBindings: result[index + 2].parameterBindings,
-                        layerIndex: result[index].layerIndex)
+                        layerIndex: result[index].layerIndex,
+                        compositeID: nil)
                     result.replaceSubrange(index...index + 2, with: [fused])
                     changed = true
                     continue
@@ -153,7 +163,8 @@ public struct AggressiveOptimizer: DispatchOptimizer {
                         kind: .fusedCopyNorm(FusedCopyNorm(
                             dimension: reduction.dimension, epsilon: reduction.epsilon)),
                         parameterBindings: result[index + 1].parameterBindings,
-                        layerIndex: result[index].layerIndex)
+                        layerIndex: result[index].layerIndex,
+                        compositeID: nil)
                     result.replaceSubrange(index...index + 1, with: [fused])
                     changed = true
                     continue
@@ -168,7 +179,8 @@ public struct AggressiveOptimizer: DispatchOptimizer {
                         kind: .fusedResidualAddNorm(FusedResidualAddNorm(
                             dimension: addDimension, epsilon: reduction.epsilon)),
                         parameterBindings: result[index + 1].parameterBindings,
-                        layerIndex: result[index].layerIndex)
+                        layerIndex: result[index].layerIndex,
+                        compositeID: nil)
                     result.replaceSubrange(index...index + 1, with: [fused])
                     changed = true
                     continue

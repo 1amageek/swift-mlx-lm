@@ -6,15 +6,23 @@ public struct Reduction: PrimitiveMetalKernelFragment {
     public let dimension: Int
     public let epsilon: Float
     public let weightRole: String
+    public let weightBias: Float
 
-    public init(dimension: Int, epsilon: Float = 0, weightRole: String = "scale") {
+    public init(
+        dimension: Int,
+        epsilon: Float = 0,
+        weightRole: String = "scale",
+        weightBias: Float = 0
+    ) {
         self.dimension = dimension
         self.epsilon = epsilon
         self.weightRole = weightRole
+        self.weightBias = weightBias
     }
 
     public var isFusable: Bool { true }
     public var normEpsilon: Float? { epsilon }
+    public var normWeightBias: Float? { weightBias }
     public func kernelName(context: KernelContext) -> String {
         let bf16 = context.weightFormat == .bfloat16
         if context.bufferPrecision == .float32 {
@@ -27,6 +35,7 @@ public struct Reduction: PrimitiveMetalKernelFragment {
 
     public func kernelSource(name: String, bufferPrecision: BufferPrecision, weightFormat: WeightFormat) -> String {
         MetalSourceGenerator.generateReduction(name: name, dimension: 0, epsilon: 0,
+            weightBias: weightBias,
             bufferPrecision: bufferPrecision, weightFormat: weightFormat, isSequence: bufferPrecision == .float32)
     }
 
@@ -34,16 +43,18 @@ public struct Reduction: PrimitiveMetalKernelFragment {
         let (weightBuffer, weightOffset) = context.resolveWeight(weightRole)
         return FragmentBindings(
             buffers: [
-                (0, context.bufferSet.hidden, 0),
+                (0, context.currentInputBuffer, context.currentInputOffset),
                 (1, weightBuffer, weightOffset),
+                (2, context.bufferSet.hidden, 0),
             ],
             bytes: [
-                uint32Binding(2, UInt32(dimension)),
-                floatBinding(3, epsilon),
+                uint32Binding(3, UInt32(dimension)),
+                floatBinding(4, epsilon),
+                floatBinding(5, weightBias),
             ],
             outputIsHidden: true,
             resetsProjectionIndex: true,
-            writeBufferIndices: Set<Int>([0])
+            writeBufferIndices: Set<Int>([2])
         )
     }
 
@@ -61,19 +72,20 @@ public struct Reduction: PrimitiveMetalKernelFragment {
                 gridSize: MTLSize(width: context.maximumSequenceLength, height: 1, depth: 1),
                 threadgroupSize: MTLSize(width: threads, height: 1, depth: 1),
                 bufferBindings: [
-                    (0, context.buffers.hidden, 0),
+                    (0, context.currentInputBuffer, context.currentInputOffset),
                     (1, weightBuffer, weightOffset),
                     (2, context.buffers.hidden, 0),
                 ],
                 bytesBindings: [
                     uint32Binding(3, UInt32(dimension)),
                     floatBinding(4, epsilon),
-                    uint32Binding(5, UInt32(context.maximumSequenceLength)),
+                    floatBinding(5, weightBias),
+                    uint32Binding(6, UInt32(context.maximumSequenceLength)),
                 ],
                 threadgroupMemoryLength: 0,
                 sync: .bufferBarrier,
                 mode: .batch,
-                sequenceLengthPolicy: .bind(index: 5),
+                sequenceLengthPolicy: .bind(index: 6),
                 positionBufferIndex: nil,
                 perPositionStrides: [:]
             )],

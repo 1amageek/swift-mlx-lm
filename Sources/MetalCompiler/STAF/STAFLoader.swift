@@ -189,19 +189,6 @@ public struct STAFLoader: Sendable {
             adjustedEntries[name] = adjusted
         }
 
-        // Request GPU residency for weight buffer
-        if #available(macOS 15.0, iOS 18.0, *) {
-            do {
-                let descriptor = MTLResidencySetDescriptor()
-                let residencySet = try device.makeResidencySet(descriptor: descriptor)
-                residencySet.addAllocation(metalBuffer)
-                residencySet.commit()
-                residencySet.requestResidency()
-            } catch {
-                // Residency is an optional optimization
-            }
-        }
-
         return STAFWeightStore(
             buffer: metalBuffer,
             entries: adjustedEntries,
@@ -232,6 +219,17 @@ public struct STAFWeightStore: @unchecked Sendable {
     public let metadata: STAFFileMetadata
     /// Optional specialized GPU-ready buffer accesses keyed by tensor name and layout.
     let specializedBufferAccesses: [STAFSpecializedWeightKey: STAFWeightBufferAccess]
+
+    var residencyCandidateBuffers: [MTLBuffer] {
+        var seen = Set<ObjectIdentifier>()
+        var buffers: [MTLBuffer] = []
+        for buffer in [self.buffer] + specializedBufferAccesses.values.map(\.buffer) {
+            let identifier = ObjectIdentifier(buffer as AnyObject)
+            guard seen.insert(identifier).inserted else { continue }
+            buffers.append(buffer)
+        }
+        return buffers
+    }
 
     /// Get the buffer offset and quantization format for a named tensor.
     public func tensor(for name: String) -> (offset: Int, format: any QuantizationFormat)? {

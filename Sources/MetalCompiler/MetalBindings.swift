@@ -1,6 +1,13 @@
 import Metal
 import LMIR
 
+@inline(__always)
+func resolvedMetalVisibilityOptions(
+    _ visibilityOptions: MTL4VisibilityOptions
+) -> MTL4VisibilityOptions {
+    visibilityOptions.isEmpty ? .device : visibilityOptions
+}
+
 public enum MetalArgumentBindingPolicy: Sendable, Equatable {
     case inlineBindings
     case argumentTable
@@ -46,7 +53,8 @@ public enum MetalBarrierPolicy: @unchecked Sendable, Equatable {
         case (.none, .none): return true
         case (.bufferBarrier, .bufferBarrier): return true
         case (.resourceBarrier(let a), .resourceBarrier(let b)):
-            return a.count == b.count
+            return Set(a.map { ObjectIdentifier($0 as AnyObject) })
+                == Set(b.map { ObjectIdentifier($0 as AnyObject) })
         default: return false
         }
     }
@@ -191,9 +199,6 @@ public enum MetalConstantBindingSet: @unchecked Sendable {
 }
 
 public struct MetalBindingTable: @unchecked Sendable {
-    private static let bufferEncoder = MetalBufferBindingEncoder()
-    private static let constantEncoder = MetalConstantBindingEncoder()
-
     public let bufferBindings: MetalBufferBindingSet
     public let constantBindings: MetalConstantBindingSet
     public var argumentPolicy: MetalArgumentBindingPolicy {
@@ -269,21 +274,160 @@ public struct MetalBindingTable: @unchecked Sendable {
         }
     }
 
-    public func bind(to encoder: MTLComputeCommandEncoder) {
-        bind(to: encoder, adjustedBufferOffsets: [:])
+}
+
+// MARK: - Metal 4 Barrier Encoding
+
+extension MetalBarrierPolicy {
+    /// Encode a barrier on a Metal 4 compute encoder.
+    ///
+    /// Metal 4 has no resource-scoped barrier equivalent to Metal 3's
+    /// `memoryBarrier(resources:)`. Both `.bufferBarrier` and `.resourceBarrier`
+    /// emit the same stage-to-stage barrier. The optimizer's conflict set
+    /// determines WHETHER a barrier is needed (eliminating unnecessary barriers);
+    /// the resource list itself is not expressible at encoding time in Metal 4.
+    func encode(on encoder: MTL4ComputeCommandEncoder, visibilityOptions: MTL4VisibilityOptions = []) {
+        let resolvedVisibilityOptions = resolvedMetalVisibilityOptions(visibilityOptions)
+        switch self {
+        case .none:
+            return
+        case .bufferBarrier:
+            encoder.barrier(
+                afterEncoderStages: .dispatch,
+                beforeEncoderStages: .dispatch,
+                visibilityOptions: resolvedVisibilityOptions
+            )
+        case .resourceBarrier:
+            encoder.barrier(
+                afterEncoderStages: .dispatch,
+                beforeEncoderStages: .dispatch,
+                visibilityOptions: resolvedVisibilityOptions
+            )
+        }
+    }
+}
+
+// MARK: - Metal 4 Argument Table Binding
+
+extension MetalBindingTable {
+    func bind(to argumentTable: MTL4ArgumentTable) {
+        switch bufferBindings {
+        case .inline(let bindings):
+            for binding in bindings {
+                argumentTable.setAddress(
+                    binding.buffer.gpuAddress + UInt64(binding.offset),
+                    index: binding.index
+                )
+            }
+        case .argumentTable(let table):
+            switch table.encodingState {
+            case .encoded(let buffer, let index, let offset):
+                argumentTable.setAddress(
+                    buffer.gpuAddress + UInt64(offset),
+                    index: index
+                )
+            case .planned, .prepared:
+                for binding in table.bindings {
+                    argumentTable.setAddress(
+                        binding.buffer.gpuAddress + UInt64(binding.offset),
+                        index: binding.index
+                    )
+                }
+            }
+        }
+        bindConstants(to: argumentTable)
     }
 
-    public func bind(
-        to encoder: MTLComputeCommandEncoder,
-        adjustedBufferOffsets: [Int: Int]
-    ) {
-        Self.bufferEncoder.bind(
-            bufferBindings,
-            to: encoder,
-            adjustedBufferOffsets: adjustedBufferOffsets)
-        Self.constantEncoder.bind(
-            constantBindings,
-            to: encoder)
+    func bind(to argumentTable: MTL4ArgumentTable, adjustedBufferOffsets: [Int: Int]) {
+        switch bufferBindings {
+        case .inline(let bindings):
+            for binding in bindings {
+                let offset = adjustedBufferOffsets[binding.index] ?? binding.offset
+                argumentTable.setAddress(
+                    binding.buffer.gpuAddress + UInt64(offset),
+                    index: binding.index
+                )
+            }
+        case .argumentTable(let table):
+            switch table.encodingState {
+            case .encoded(let buffer, let index, let offset):
+                argumentTable.setAddress(
+                    buffer.gpuAddress + UInt64(offset),
+                    index: index
+                )
+            case .planned, .prepared:
+                for binding in table.bindings {
+                    let offset = adjustedBufferOffsets[binding.index] ?? binding.offset
+                    argumentTable.setAddress(
+                        binding.buffer.gpuAddress + UInt64(offset),
+                        index: binding.index
+                    )
+                }
+            }
+        }
+        bindConstants(to: argumentTable)
+    }
+
+    var ownedResidencyBuffers: [MTLBuffer] {
+        var buffers: [MTLBuffer] = []
+        switch bufferBindings {
+        case .inline:
+            break
+        case .argumentTable(let table):
+            switch table.encodingState {
+            case .planned:
+                break
+            case .prepared(let buffer, _, _), .encoded(let buffer, _, _):
+                buffers.append(buffer)
+            }
+        }
+
+        switch constantBindings {
+        case .inline:
+            break
+        case .resident(let resident):
+            buffers.append(resident.buffer)
+        case .mixed(let bindings):
+            for binding in bindings {
+                guard case .buffer(let bufferBinding) = binding else { continue }
+                buffers.append(bufferBinding.buffer)
+            }
+        }
+        return buffers
+    }
+
+    private func bindConstants(to argumentTable: MTL4ArgumentTable) {
+        switch constantBindings {
+        case .inline(let bindings):
+            for binding in bindings {
+                assertionFailure(
+                    "Inline constant at index \(binding.index) has no backing buffer. "
+                    + "Ensure all steps use residentConstantBuffer mode."
+                )
+            }
+        case .resident(let resident):
+            for binding in resident.bindings {
+                argumentTable.setAddress(
+                    binding.buffer.gpuAddress + UInt64(binding.offset),
+                    index: binding.index
+                )
+            }
+        case .mixed(let bindings):
+            for constant in bindings {
+                switch constant {
+                case .inline(let binding):
+                    assertionFailure(
+                        "Inline constant at index \(binding.index) has no backing buffer. "
+                        + "Ensure all steps use residentConstantBuffer mode."
+                    )
+                case .buffer(let binding):
+                    argumentTable.setAddress(
+                        binding.buffer.gpuAddress + UInt64(binding.offset),
+                        index: binding.index
+                    )
+                }
+            }
+        }
     }
 }
 
@@ -298,19 +442,24 @@ public struct MetalDispatchDescriptor: @unchecked Sendable {
         barrierPolicy.synchronizationKind
     }
 
-    public func encode(on encoder: MTLComputeCommandEncoder, gridSize overrideGridSize: MTLSize? = nil) {
-        switch barrierPolicy {
-        case .none:
-            break
-        case .bufferBarrier:
-            encoder.memoryBarrier(scope: .buffers)
-        case .resourceBarrier(let resources):
-            encoder.memoryBarrier(resources: resources)
-        }
+    public func encode(
+        on encoder: MTL4ComputeCommandEncoder,
+        argumentTable: MTL4ArgumentTable,
+        visibilityOptions: MTL4VisibilityOptions = [],
+        gridSize overrideGridSize: MTLSize? = nil
+    ) {
+        barrierPolicy.encode(
+            on: encoder,
+            visibilityOptions: resolvedMetalVisibilityOptions(visibilityOptions)
+        )
+        encoder.setArgumentTable(argumentTable)
         encoder.setComputePipelineState(pipeline)
         if threadgroupMemoryLength > 0 {
             encoder.setThreadgroupMemoryLength(threadgroupMemoryLength, index: 0)
         }
-        encoder.dispatchThreadgroups(overrideGridSize ?? gridSize, threadsPerThreadgroup: threadgroupSize)
+        encoder.dispatchThreadgroups(
+            threadgroupsPerGrid: overrideGridSize ?? gridSize,
+            threadsPerThreadgroup: threadgroupSize
+        )
     }
 }

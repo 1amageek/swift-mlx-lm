@@ -17,6 +17,7 @@ enum MetalDecodeEncoder {
         argumentTable: MTL4ArgumentTable,
         visibilityOptions: MTL4VisibilityOptions = []
     ) {
+        let resolvedVisibilityOptions = resolvedMetalVisibilityOptions(visibilityOptions)
         for step in plan.steps {
             bindArgumentTable(step: step, argumentTable: argumentTable)
 
@@ -24,7 +25,7 @@ enum MetalDecodeEncoder {
                 encoder.barrier(
                     afterEncoderStages: .dispatch,
                     beforeEncoderStages: .dispatch,
-                    visibilityOptions: visibilityOptions
+                    visibilityOptions: resolvedVisibilityOptions
                 )
             }
 
@@ -38,6 +39,35 @@ enum MetalDecodeEncoder {
                 threadsPerThreadgroup: step.threadgroupSize
             )
         }
+    }
+
+    /// Encode a single step using Metal 4 argument table binding and barriers.
+    static func encodeStep(
+        step: MetalDispatchStep,
+        encoder: MTL4ComputeCommandEncoder,
+        argumentTable: MTL4ArgumentTable,
+        visibilityOptions: MTL4VisibilityOptions = []
+    ) {
+        let resolvedVisibilityOptions = resolvedMetalVisibilityOptions(visibilityOptions)
+        bindArgumentTable(step: step, argumentTable: argumentTable)
+
+        if step.barrierPolicy.isBarrier {
+            encoder.barrier(
+                afterEncoderStages: .dispatch,
+                beforeEncoderStages: .dispatch,
+                visibilityOptions: resolvedVisibilityOptions
+            )
+        }
+
+        encoder.setArgumentTable(argumentTable)
+        encoder.setComputePipelineState(step.pipeline)
+        if step.threadgroupMemoryLength > 0 {
+            encoder.setThreadgroupMemoryLength(step.threadgroupMemoryLength, index: 0)
+        }
+        encoder.dispatchThreadgroups(
+            threadgroupsPerGrid: step.gridSize,
+            threadsPerThreadgroup: step.threadgroupSize
+        )
     }
 
     /// Bind a single step's buffers and constants to the argument table.

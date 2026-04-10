@@ -7,9 +7,16 @@ public struct RMSNormAttributes: OperationAttributes, Codable, Equatable {
     /// Epsilon value for numerical stability.
     public let epsilon: Float
 
-    public init(dimension: Int, epsilon: Float = 1e-6) {
+    /// Optional additive bias applied to the learned scale before multiplication.
+    ///
+    /// Some families, such as Qwen 3.5 text RMSNorm, store zero-centered
+    /// weights and apply `1 + weight` at runtime.
+    public let weightBias: Float
+
+    public init(dimension: Int, epsilon: Float = 1e-6, weightBias: Float = 0) {
         self.dimension = dimension
         self.epsilon = epsilon
+        self.weightBias = weightBias
     }
 }
 

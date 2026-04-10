@@ -15,7 +15,8 @@ struct PrefillDiagnosticTest {
     private static let stafPath = "/Users/1amageek/Desktop/swift-lm/TestData/LFM2.5-1.2B-Thinking/model.staf"
     private static let outputPath = "/Users/1amageek/Desktop/swift-lm/TestData/prefill_diagnostic.txt"
 
-    @Test("Step-by-step prefill diagnostic with per-layer comparison")
+    @Test("Step-by-step prefill diagnostic with per-layer comparison",
+          .disabled("Pre-migration diagnostic: accesses storageModePrivate scratch buffer via contents()"))
     func stepByStepDiagnostic() throws {
         guard let resources = try RealModelTestSupport.loadOrSkip(skipMessage: "STAF not found — skipping") else {
             return
@@ -107,7 +108,12 @@ struct PrefillDiagnosticTest {
 
             switch step.mode {
             case .batch:
-                step.bindRuntimeArguments(encoder: enc, sequenceLength: UInt32(seqLen))
+                if let bindingIndex = step.sequenceLengthPolicy.bindingIndex {
+                    var seqLenValue = UInt32(seqLen)
+                    withUnsafeBytes(of: &seqLenValue) { raw in
+                        enc.setBytes(raw.baseAddress!, length: raw.count, index: bindingIndex)
+                    }
+                }
                 let grid = step.resolvedGridSize(sequenceLength: seqLen)
                 enc.dispatchThreadgroups(grid, threadsPerThreadgroup: step.threadgroupSize)
 

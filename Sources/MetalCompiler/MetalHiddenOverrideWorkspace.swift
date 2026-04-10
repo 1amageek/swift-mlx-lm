@@ -6,6 +6,7 @@ final class MetalHiddenOverrideWorkspace: @unchecked Sendable {
 
     private(set) var hiddenStagingBuffer: MTLBuffer
     private var deepstackBuffersByLayer: [Int: MTLBuffer] = [:]
+    private(set) var residencyLease: MetalResidencyLease = .empty
 
     init(device: MTLDevice, hiddenElementCount: Int) throws {
         self.device = device
@@ -14,6 +15,7 @@ final class MetalHiddenOverrideWorkspace: @unchecked Sendable {
             device: device,
             elementCount: hiddenElementCount
         )
+        try rebuildResidencyLease()
     }
 
     func writeHiddenState(_ values: [Float]) throws -> MTLBuffer {
@@ -68,6 +70,7 @@ final class MetalHiddenOverrideWorkspace: @unchecked Sendable {
         }
         let buffer = try Self.makeSharedFloatBuffer(device: device, elementCount: elementCount)
         deepstackBuffersByLayer[layerIndex] = buffer
+        try rebuildResidencyLease()
         return buffer
     }
 
@@ -80,5 +83,13 @@ final class MetalHiddenOverrideWorkspace: @unchecked Sendable {
             throw MetalCompilerError.deviceSetupFailed("Cannot allocate shared staging buffer")
         }
         return buffer
+    }
+
+    private func rebuildResidencyLease() throws {
+        residencyLease = try MetalResidencyLease.required(
+            device: device,
+            label: "swift-lm.hidden-override",
+            buffers: [hiddenStagingBuffer] + Array(deepstackBuffersByLayer.values)
+        )
     }
 }

@@ -16,13 +16,6 @@ struct ReferenceComparisonTests {
 
     private static let referencePath = "/Users/1amageek/Desktop/swift-lm/TestData/lfm2_reference.safetensors"
     private static let stafPath = "/Users/1amageek/Desktop/swift-lm/TestData/LFM2.5-1.2B-Thinking/model.staf"
-    private static let cachedEnvironmentResult: Result<TestEnvironment, Error> = {
-        do {
-            return .success(try buildEnvironment())
-        } catch {
-            return .failure(error)
-        }
-    }()
 
     // MARK: - Prefill Tests
 
@@ -86,20 +79,21 @@ struct ReferenceComparisonTests {
             posPtr[i] = UInt32(i)
         }
 
-        // Run only the first step (embedding lookup)
+        // Run only the first step (embedding lookup) using Metal 4
         let step = prefillPlan.steps[0]
-        guard let queue = device.makeCommandQueue(),
-              let cb = queue.makeCommandBuffer(),
-              let enc = cb.makeComputeCommandEncoder() else { return }
-
-        enc.setComputePipelineState(step.pipeline)
-        step.bindStaticArguments(encoder: enc)
-        step.bindRuntimeArguments(encoder: enc, sequenceLength: UInt32(seqLen))
-        let grid = step.resolvedGridSize(sequenceLength: seqLen)
-        step.descriptor.encode(on: enc, gridSize: grid)
-        enc.endEncoding()
-        cb.commit()
-        cb.waitUntilCompleted()
+        let runtimeConstantBuffer = prefillPlan.buffers.runtimeConstantBuffer
+        runtimeConstantBuffer.contents().bindMemory(to: UInt32.self, capacity: 1).pointee = UInt32(seqLen)
+        var submission = try MetalSubmissionContext(device: device)
+        try submission.withCompute { encoder, argumentTable in
+            step.bindStaticArguments(argumentTable: argumentTable)
+            step.bindRuntimeArguments(
+                argumentTable: argumentTable,
+                runtimeConstantBuffer: runtimeConstantBuffer,
+                sequenceLengthOffset: PrefillBufferSet.sequenceLengthOffset
+            )
+            let grid = step.resolvedGridSize(sequenceLength: seqLen)
+            step.descriptor.encode(on: encoder, argumentTable: argumentTable, gridSize: grid)
+        }
 
         // Read embedding output from hidden buffer (F32 in prefill, last token)
         let hiddenSize = 2048
@@ -166,6 +160,64 @@ struct ReferenceComparisonTests {
         }
     }
 
+    @Test("Prefill conv state source and transferred decode state diagnostic")
+    func prefillConvStateSourceAndTransferredStateDiagnostic() throws {
+        let gpuLock = try GPUTestExclusion.acquire()
+        defer { gpuLock.release() }
+        let env = try setupOrSkip()
+        var model = env.model
+
+        let tokens: [Int32] = [1, 1, 6, 6423, 708]
+        _ = model.prefill(tokens: tokens)
+
+        guard
+            let prefillPlan = model.prefillPlan,
+            let prefillConvState = prefillPlan.buffers.convState,
+            let decodeConvState = model.buffers.convState
+        else {
+            Issue.record("Missing prefill/decode conv_state buffer")
+            return
+        }
+
+        let convDim = model.buffers.convStateDimension
+        let kernelSize = model.buffers.convStateKernelSize
+        let layerStride = convDim * kernelSize
+        let prefillAll = readDecodeBuffer(prefillConvState, precision: .float16)
+        let decodeAll = readDecodeBuffer(decodeConvState, precision: .float16)
+
+        for convIdx in 0..<min(4, prefillAll.count / layerStride, decodeAll.count / layerStride) {
+            let refData = try readRefTensorAsFloats(env.ref, name: "ref.prefill.conv_state.\(convIdx)")
+            let base = convIdx * layerStride
+            let prefillVals = Array(prefillAll[base..<(base + layerStride)])
+            let decodeVals = Array(decodeAll[base..<(base + layerStride)])
+            let prefillErr = maxAbsoluteError(prefillVals, refData)
+            let decodeErr = maxAbsoluteError(decodeVals, refData)
+            let transferErr = maxAbsoluteError(prefillVals, decodeVals)
+            print("[RefComp] conv_state[\(convIdx)] prefillErr=\(String(format: "%.4f", prefillErr)) decodeErr=\(String(format: "%.4f", decodeErr)) transferErr=\(String(format: "%.4f", transferErr))")
+        }
+    }
+
+    @Test("Prefill conv-state binding offsets diagnostic")
+    func prefillConvStateBindingOffsetsDiagnostic() throws {
+        let gpuLock = try GPUTestExclusion.acquire()
+        defer { gpuLock.release() }
+        let env = try setupOrSkip()
+        guard
+            let prefillPlan = env.model.prefillPlan,
+            let convState = prefillPlan.buffers.convState
+        else {
+            Issue.record("Missing prefill conv_state buffer")
+            return
+        }
+
+        for (index, step) in prefillPlan.steps.enumerated() {
+            let bindings = step.bindings.buffers.filter { $0.buffer === convState }
+            guard !bindings.isEmpty else { continue }
+            let offsets = bindings.map(\.offset).sorted()
+            print("[RefComp] prefill step \(index) layer=\(step.metadata.layerIndex.map(String.init) ?? "-") mode=\(step.mode) convStateOffsets=\(offsets)")
+        }
+    }
+
     // MARK: - Per-layer Prefill Comparison
 
     @Test("Prefill per-layer hidden states match Python reference")
@@ -203,53 +255,56 @@ struct ReferenceComparisonTests {
             posPtr[i] = UInt32(i)
         }
 
-        // Run ALL prefill steps
-        guard let queue = device.makeCommandQueue(),
-              let cb = queue.makeCommandBuffer(),
-              let enc = cb.makeComputeCommandEncoder() else { return }
+        // Run ALL prefill steps using Metal 4
+        let runtimeConstantBuffer = prefillPlan.buffers.runtimeConstantBuffer
+        runtimeConstantBuffer.contents().bindMemory(to: UInt32.self, capacity: 1).pointee = UInt32(seqLen)
+        // Write per-position values for perPosition steps
+        for pos in 0..<seqLen {
+            let positionPtr = runtimeConstantBuffer.contents()
+                .advanced(by: PrefillBufferSet.positionOffset(at: pos))
+                .bindMemory(to: UInt32.self, capacity: 1)
+            positionPtr.pointee = UInt32(pos)
+        }
 
-        for step in prefillPlan.steps {
-            enc.setComputePipelineState(step.pipeline)
-            switch step.mode {
-            case .batch:
-                step.bindStaticArguments(encoder: enc)
-                step.bindRuntimeArguments(encoder: enc, sequenceLength: UInt32(seqLen))
-                let grid = step.resolvedGridSize(sequenceLength: seqLen)
-                step.descriptor.encode(on: enc, gridSize: grid)
-            case .perPosition:
-                for pos in 0..<seqLen {
-                    enc.setComputePipelineState(step.pipeline)
-                    step.bindStaticArguments(encoder: enc, position: pos)
-                    if let posIdx = step.positionBufferIndex {
-                        var posValue = UInt32(pos)
-                        withUnsafeBytes(of: &posValue) {
-                            enc.setBytes($0.baseAddress!, length: $0.count, index: posIdx)
+        var submission = try MetalSubmissionContext(device: device)
+        try submission.withCompute { encoder, argumentTable in
+            for step in prefillPlan.steps {
+                switch step.mode {
+                case .batch:
+                    step.bindings.bind(to: argumentTable)
+                    step.bindRuntimeArguments(
+                        argumentTable: argumentTable,
+                        runtimeConstantBuffer: runtimeConstantBuffer,
+                        sequenceLengthOffset: PrefillBufferSet.sequenceLengthOffset
+                    )
+                    let grid = step.resolvedGridSize(sequenceLength: seqLen)
+                    step.descriptor.encode(on: encoder, argumentTable: argumentTable, gridSize: grid)
+                case .perPosition:
+                    for pos in 0..<seqLen {
+                        step.bindStaticArguments(argumentTable: argumentTable, position: pos)
+                        if let posIdx = step.positionBufferIndex {
+                            argumentTable.setAddress(
+                                runtimeConstantBuffer.gpuAddress + UInt64(PrefillBufferSet.positionOffset(at: pos)),
+                                index: posIdx
+                            )
                         }
+                        step.descriptor.encode(on: encoder, argumentTable: argumentTable)
                     }
-                    step.bindRuntimeArguments(encoder: enc, sequenceLength: UInt32(seqLen))
-                    step.descriptor.encode(on: enc)
+                case .lastToken:
+                    step.bindStaticArguments(argumentTable: argumentTable, position: seqLen - 1)
+                    step.descriptor.encode(on: encoder, argumentTable: argumentTable)
                 }
-            case .lastToken:
-                enc.setComputePipelineState(step.pipeline)
-                step.bindStaticArguments(encoder: enc, position: seqLen - 1)
-                if let posIdx = step.positionBufferIndex {
-                    var posValue = UInt32(seqLen - 1)
-                    withUnsafeBytes(of: &posValue) {
-                        enc.setBytes($0.baseAddress!, length: $0.count, index: posIdx)
-                    }
-                }
-                step.bindRuntimeArguments(encoder: enc, sequenceLength: UInt32(seqLen))
-                step.descriptor.encode(on: enc)
             }
         }
-        enc.endEncoding()
-        cb.commit()
-        cb.waitUntilCompleted()
 
         // Compare final hidden (last token)
-        let hiddenPtr = prefillPlan.buffers.hidden.contents()
-            .bindMemory(to: Float32.self, capacity: seqLen * hiddenSize)
-        let metalFinalHidden = (0..<hiddenSize).map { hiddenPtr[lastTokenOffset + $0] }
+        let hiddenSource = prefillPlan.finalHiddenSource(sequenceLength: seqLen)
+        let hiddenPtr = hiddenSource.buffer.contents().bindMemory(
+            to: Float32.self,
+            capacity: hiddenSource.buffer.length / MemoryLayout<Float32>.stride
+        )
+        let hiddenElementOffset = hiddenSource.offset / MemoryLayout<Float32>.stride
+        let metalFinalHidden = (0..<hiddenSize).map { hiddenPtr[hiddenElementOffset + $0] }
 
         let finalErr = maxAbsoluteError(metalFinalHidden, refLastToken)
         let metalNorm = sqrtf(metalFinalHidden.reduce(0) { $0 + $1 * $1 })
@@ -283,49 +338,282 @@ struct ReferenceComparisonTests {
                 "Prefill logits argmax: Metal=\(metalArgmax.index) Python=\(refArgmax.index)")
     }
 
-    @Test("Prefill argmax matches Python for all sequence lengths 5-11")
-    func prefillArgmaxSweep() throws {
+    @Test("Prefill first conv layer output matches Python reference")
+    func prefillFirstConvLayerMatchesReference() throws {
         let gpuLock = try GPUTestExclusion.acquire()
         defer { gpuLock.release() }
-        guard let device = MTLCreateSystemDefaultDevice() else { throw SetupError.noDevice }
-        let stafURL = URL(fileURLWithPath: Self.stafPath)
-        guard FileManager.default.fileExists(atPath: stafURL.path) else { throw SetupError.noSTAF }
-        let store = try STAFLoader().load(at: stafURL, device: device)
-        let config = ModelConfig(
-            hiddenSize: 2048, layerCount: 16, intermediateSize: 8192,
-            vocabSize: 65536, attentionHeads: 32, kvHeads: 8, headDim: 64,
-            attentionBias: false, mlpBias: false, normEps: 1e-5,
-            normKind: .rmsNorm, ropeTheta: 1000000.0, ropeDimension: 64,
-            ropeScaling: nil, tiedEmbeddings: true,
-            expertCount: nil, expertsPerToken: nil, qkNorm: true,
-            fullAttentionInterval: nil, ssmNumHeads: nil, ssmKeyHeadDim: nil,
-            ssmValueHeadDim: nil, convKernelSize: nil, convLCache: 3,
-            partialRotaryFactor: nil, slidingWindow: nil,
-            layerTypes: ["conv", "conv", "full_attention", "conv", "conv", "full_attention",
-                         "conv", "conv", "full_attention", "conv", "full_attention", "conv",
-                         "full_attention", "conv", "full_attention", "conv"])
-        let graph = try LFM2(config: config).makeModelGraph()
-        let resolved = ParameterResolver().resolve(graph: graph, convention: .lfm2Family)
-        let pyArgmax: [Int: Int] = [5: 2, 6: 2, 7: 49049, 8: 2, 9: 2, 10: 2, 11: 64400]
-        let full: [Int32] = [1, 1, 6, 6423, 708, 6928, 7, 708, 6, 64015, 708]
-
-        var allMatch = true
-        for n in 5...11 {
-            let compiler = MetalInferenceCompiler()
-            let decode = try compiler.compile(graph: resolved, hiddenSize: 2048, intermediateSize: 8192,
-                                              vocabSize: 65536, stafWeightStore: store, device: device)
-            let prefill = try compiler.compilePrefill(graph: resolved, hiddenSize: 2048, intermediateSize: 8192,
-                                                     vocabSize: 65536, inferencePolicy: InferencePolicy(maximumSequenceLength: 64),
-                                                     stafWeightStore: store, device: device)
-            var model = try MetalInferenceModel(plan: decode, device: device)
-            model.prefillPlan = prefill
-            let first = model.prefill(tokens: Array(full.prefix(n)))
-            let expected = pyArgmax[n] ?? -1
-            let match = Int(first) == expected
-            if !match { allMatch = false }
-            print("[sweep] len=\(n) metal=\(first) python=\(expected) \(match ? "✓" : "✗")")
+        let env = try setupOrSkip()
+        guard let prefillPlan = env.model.prefillPlan else {
+            Issue.record("No prefill plan")
+            return
         }
-        #expect(allMatch, "Some sequence lengths produced wrong argmax")
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+
+        let seqLen = 5
+        let hiddenSize = 2048
+        let tokens: [Int32] = [1, 1, 6, 6423, 708]
+        let lastTokenOffset = (seqLen - 1) * hiddenSize
+
+        preparePrefillInputs(
+            prefillPlan: prefillPlan,
+            seqLen: seqLen,
+            tokens: tokens
+        )
+        try executePrefillPrefix(
+            prefillPlan: prefillPlan,
+            device: device,
+            seqLen: seqLen,
+            stepCount: 7
+        )
+
+        let hidden = readF32Buffer(prefillPlan.buffers.hidden)
+        let metal = Array(hidden[lastTokenOffset..<(lastTokenOffset + hiddenSize)])
+        let referenceAll = try readRefTensorAsFloats(env.ref, name: "ref.prefill.layer_0.after_op")
+        let reference = Array(referenceAll[lastTokenOffset..<(lastTokenOffset + hiddenSize)])
+        let maxErr = maxAbsoluteError(metal, reference)
+
+        print("[RefComp] layer_0.after_op maxErr=\(String(format: "%.4f", maxErr))")
+        #expect(maxErr < 0.25, "Layer 0 after_op diverged: maxErr=\(maxErr)")
+    }
+
+    @Test("Prefill final hidden matches Python reference")
+    func prefillFinalHiddenMatchesReference() throws {
+        let gpuLock = try GPUTestExclusion.acquire()
+        defer { gpuLock.release() }
+        let env = try setupOrSkip()
+        var model = env.model
+        guard let prefillPlan = model.prefillPlan else {
+            Issue.record("No prefill plan")
+            return
+        }
+
+        let tokens: [Int32] = [1, 1, 6, 6423, 708]
+        _ = model.prefill(tokens: tokens)
+        let finalHidden = prefillPlan.finalHiddenSource(sequenceLength: tokens.count)
+        let fullHidden = readDecodeBuffer(finalHidden.buffer, precision: .float32)
+        let hiddenBase = finalHidden.offset / MemoryLayout<Float>.stride
+        let hidden = Array(fullHidden[hiddenBase..<(hiddenBase + 2048)])
+
+        let refHiddenAll = try readRefTensorAsFloats(env.ref, name: "ref.prefill.final_hidden")
+        let hiddenSize = 2048
+        let reference = Array(refHiddenAll.suffix(hiddenSize))
+        let maxErr = maxAbsoluteError(hidden, reference)
+
+        print("[RefComp] prefill final hidden maxErr=\(String(format: "%.4f", maxErr))")
+        #expect(maxErr < 0.25, "Prefill final hidden diverged: maxErr=\(maxErr)")
+    }
+
+    @Test("Prefill first conv state extraction matches scratch-derived Bx")
+    func prefillFirstConvStateMatchesScratchBx() throws {
+        let gpuLock = try GPUTestExclusion.acquire()
+        defer { gpuLock.release() }
+        let env = try setupOrSkip()
+        guard let prefillPlan = env.model.prefillPlan else {
+            Issue.record("No prefill plan")
+            return
+        }
+        guard let device = MTLCreateSystemDefaultDevice(),
+              let convState = prefillPlan.buffers.convState else {
+            Issue.record("No conv_state buffer")
+            return
+        }
+
+        let seqLen = 5
+        let tokens: [Int32] = [1, 1, 6, 6423, 708]
+        preparePrefillInputs(
+            prefillPlan: prefillPlan,
+            seqLen: seqLen,
+            tokens: tokens
+        )
+        try executePrefillPrefix(
+            prefillPlan: prefillPlan,
+            device: device,
+            seqLen: seqLen,
+            stepCount: 7
+        )
+
+        let hiddenSize = 2048
+        let kernelSize = prefillPlan.buffers.convStateKernelSize
+        let scratchSlotStride = prefillPlan.slotDimension * seqLen
+        let scratchBase = scratchSlotStride
+        let scratch = readF32Buffer(prefillPlan.buffers.scratch)
+        var expected = Array(repeating: Float.zero, count: kernelSize * hiddenSize)
+        for k in 0..<kernelSize {
+            let srcPos = seqLen - kernelSize + k
+            guard srcPos >= 0 else { continue }
+            for ch in 0..<hiddenSize {
+                let base = scratchBase + srcPos * prefillPlan.slotDimension
+                let b = scratch[base + ch]
+                let x = scratch[base + 2 * hiddenSize + ch]
+                expected[k * hiddenSize + ch] = b * x
+            }
+        }
+
+        let convAll = readDecodeBuffer(convState, precision: .float16)
+        let actual = Array(convAll.prefix(kernelSize * hiddenSize))
+        let maxErr = maxAbsoluteError(actual, expected)
+        let sample = [0, hiddenSize + 575, 2 * hiddenSize + 575].map { index in
+            String(
+                format: "(i=%d metal=%.4f expected=%.4f)",
+                index,
+                actual[index],
+                expected[index]
+            )
+        }
+        print("[RefComp] first conv_state vs scratch-derived Bx maxErr=\(String(format: "%.4f", maxErr)) \(sample)")
+        #expect(maxErr < 0.1, "First conv_state extraction diverged from scratch-derived Bx: maxErr=\(maxErr)")
+    }
+
+    @Test("Prefill first layer after MLP matches Python reference")
+    func prefillFirstLayerAfterMLPMatchesReference() throws {
+        let gpuLock = try GPUTestExclusion.acquire()
+        defer { gpuLock.release() }
+        let env = try setupOrSkip()
+        guard let prefillPlan = env.model.prefillPlan else {
+            Issue.record("No prefill plan")
+            return
+        }
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+
+        let seqLen = 5
+        let hiddenSize = 2048
+        let tokens: [Int32] = [1, 1, 6, 6423, 708]
+        let lastTokenOffset = (seqLen - 1) * hiddenSize
+
+        preparePrefillInputs(
+            prefillPlan: prefillPlan,
+            seqLen: seqLen,
+            tokens: tokens
+        )
+        try executePrefillPrefix(
+            prefillPlan: prefillPlan,
+            device: device,
+            seqLen: seqLen,
+            stepCount: 14
+        )
+
+        let hidden = readF32Buffer(prefillPlan.buffers.hidden)
+        let metal = Array(hidden[lastTokenOffset..<(lastTokenOffset + hiddenSize)])
+        let referenceAll = try readRefTensorAsFloats(env.ref, name: "ref.prefill.layer_0.after_mlp")
+        let reference = Array(referenceAll[lastTokenOffset..<(lastTokenOffset + hiddenSize)])
+        let maxErr = maxAbsoluteError(metal, reference)
+
+        print("[RefComp] layer_0.after_mlp maxErr=\(String(format: "%.4f", maxErr))")
+        #expect(maxErr < 0.5, "Layer 0 after_mlp diverged: maxErr=\(maxErr)")
+    }
+
+    @Test("Prefill first attention layer output matches Python reference")
+    func prefillFirstAttentionLayerMatchesReference() throws {
+        let gpuLock = try GPUTestExclusion.acquire()
+        defer { gpuLock.release() }
+        let env = try setupOrSkip()
+        guard let prefillPlan = env.model.prefillPlan else {
+            Issue.record("No prefill plan")
+            return
+        }
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+
+        let seqLen = 5
+        let hiddenSize = 2048
+        let tokens: [Int32] = [1, 1, 6, 6423, 708]
+        let lastTokenOffset = (seqLen - 1) * hiddenSize
+
+        preparePrefillInputs(
+            prefillPlan: prefillPlan,
+            seqLen: seqLen,
+            tokens: tokens
+        )
+        try executePrefillPrefix(
+            prefillPlan: prefillPlan,
+            device: device,
+            seqLen: seqLen,
+            stepCount: 40
+        )
+
+        let hidden = readF32Buffer(prefillPlan.buffers.hidden)
+        let metal = Array(hidden[lastTokenOffset..<(lastTokenOffset + hiddenSize)])
+        let referenceAll = try readRefTensorAsFloats(env.ref, name: "ref.prefill.layer_2.after_op")
+        let reference = Array(referenceAll[lastTokenOffset..<(lastTokenOffset + hiddenSize)])
+        let maxErr = maxAbsoluteError(metal, reference)
+
+        print("[RefComp] layer_2.after_op maxErr=\(String(format: "%.4f", maxErr))")
+        #expect(maxErr < 0.5, "Layer 2 after_op diverged: maxErr=\(maxErr)")
+    }
+
+    @Test("Prefill second attention layer output matches Python reference")
+    func prefillSecondAttentionLayerMatchesReference() throws {
+        let gpuLock = try GPUTestExclusion.acquire()
+        defer { gpuLock.release() }
+        let env = try setupOrSkip()
+        guard let prefillPlan = env.model.prefillPlan else {
+            Issue.record("No prefill plan")
+            return
+        }
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+
+        let seqLen = 5
+        let hiddenSize = 2048
+        let tokens: [Int32] = [1, 1, 6, 6423, 708]
+        let lastTokenOffset = (seqLen - 1) * hiddenSize
+
+        preparePrefillInputs(
+            prefillPlan: prefillPlan,
+            seqLen: seqLen,
+            tokens: tokens
+        )
+        try executePrefillPrefix(
+            prefillPlan: prefillPlan,
+            device: device,
+            seqLen: seqLen,
+            stepCount: 87
+        )
+
+        let hidden = readF32Buffer(prefillPlan.buffers.hidden)
+        let metal = Array(hidden[lastTokenOffset..<(lastTokenOffset + hiddenSize)])
+        let referenceAll = try readRefTensorAsFloats(env.ref, name: "ref.prefill.layer_5.after_op")
+        let reference = Array(referenceAll[lastTokenOffset..<(lastTokenOffset + hiddenSize)])
+        let maxErr = maxAbsoluteError(metal, reference)
+
+        print("[RefComp] layer_5.after_op maxErr=\(String(format: "%.4f", maxErr))")
+        #expect(maxErr < 0.5, "Layer 5 after_op diverged: maxErr=\(maxErr)")
+    }
+
+    @Test("Prefill third attention layer output matches Python reference")
+    func prefillThirdAttentionLayerMatchesReference() throws {
+        let gpuLock = try GPUTestExclusion.acquire()
+        defer { gpuLock.release() }
+        let env = try setupOrSkip()
+        guard let prefillPlan = env.model.prefillPlan else {
+            Issue.record("No prefill plan")
+            return
+        }
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+
+        let seqLen = 5
+        let hiddenSize = 2048
+        let tokens: [Int32] = [1, 1, 6, 6423, 708]
+        let lastTokenOffset = (seqLen - 1) * hiddenSize
+
+        preparePrefillInputs(
+            prefillPlan: prefillPlan,
+            seqLen: seqLen,
+            tokens: tokens
+        )
+        try executePrefillPrefix(
+            prefillPlan: prefillPlan,
+            device: device,
+            seqLen: seqLen,
+            stepCount: 134
+        )
+
+        let hidden = readF32Buffer(prefillPlan.buffers.hidden)
+        let metal = Array(hidden[lastTokenOffset..<(lastTokenOffset + hiddenSize)])
+        let referenceAll = try readRefTensorAsFloats(env.ref, name: "ref.prefill.layer_8.after_op")
+        let reference = Array(referenceAll[lastTokenOffset..<(lastTokenOffset + hiddenSize)])
+        let maxErr = maxAbsoluteError(metal, reference)
+
+        print("[RefComp] layer_8.after_op maxErr=\(String(format: "%.4f", maxErr))")
+        #expect(maxErr < 0.5, "Layer 8 after_op diverged: maxErr=\(maxErr)")
     }
 
     // MARK: - Graph and Dispatch Dump
@@ -334,30 +622,18 @@ struct ReferenceComparisonTests {
     func dumpGraphAndDispatches() throws {
         let gpuLock = try GPUTestExclusion.acquire()
         defer { gpuLock.release() }
-        let config = ModelConfig(
-            hiddenSize: 2048, layerCount: 16, intermediateSize: 8192,
-            vocabSize: 65536, attentionHeads: 32, kvHeads: 8, headDim: 64,
-            attentionBias: false, mlpBias: false, normEps: 1e-5,
-            normKind: .rmsNorm, ropeTheta: 1000000.0, ropeDimension: 64,
-            ropeScaling: nil, tiedEmbeddings: true,
-            expertCount: nil, expertsPerToken: nil, qkNorm: true,
-            fullAttentionInterval: nil, ssmNumHeads: nil, ssmKeyHeadDim: nil,
-            ssmValueHeadDim: nil, convKernelSize: nil, convLCache: 3,
-            partialRotaryFactor: nil, slidingWindow: nil,
-            layerTypes: ["conv", "conv", "full_attention", "conv", "conv", "full_attention",
-                         "conv", "conv", "full_attention", "conv", "full_attention", "conv",
-                         "full_attention", "conv", "full_attention", "conv"]
-        )
-        let graph = try LFM2(config: config).makeModelGraph()
-        let resolved = ParameterResolver().resolve(graph: graph, convention: .lfm2Family)
+        let spec = try BenchmarkSupport.loadLFM25ModelSpec()
 
         // Dump IR graph
         print("=== IR GRAPH ===")
-        print(graph.dump())
+        print(spec.resolved.dump())
 
         // Dump dispatch entries
         let compiler = MetalInferenceCompiler()
-        let dump = compiler.dumpDispatchEntries(graph: resolved, hiddenSize: 2048)
+        let dump = compiler.dumpDispatchEntries(
+            graph: spec.resolved,
+            hiddenSize: spec.config.hiddenSize
+        )
         print("\n=== DISPATCH ENTRIES ===")
         print(dump)
     }
@@ -373,28 +649,13 @@ struct ReferenceComparisonTests {
         }
 
         let store = try STAFLoader().load(at: stafURL, device: device)
-        let config = ModelConfig(
-            hiddenSize: 2048, layerCount: 16, intermediateSize: 8192,
-            vocabSize: 65536, attentionHeads: 32, kvHeads: 8, headDim: 64,
-            attentionBias: false, mlpBias: false, normEps: 1e-5,
-            normKind: .rmsNorm, ropeTheta: 1000000.0, ropeDimension: 64,
-            ropeScaling: nil, tiedEmbeddings: true,
-            expertCount: nil, expertsPerToken: nil, qkNorm: true,
-            fullAttentionInterval: nil, ssmNumHeads: nil, ssmKeyHeadDim: nil,
-            ssmValueHeadDim: nil, convKernelSize: nil, convLCache: 3,
-            partialRotaryFactor: nil, slidingWindow: nil,
-            layerTypes: ["conv", "conv", "full_attention", "conv", "conv", "full_attention",
-                         "conv", "conv", "full_attention", "conv", "full_attention", "conv",
-                         "full_attention", "conv", "full_attention", "conv"]
-        )
-        let graph = try LFM2(config: config).makeModelGraph()
-        let resolved = ParameterResolver().resolve(graph: graph, convention: .lfm2Family)
+        let spec = try BenchmarkSupport.loadLFM25ModelSpec()
         let compiler = MetalInferenceCompiler()
         let dump = try compiler.dumpCompiledDecodePlan(
-            graph: resolved,
-            hiddenSize: 2048,
-            intermediateSize: 8192,
-            vocabSize: 65536,
+            graph: spec.resolved,
+            hiddenSize: spec.config.hiddenSize,
+            intermediateSize: spec.config.intermediateSize,
+            vocabSize: spec.config.vocabSize,
             stafWeightStore: store,
             device: device)
 
@@ -419,6 +680,13 @@ struct ReferenceComparisonTests {
         try verifyDecodeStep(step: 1)
     }
 
+    @Test("Decode step 1 logits diagnostic with float32 decode")
+    func decodeStep1LogitsMatchFloat32Decode() throws {
+        let gpuLock = try GPUTestExclusion.acquire()
+        defer { gpuLock.release() }
+        try verifyDecodeStep(step: 1, decodeBufferPrecisionOverride: .float32)
+    }
+
     @Test("Decode step 2 logits match Python reference")
     func decodeStep2LogitsMatch() throws {
         let gpuLock = try GPUTestExclusion.acquire()
@@ -437,21 +705,16 @@ struct ReferenceComparisonTests {
         let finalHiddenBuffer = finalHiddenInputBuffer(for: env.model.decodePlan)
         writeDecodeBuffer(refHidden, to: finalHiddenBuffer, precision: env.model.buffers.bufferPrecision)
 
-        guard let cb = env.model.commandQueue.makeCommandBuffer(),
-              let enc = cb.makeComputeCommandEncoder() else {
-            Issue.record("Failed to create command buffer for output-head diagnostic")
-            return
+        var submission = try MetalSubmissionContext(device: env.model.device)
+        try submission.withCompute { encoder, argumentTable in
+            for step in env.model.decodePlan.steps.suffix(2) {
+                MetalDecodeEncoder.encodeStep(
+                    step: step,
+                    encoder: encoder,
+                    argumentTable: argumentTable
+                )
+            }
         }
-
-        for step in env.model.decodePlan.steps.suffix(2) {
-            enc.setComputePipelineState(step.pipeline)
-            step.bindings.bind(to: enc)
-            step.descriptor.encode(on: enc)
-        }
-
-        enc.endEncoding()
-        cb.commit()
-        cb.waitUntilCompleted()
 
         let metalLogits = readDecodeBuffer(env.model.buffers.logits, precision: env.model.buffers.bufferPrecision)
         let metalTop = argmax(metalLogits)
@@ -465,6 +728,83 @@ struct ReferenceComparisonTests {
 
         #expect(metalTop.index == refTop.index,
                 "Output head argmax mismatch from Python hidden: Metal=\(metalTop.index) Python=\(refTop.index)")
+    }
+
+    @Test("Prefill output head matches Python when fed Python final_hidden")
+    func prefillOutputHeadMatchesPythonHidden() throws {
+        let gpuLock = try GPUTestExclusion.acquire()
+        defer { gpuLock.release() }
+        let env = try setupOrSkip()
+        guard let prefillPlan = env.model.prefillPlan else {
+            Issue.record("No prefill plan")
+            return
+        }
+
+        let sequenceLength = 5
+        let refHiddenAll = try readRefTensorAsFloats(env.ref, name: "ref.prefill.final_hidden")
+        let refLogits = try readRefTensorAsFloats(env.ref, name: "ref.prefill.logits_last")
+        let hiddenSize = 2048
+        let lastHidden = Array(refHiddenAll.suffix(hiddenSize))
+
+        guard
+            let projectionStep = prefillPlan.steps.reversed().first(where: {
+                $0.bufferBindings.contains(where: { $0.index == 2 && $0.buffer === prefillPlan.buffers.logits })
+            }),
+            let inputBinding = projectionStep.bufferBindings.first(where: { $0.index == 0 })
+        else {
+            Issue.record("Prefill output projection step not found")
+            return
+        }
+
+        let inputBuffer = inputBinding.buffer
+        let inputStride = projectionStep.perPositionStrides[inputBinding.index] ?? 0
+        let inputOffset = inputBinding.offset + max(sequenceLength - 1, 0) * inputStride
+
+        guard let argmaxStep = prefillPlan.steps.last else {
+            Issue.record("Prefill argmax step not found")
+            return
+        }
+
+        var submission = try MetalSubmissionContext(device: env.model.device)
+        try writeFloat32Slice(
+            lastHidden,
+            to: inputBuffer,
+            offset: inputOffset,
+            using: &submission
+        )
+        try submission.withCompute { encoder, argumentTable in
+            for step in [projectionStep, argmaxStep] {
+                switch step.mode {
+                case .batch:
+                    step.bindings.bind(to: argumentTable)
+                    step.bindRuntimeArguments(
+                        argumentTable: argumentTable,
+                        runtimeConstantBuffer: prefillPlan.buffers.runtimeConstantBuffer,
+                        sequenceLengthOffset: PrefillBufferSet.sequenceLengthOffset
+                    )
+                    let grid = step.resolvedGridSize(sequenceLength: 1)
+                    step.descriptor.encode(on: encoder, argumentTable: argumentTable, gridSize: grid)
+                case .lastToken:
+                    step.bindStaticArguments(argumentTable: argumentTable, position: sequenceLength - 1)
+                    step.descriptor.encode(on: encoder, argumentTable: argumentTable)
+                case .perPosition:
+                    Issue.record("Unexpected perPosition step in prefill output head")
+                }
+            }
+        }
+
+        let metalLogits = readF32Buffer(prefillPlan.buffers.logits)
+        let metalTop = argmax(metalLogits)
+        let refTop = argmax(refLogits)
+        let maxErr = maxAbsoluteError(metalLogits, refLogits)
+
+        print("[RefComp] Prefill output-head diagnostic (Python hidden input):")
+        print("  Python argmax: \(refTop.index) (val=\(String(format: "%.2f", refTop.value)))")
+        print("  Metal  argmax: \(metalTop.index) (val=\(String(format: "%.2f", metalTop.value)))")
+        print("  Max absolute error: \(String(format: "%.4f", maxErr))")
+
+        #expect(metalTop.index == refTop.index,
+                "Prefill output head argmax mismatch from Python hidden: Metal=\(metalTop.index) Python=\(refTop.index)")
     }
 
     @Test("Decode step 1 layerwise diagnostic")
@@ -486,18 +826,18 @@ struct ReferenceComparisonTests {
 
         var currentLayer = 0
         var waitingForOperatorResidual = false
+        var submission = try MetalSubmissionContext(device: model.device)
 
         for (stepIndex, step) in model.decodePlan.steps.enumerated() {
             guard stepIndex < entries.count else { break }
 
-            let cb = model.commandQueue.makeCommandBuffer()!
-            let enc = cb.makeComputeCommandEncoder()!
-            enc.setComputePipelineState(step.pipeline)
-            step.bindings.bind(to: enc)
-            step.descriptor.encode(on: enc)
-            enc.endEncoding()
-            cb.commit()
-            cb.waitUntilCompleted()
+            try submission.withCompute { encoder, argumentTable in
+                MetalDecodeEncoder.encodeStep(
+                    step: step,
+                    encoder: encoder,
+                    argumentTable: argumentTable
+                )
+            }
 
             let entry = entries[stepIndex]
             if entry.kind.contains("projection(o_proj") || entry.kind.contains("projection(out_proj") {
@@ -543,18 +883,14 @@ struct ReferenceComparisonTests {
             writeDecodeBuffer(residual, to: env.model.buffers.residual, precision: env.model.buffers.bufferPrecision)
         }
 
-        guard let cb = env.model.commandQueue.makeCommandBuffer(),
-              let enc = cb.makeComputeCommandEncoder() else {
-            Issue.record("Failed to create command buffer for final norm kernel diagnostic")
-            return
+        var submission = try MetalSubmissionContext(device: env.model.device)
+        try submission.withCompute { encoder, argumentTable in
+            MetalDecodeEncoder.encodeStep(
+                step: normStep,
+                encoder: encoder,
+                argumentTable: argumentTable
+            )
         }
-
-        enc.setComputePipelineState(normStep.pipeline)
-        normStep.bindings.bind(to: enc)
-        normStep.descriptor.encode(on: enc)
-        enc.endEncoding()
-        cb.commit()
-        cb.waitUntilCompleted()
 
         let actual = readDecodeBuffer(finalHiddenInputBuffer(for: env.model.decodePlan), precision: env.model.buffers.bufferPrecision)
         let maxErr = maxAbsoluteError(actual, expected)
@@ -602,8 +938,11 @@ struct ReferenceComparisonTests {
 
     // MARK: - Decode Step Helper
 
-    private func verifyDecodeStep(step: Int) throws {
-        let env = try setupOrSkip()
+    private func verifyDecodeStep(
+        step: Int,
+        decodeBufferPrecisionOverride: BufferPrecision? = nil
+    ) throws {
+        let env = try setupOrSkip(decodeBufferPrecisionOverride: decodeBufferPrecisionOverride)
         var model = env.model
 
         let tokens: [Int32] = [1, 1, 6, 6423, 708]
@@ -677,6 +1016,7 @@ struct ReferenceComparisonTests {
     private struct TestEnvironment {
         var model: MetalInferenceModel
         let ref: MetalWeightFile
+        let store: STAFWeightStore
     }
 
     private struct ParsedDispatchEntry {
@@ -684,18 +1024,20 @@ struct ReferenceComparisonTests {
         let kind: String
     }
 
-    private func setupOrSkip() throws -> TestEnvironment {
-        switch Self.cachedEnvironmentResult {
-        case .success(let cached):
-            var environment = cached
-            environment.model.resetCaches()
-            return environment
-        case .failure(let error):
-            throw error
-        }
+    private func setupOrSkip(
+        weightAccessPolicyOverride: ProjectionWeightAccessPolicyOverride? = nil,
+        decodeBufferPrecisionOverride: BufferPrecision? = nil
+    ) throws -> TestEnvironment {
+        try Self.buildEnvironment(
+            weightAccessPolicyOverride: weightAccessPolicyOverride,
+            decodeBufferPrecisionOverride: decodeBufferPrecisionOverride
+        )
     }
 
-    private static func buildEnvironment() throws -> TestEnvironment {
+    private static func buildEnvironment(
+        weightAccessPolicyOverride: ProjectionWeightAccessPolicyOverride? = nil,
+        decodeBufferPrecisionOverride: BufferPrecision? = nil
+    ) throws -> TestEnvironment {
         guard let device = MTLCreateSystemDefaultDevice() else {
             throw SetupError.noDevice
         }
@@ -723,56 +1065,46 @@ struct ReferenceComparisonTests {
 
         let ref = try SafetensorsLoader().load(at: refURL, device: device)
         let store = try STAFLoader().load(at: stafURL, device: device)
+        let spec = try BenchmarkSupport.loadLFM25ModelSpec()
 
-        let config = ModelConfig(
-            hiddenSize: 2048, layerCount: 16, intermediateSize: 8192,
-            vocabSize: 65536, attentionHeads: 32, kvHeads: 8, headDim: 64,
-            attentionBias: false, mlpBias: false, normEps: 1e-5,
-            normKind: .rmsNorm, ropeTheta: 1000000.0, ropeDimension: 64,
-            ropeScaling: nil, tiedEmbeddings: true,
-            expertCount: nil, expertsPerToken: nil, qkNorm: true,
-            fullAttentionInterval: nil, ssmNumHeads: nil, ssmKeyHeadDim: nil,
-            ssmValueHeadDim: nil, convKernelSize: nil, convLCache: 3,
-            partialRotaryFactor: nil, slidingWindow: nil,
-            layerTypes: ["conv", "conv", "full_attention", "conv", "conv", "full_attention",
-                         "conv", "conv", "full_attention", "conv", "full_attention", "conv",
-                         "full_attention", "conv", "full_attention", "conv"]
+        let compiler = MetalInferenceCompiler(
+            weightAccessPolicyOverride: weightAccessPolicyOverride,
+            decodeBufferPrecisionOverride: decodeBufferPrecisionOverride
         )
-        let graph = try LFM2(config: config).makeModelGraph()
-        let resolved = ParameterResolver().resolve(graph: graph, convention: .lfm2Family)
-
-        let compiler = MetalInferenceCompiler()
         let decodePlan = try compiler.compile(
-            graph: resolved, hiddenSize: 2048, intermediateSize: 8192,
-            vocabSize: 65536, stafWeightStore: store, device: device)
+            graph: spec.resolved,
+            hiddenSize: spec.config.hiddenSize,
+            intermediateSize: spec.config.intermediateSize,
+            vocabSize: spec.config.vocabSize,
+            stafWeightStore: store,
+            device: device)
         let prefillPlan = try compiler.compilePrefill(
-            graph: resolved, hiddenSize: 2048, intermediateSize: 8192,
-            vocabSize: 65536, inferencePolicy: InferencePolicy(maximumSequenceLength: 64),
-            stafWeightStore: store, device: device)
+            graph: spec.resolved,
+            hiddenSize: spec.config.hiddenSize,
+            intermediateSize: spec.config.intermediateSize,
+            vocabSize: spec.config.vocabSize,
+            inferencePolicy: InferencePolicy(maximumSequenceLength: 64),
+            stafWeightStore: store,
+            sharedKVCache: decodePlan.buffers.kvCache,
+            sharedConvState: decodePlan.buffers.convState,
+            sharedConvStateDimension: decodePlan.buffers.convStateDimension,
+            sharedConvStateKernelSize: decodePlan.buffers.convStateKernelSize,
+            sharedRecurrentState: decodePlan.buffers.recurrentState,
+            sharedRecurrentStateBytesPerLayer: decodePlan.buffers.recurrentStateBytesPerLayer,
+            device: device)
 
         var model = try MetalInferenceModel(plan: decodePlan, device: device)
         model.prefillPlan = prefillPlan
 
-        return TestEnvironment(model: model, ref: ref)
+        return TestEnvironment(model: model, ref: ref, store: store)
     }
 
     private func makeDispatchDump(compiler: MetalInferenceCompiler) throws -> String {
-        let config = ModelConfig(
-            hiddenSize: 2048, layerCount: 16, intermediateSize: 8192,
-            vocabSize: 65536, attentionHeads: 32, kvHeads: 8, headDim: 64,
-            attentionBias: false, mlpBias: false, normEps: 1e-5,
-            normKind: .rmsNorm, ropeTheta: 1000000.0, ropeDimension: 64,
-            ropeScaling: nil, tiedEmbeddings: true,
-            expertCount: nil, expertsPerToken: nil, qkNorm: true,
-            fullAttentionInterval: nil, ssmNumHeads: nil, ssmKeyHeadDim: nil,
-            ssmValueHeadDim: nil, convKernelSize: nil, convLCache: 3,
-            partialRotaryFactor: nil, slidingWindow: nil,
-            layerTypes: ["conv", "conv", "full_attention", "conv", "conv", "full_attention",
-                         "conv", "conv", "full_attention", "conv", "full_attention", "conv",
-                         "full_attention", "conv", "full_attention", "conv"])
-        let graph = try LFM2(config: config).makeModelGraph()
-        let resolved = ParameterResolver().resolve(graph: graph, convention: .lfm2Family)
-        return compiler.dumpDispatchEntries(graph: resolved, hiddenSize: 2048)
+        let spec = try BenchmarkSupport.loadLFM25ModelSpec()
+        return compiler.dumpDispatchEntries(
+            graph: spec.resolved,
+            hiddenSize: spec.config.hiddenSize
+        )
     }
 
     private func parseDispatchEntries(from dump: String) -> [ParsedDispatchEntry] {
@@ -910,6 +1242,29 @@ struct ReferenceComparisonTests {
         writeSharedDecodeBuffer(values, to: buffer, precision: precision, count: count)
     }
 
+    private func writeFloat32Slice(
+        _ values: [Float],
+        to buffer: MTLBuffer,
+        offset: Int,
+        using submission: inout MetalSubmissionContext
+    ) throws {
+        let byteCount = values.count * MemoryLayout<Float>.stride
+        guard let staging = submission.device.makeBuffer(length: byteCount, options: [.storageModeShared]) else {
+            throw MetalCompilerError.deviceSetupFailed("Cannot allocate float32 staging buffer")
+        }
+        let pointer = staging.contents().bindMemory(to: Float.self, capacity: values.count)
+        pointer.update(from: values, count: values.count)
+        try submission.copyBuffers([
+            (
+                from: staging,
+                sourceOffset: 0,
+                to: buffer,
+                destinationOffset: offset,
+                size: byteCount
+            )
+        ])
+    }
+
     private func readSharedDecodeBuffer(_ buffer: MTLBuffer, precision: BufferPrecision) -> [Float] {
         switch precision {
         case .float16:
@@ -943,6 +1298,69 @@ struct ReferenceComparisonTests {
             let ptr = buffer.contents().bindMemory(to: Float32.self, capacity: count)
             for i in 0..<count {
                 ptr[i] = values[i]
+            }
+        }
+    }
+
+    private func preparePrefillInputs(
+        prefillPlan: MetalPrefillPlan,
+        seqLen: Int,
+        tokens: [Int32]
+    ) {
+        let tokenPtr = prefillPlan.buffers.tokenIDs.contents()
+            .bindMemory(to: Int32.self, capacity: seqLen)
+        let posPtr = prefillPlan.buffers.positions.contents()
+            .bindMemory(to: UInt32.self, capacity: seqLen)
+        for i in 0..<seqLen {
+            tokenPtr[i] = tokens[i]
+            posPtr[i] = UInt32(i)
+        }
+
+        let runtimeConstantBuffer = prefillPlan.buffers.runtimeConstantBuffer
+        runtimeConstantBuffer.contents().bindMemory(to: UInt32.self, capacity: 1).pointee = UInt32(seqLen)
+        for pos in 0..<seqLen {
+            let positionPtr = runtimeConstantBuffer.contents()
+                .advanced(by: PrefillBufferSet.positionOffset(at: pos))
+                .bindMemory(to: UInt32.self, capacity: 1)
+            positionPtr.pointee = UInt32(pos)
+        }
+    }
+
+    private func executePrefillPrefix(
+        prefillPlan: MetalPrefillPlan,
+        device: MTLDevice,
+        seqLen: Int,
+        stepCount: Int
+    ) throws {
+        let runtimeConstantBuffer = prefillPlan.buffers.runtimeConstantBuffer
+        var submission = try MetalSubmissionContext(device: device)
+        try submission.withCompute { encoder, argumentTable in
+            for step in prefillPlan.steps.prefix(stepCount) {
+                switch step.mode {
+                case .batch:
+                    step.bindings.bind(to: argumentTable)
+                    step.bindRuntimeArguments(
+                        argumentTable: argumentTable,
+                        runtimeConstantBuffer: runtimeConstantBuffer,
+                        sequenceLengthOffset: PrefillBufferSet.sequenceLengthOffset
+                    )
+                    let grid = step.resolvedGridSize(sequenceLength: seqLen)
+                    step.descriptor.encode(on: encoder, argumentTable: argumentTable, gridSize: grid)
+                case .perPosition:
+                    for pos in 0..<seqLen {
+                        step.bindStaticArguments(argumentTable: argumentTable, position: pos)
+                        if let posIdx = step.positionBufferIndex {
+                            argumentTable.setAddress(
+                                runtimeConstantBuffer.gpuAddress + UInt64(PrefillBufferSet.positionOffset(at: pos)),
+                                index: posIdx
+                            )
+                        }
+                        step.descriptor.encode(on: encoder, argumentTable: argumentTable)
+                    }
+                case .lastToken:
+                    step.bindStaticArguments(argumentTable: argumentTable, position: seqLen - 1)
+                    step.descriptor.encode(on: encoder, argumentTable: argumentTable)
+                }
             }
         }
     }

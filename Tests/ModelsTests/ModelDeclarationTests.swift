@@ -1,5 +1,6 @@
 import Testing
 @testable import LMArchitecture
+@testable import LMIR
 @testable import ModelDeclarations
 
 @Suite("Model Declaration Tests", .tags(.unit))
@@ -96,7 +97,7 @@ struct ModelDeclarationTests {
         #expect(attrs.rope?.mropeAxes != nil)
         #expect(attrs.rope?.mropeAxes?.sections == [11, 11, 10])
         #expect(attrs.rope?.mropeAxes?.interleaved == true)
-        #expect(attrs.qkNorm == .rmsNorm)
+        #expect(attrs.qkNorm == .rmsNormUnitOffset)
     }
 
     @Test("Qwen35 declaration is deterministic")
@@ -126,6 +127,7 @@ struct ModelDeclarationTests {
 
         var slidingAttentionCount = 0
         var fullAttentionCount = 0
+        var validatedSlidingWindow = false
         traverse(graph.rootRegion) { operation in
             guard case .primitive(let rawAttributes) = operation.kind,
                   let attributes = rawAttributes as? AttentionAttributes else {
@@ -135,11 +137,64 @@ struct ModelDeclarationTests {
                 fullAttentionCount += 1
             } else {
                 slidingAttentionCount += 1
+                if validatedSlidingWindow == false {
+                    #expect(attributes.window?.left == 512)
+                    #expect(attributes.window?.right == 0)
+                    validatedSlidingWindow = true
+                }
             }
         }
 
         #expect(slidingAttentionCount == 28, "Expected 28 sliding attention layers")
         #expect(fullAttentionCount == 7, "Expected 7 full attention layers")
+        #expect(validatedSlidingWindow)
+    }
+
+    @Test("Gemma4 full-attention keeps proportional RoPE metadata")
+    func gemma4FullAttentionRopeDimension() throws {
+        let graph = try Gemma4(config: TestConfigs.gemma4E2B).makeModelGraph()
+
+        var fullAttentionAttributes: [AttentionAttributes] = []
+        traverse(graph.rootRegion) { operation in
+            guard case .primitive(let rawAttributes) = operation.kind,
+                  let attributes = rawAttributes as? AttentionAttributes,
+                  attributes.window == nil else {
+                return
+            }
+            fullAttentionAttributes.append(attributes)
+        }
+
+        #expect(fullAttentionAttributes.isEmpty == false)
+        for attributes in fullAttentionAttributes {
+            #expect(attributes.headDimension == 512)
+            #expect(attributes.rope?.dimension == 128)
+            #expect(attributes.rope?.scaling?.kind == .custom("proportional"))
+            #expect(attributes.valueProjectionSource == .keyProjection)
+        }
+    }
+
+    @Test("Gemma4 decoder RMSNorms keep explicit checkpoint scales")
+    func gemma4DecoderNormsKeepExplicitCheckpointScales() throws {
+        let graph = try Gemma4(config: TestConfigs.gemma4E2B).makeModelGraph()
+
+        var regularNormCount = 0
+        var attentionQKNormCount = 0
+        traverse(graph.rootRegion) { operation in
+            guard case .primitive(let rawAttributes) = operation.kind else {
+                return
+            }
+            if let attributes = rawAttributes as? RMSNormAttributes {
+                #expect(attributes.weightBias == 0)
+                regularNormCount += 1
+            }
+            if let attributes = rawAttributes as? AttentionAttributes,
+               attributes.qkNorm == .rmsNorm {
+                attentionQKNormCount += 1
+            }
+        }
+
+        #expect(regularNormCount == 141, "Expected 4 decoder RMSNorms per layer plus one final RMSNorm")
+        #expect(attentionQKNormCount == 35, "Expected Gemma4 q/k norm to use explicit checkpoint scales in every layer")
     }
 
     @Test("Gemma4 emits one per-layer input residual per decoder layer")
@@ -635,7 +690,7 @@ private enum TestConfigs {
         globalKVHeads: nil,
         numKVSharedLayers: 20,
         useDoubleWideMLP: true,
-        attentionKEqualsV: false,
+        attentionKEqualsV: true,
         fullAttentionRopeTheta: 1_000_000.0,
         fullAttentionPartialRotaryFactor: 0.25,
         fullAttentionRoPEScaling: RoPEScaling(kind: .custom("proportional"), factor: 1.0)

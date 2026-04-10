@@ -1,7 +1,9 @@
 import Foundation
 import Metal
 import Testing
+import LMIR
 @testable import MetalCompiler
+@testable import SwiftLM
 
 /// Correctness tests for RotorQuant (Clifford Cl(3,0) rotor rotation + QJL correction).
 ///
@@ -83,6 +85,79 @@ struct RotorQuantCorrectnessTests {
             valueQuantizationScheme: .fp16RowMajor,
             kvHeadCount: 8, headDimension: 64, maximumSequenceLength: 1024)
         #expect(!noRotor.usesRotorQuant)
+    }
+
+    @Test("InferencePolicy.default stays automatic until graph resolution")
+    func defaultInferencePolicyStaysAutomatic() {
+        let policy = InferencePolicy.default
+        #expect(policy.maximumSequenceLength == 4096)
+        #expect(!policy.kvCache.usesRotorQuant)
+        #expect(policy.kvCache.keyScheme == .automatic)
+        #expect(policy.kvCache.valueScheme == .automatic)
+    }
+
+    @Test("ModelBundleLoader resolves default policy to RotorQuant only for plain transformer attention graphs")
+    func loaderResolvesModelAwareDefault() {
+        let noAttentionGraph = ModelGraph(rootRegion: Region())
+        let noAttentionPolicy = ModelBundleLoader.resolveInferencePolicy(.default, for: noAttentionGraph)
+        #expect(!noAttentionPolicy.kvCache.usesRotorQuant)
+
+        let attentionGraph = ModelGraph(
+            rootRegion: Region(
+                operations: [
+                    Operation(
+                        key: OperationKey(rawValue: 0),
+                        kind: .primitive(
+                            AttentionAttributes(
+                                hiddenSize: 64,
+                                headCount: 8,
+                                kvHeadCount: 8,
+                                headDimension: 8
+                            )
+                        )
+                    )
+                ]
+            )
+        )
+        let attentionPolicy = ModelBundleLoader.resolveInferencePolicy(.default, for: attentionGraph)
+        #expect(attentionPolicy.kvCache.usesRotorQuant)
+        #expect(attentionPolicy.kvCache.keyScheme == .fixed(.rotorQ4Group64ScaleF16))
+        #expect(attentionPolicy.kvCache.valueScheme == .fixed(.rotorQ4Group64ScaleF16))
+
+        let hybridGraph = ModelGraph(
+            rootRegion: Region(
+                operations: [
+                    Operation(
+                        key: OperationKey(rawValue: 0),
+                        kind: .primitive(
+                            StateSpaceAttributes(
+                                hiddenSize: 64,
+                                numHeads: 8,
+                                groupCount: 4,
+                                keyHeadDim: 8,
+                                valueHeadDim: 8,
+                                convKernelSize: 4,
+                                variant: "delta_net",
+                                computeDType: .float32
+                            )
+                        )
+                    ),
+                    Operation(
+                        key: OperationKey(rawValue: 1),
+                        kind: .primitive(
+                            AttentionAttributes(
+                                hiddenSize: 64,
+                                headCount: 8,
+                                kvHeadCount: 8,
+                                headDimension: 8
+                            )
+                        )
+                    )
+                ]
+            )
+        )
+        let hybridPolicy = ModelBundleLoader.resolveInferencePolicy(.default, for: hybridGraph)
+        #expect(!hybridPolicy.kvCache.usesRotorQuant)
     }
 
     @Test("Rotor parameter buffer sizing is consistent")

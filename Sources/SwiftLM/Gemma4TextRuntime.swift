@@ -14,13 +14,15 @@ final class Gemma4TextRuntime {
 
     func tokenEmbeddings(tokenIDs: [Int]) throws -> [[Float]] {
         let hiddenSize = config.hiddenSize
-        let table = try weights.floatTensor(named: "model.language_model.embed_tokens.weight")
-        return try gatherRows(
-            table: table,
+        let scale = Float(hiddenSize).squareRoot()
+        return try weights.gatherRows(
+            named: "model.language_model.embed_tokens.weight",
             rowCount: config.vocabSize,
             rowWidth: hiddenSize,
             indices: tokenIDs
-        )
+        ).map { row in
+            row.map { $0 * scale }
+        }
     }
 
     func buildPrefillPerLayerInputs(
@@ -34,15 +36,15 @@ final class Gemma4TextRuntime {
             throw ModelBundleLoaderError.invalidConfig("Gemma4 prompt embedding count mismatch")
         }
 
-        let perLayerEmbeddingTable = try weights.floatTensor(
-            named: "model.language_model.embed_tokens_per_layer.weight"
-        )
-        let gatheredPerLayer = try gatherRows(
-            table: perLayerEmbeddingTable,
+        let perLayerEmbeddingScale = Float(perLayerSize).squareRoot()
+        let gatheredPerLayer = try weights.gatherRows(
+            named: "model.language_model.embed_tokens_per_layer.weight",
             rowCount: config.vocabSizePerLayerInput ?? config.vocabSize,
             rowWidth: layerCount * perLayerSize,
             indices: tokenIDs
-        )
+        ).map { row in
+            row.map { $0 * perLayerEmbeddingScale }
+        }
 
         let flattenedPromptEmbeddings = promptEmbeddings.flatMap { $0 }
         let perLayerProjectionWeight = try weights.floatTensor(
@@ -106,24 +108,6 @@ final class Gemma4TextRuntime {
             throw ModelBundleLoaderError.invalidConfig("Gemma4 hidden_size_per_layer_input is required")
         }
         return value
-    }
-
-    private func gatherRows(
-        table: [Float],
-        rowCount: Int,
-        rowWidth: Int,
-        indices: [Int]
-    ) throws -> [[Float]] {
-        guard table.count == rowCount * rowWidth else {
-            throw ModelBundleLoaderError.invalidConfig("Gemma4 tensor shape does not match expected row-major layout")
-        }
-        return try indices.map { index in
-            guard index >= 0, index < rowCount else {
-                throw ModelBundleLoaderError.invalidConfig("Gemma4 token ID \(index) is out of range")
-            }
-            let start = index * rowWidth
-            return Array(table[start..<(start + rowWidth)])
-        }
     }
 
     private func rmsNorm(

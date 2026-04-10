@@ -10,15 +10,28 @@ struct MetalKernelNameResolver {
         guard let stafWeightStore else { return .float16 }
         for name in stafWeightStore.entries.keys {
             if let info = stafWeightStore.tensor(for: name) {
-                return info.format.schemeIdentifier == .bf16RowMajor ? .bfloat16 : .float16
+                switch info.format.schemeIdentifier {
+                case .bf16RowMajor:
+                    return .bfloat16
+                case .fp16RowMajor:
+                    return .float16
+                default:
+                    continue
+                }
             }
         }
         return .float16
     }
 
     func preferredDecodeBufferPrecision(for weightFormat: WeightFormat) -> BufferPrecision {
-        _ = weightFormat
-        return .float16
+        switch weightFormat {
+        case .bfloat16:
+            return .bfloat16
+        case .float32:
+            return .float32
+        case .float16, .quantized4Bit, .quantized8Bit:
+            return .float16
+        }
     }
 
     func resolvedInput2048SourcePolicy(
@@ -73,7 +86,13 @@ struct MetalKernelNameResolver {
         )
 
         switch entry.kind {
-        case .projection(let projection, _):
+        case .projection(let projection, let isOutput):
+            if isPrefill,
+               isOutput,
+               projection.field == "weight",
+               projection.outputDimension > projection.inputDimension {
+                return isBF16 ? "gemv_bf16_f32s" : "gemv_f32s"
+            }
             if let binding = entry.parameterBindings.first(where: { $0.role == projection.field }),
                let stafWeightStore,
                let tensorInfo = stafWeightStore.tensor(for: binding.tensorName) {
@@ -85,7 +104,7 @@ struct MetalKernelNameResolver {
                    ) {
                     let weightFormat: WeightFormat = tensorInfo.format.schemeIdentifier == .bf16RowMajor
                         ? .bfloat16
-                        : .float16
+                        : (tensorInfo.format.schemeIdentifier == .fp32RowMajor ? .float32 : .float16)
                     if let sourcePolicy = resolvedInput2048SourcePolicy(
                         for: projection,
                         entry: entry,
@@ -164,7 +183,18 @@ struct MetalKernelNameResolver {
             return weightFormat == .bfloat16 ? baseName + "_bf16" : baseName
 
         case .batchedProjection(let batched):
-            return "batched_gemv\(batched.projections.count)" + bf16Suffix
+            let resolvedWeightFormat: WeightFormat
+            if let firstProjection = batched.projections.first {
+                resolvedWeightFormat = resolveWeightFormat(
+                    forRole: firstProjection.field,
+                    entry: entry,
+                    fallback: kernelContext.weightFormat
+                )
+            } else {
+                resolvedWeightFormat = kernelContext.weightFormat
+            }
+            return "batched_gemv\(batched.projections.count)"
+                + (resolvedWeightFormat == .bfloat16 ? "_bf16" : "")
 
         case .batchedFragment(let batch):
             let fragmentWeightFormat = weightFormatResolver.resolve(
@@ -212,6 +242,28 @@ struct MetalKernelNameResolver {
             return .expanded8192(weightFormat: weightFormat)
         default:
             return nil
+        }
+    }
+
+    private func resolveWeightFormat(
+        forRole role: String,
+        entry: DispatchEntry,
+        fallback: WeightFormat
+    ) -> WeightFormat {
+        guard
+            let stafWeightStore,
+            let binding = entry.parameterBindings.first(where: { $0.role == role }),
+            let tensorInfo = stafWeightStore.tensor(for: binding.tensorName)
+        else {
+            return fallback
+        }
+        switch tensorInfo.format.schemeIdentifier {
+        case .bf16RowMajor:
+            return .bfloat16
+        case .fp32RowMajor:
+            return .float32
+        default:
+            return .float16
         }
     }
 }

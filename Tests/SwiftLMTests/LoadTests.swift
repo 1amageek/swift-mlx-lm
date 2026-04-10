@@ -163,6 +163,7 @@ struct LoadTests {
             "num_kv_shared_layers": 20,
             "use_double_wide_mlp": true,
             "attention_k_eq_v": false,
+            "final_logit_softcapping": 30.0,
             "rope_parameters": {
               "sliding_attention": {
                 "rope_theta": 10000.0,
@@ -190,6 +191,7 @@ struct LoadTests {
         #expect(config.globalHeadDim == 512)
         #expect(config.numKVSharedLayers == 20)
         #expect(config.useDoubleWideMLP == true)
+        #expect(config.finalLogitSoftcapping == 30.0)
         #expect(config.fullAttentionRopeTheta == 1_000_000.0)
         #expect(config.fullAttentionPartialRotaryFactor == 0.25)
         #expect(config.fullAttentionRoPEScaling?.kind == .custom("proportional"))
@@ -216,7 +218,7 @@ struct LoadTests {
             globalKVHeads: nil,
             numKVSharedLayers: 1,
             useDoubleWideMLP: true,
-            attentionKEqualsV: false,
+            attentionKEqualsV: true,
             fullAttentionRopeTheta: 1_000_000.0,
             fullAttentionPartialRotaryFactor: 0.25,
             fullAttentionRoPEScaling: RoPEScaling(kind: .custom("proportional"), factor: 1.0)
@@ -236,11 +238,13 @@ struct LoadTests {
         #expect(firstLayerBindings.contains("model.language_model.layers.0.pre_feedforward_layernorm.weight"))
         #expect(firstLayerBindings.contains("model.language_model.layers.0.self_attn.q_proj.weight"))
         #expect(firstLayerBindings.contains("model.language_model.layers.0.self_attn.k_norm.weight"))
+        #expect(firstLayerBindings.contains("model.language_model.layers.0.self_attn.v_proj.weight"))
         #expect(firstLayerBindings.contains("model.language_model.layers.0.mlp.gate_proj.weight"))
         #expect(firstLayerBindings.contains("model.language_model.layers.0.per_layer_input_gate.weight"))
         #expect(firstLayerBindings.contains("model.language_model.embed_tokens_per_layer.weight"))
         #expect(firstLayerBindings.contains("model.language_model.per_layer_model_projection.weight"))
         #expect(firstLayerBindings.contains("model.language_model.per_layer_projection_norm.weight"))
+
     }
 
     // MARK: - Step 5: IR Build

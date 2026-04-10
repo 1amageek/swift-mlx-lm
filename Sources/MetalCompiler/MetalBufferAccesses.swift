@@ -47,14 +47,29 @@ public struct MetalBufferAccesses: @unchecked Sendable {
         return Self(reads: regions, writes: regions)
     }
 
+    public func requiresBarrier(
+        after pendingReads: Set<BufferRegion>,
+        pendingWrites: Set<BufferRegion>
+    ) -> Bool {
+        let currentReadsOrWrites = reads.union(writes)
+        let writeAfterReadConflict = !pendingReads.isDisjoint(with: writes)
+        let readOrWriteAfterWriteConflict = !pendingWrites.isDisjoint(with: currentReadsOrWrites)
+        return writeAfterReadConflict || readOrWriteAfterWriteConflict
+    }
+
     public func requiresBarrier(after pendingWrites: Set<BufferRegion>) -> Bool {
-        !pendingWrites.isDisjoint(with: reads.union(writes))
+        requiresBarrier(after: [], pendingWrites: pendingWrites)
     }
 
     /// Returns the unique MTLBuffer objects that conflict with pending writes.
     /// Used to generate `memoryBarrier(resources:)` instead of `memoryBarrier(scope: .buffers)`.
-    public func conflictingResources(from pendingWrites: Set<BufferRegion>) -> [MTLResource] {
-        let conflicting = pendingWrites.intersection(reads.union(writes))
+    public func conflictingResources(
+        from pendingReads: Set<BufferRegion>,
+        pendingWrites: Set<BufferRegion>
+    ) -> [MTLResource] {
+        let writeAfterReadConflict = pendingReads.intersection(writes)
+        let readOrWriteAfterWriteConflict = pendingWrites.intersection(reads.union(writes))
+        let conflicting = writeAfterReadConflict.union(readOrWriteAfterWriteConflict)
         var seen = Set<ObjectIdentifier>()
         var resources: [MTLResource] = []
         for region in conflicting {
@@ -63,5 +78,9 @@ public struct MetalBufferAccesses: @unchecked Sendable {
             }
         }
         return resources
+    }
+
+    public func conflictingResources(from pendingWrites: Set<BufferRegion>) -> [MTLResource] {
+        conflictingResources(from: [], pendingWrites: pendingWrites)
     }
 }

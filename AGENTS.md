@@ -35,8 +35,81 @@ Important:
 
 - Prefer `xcodebuild test` over `swift test` for this repository.
 - For the Qwen3.5+ multimodal suites, prefer [`scripts/run-qwen35-vision-tests.sh`](/Users/1amageek/Desktop/swift-lm/scripts/run-qwen35-vision-tests.sh) over a single large `xcodebuild test` invocation. It uses `build-for-testing` once and then runs `test-without-building` suite-by-suite to reduce peak memory pressure.
+- For real-model / Metal-heavy / large-bundle tests, do not batch multiple expensive cases into one long `xcodebuild test` process when you are debugging correctness. Prefer `build-for-testing` once, then `test-without-building` one test at a time. This avoids cumulative GPU memory pressure, repeated model loads in a single process, and hard-to-diagnose xctest crashes.
+- When validating output quality for a specific model/policy combination, prefer one focused test per invocation over a whole suite. If you need multiple policy comparisons, run them as separate `test-without-building` invocations.
+- For repeated real-model loads inside tests/helpers, explicitly scope temporary objects tightly and prefer `autoreleasepool` on synchronous helper boundaries when possible. Do not keep multiple large `ModelContainer` / tokenizer / bundle instances alive longer than needed.
 - Metal-dependent tests and generated libraries are exercised via the package Xcode scheme.
 - Repository targets currently declare Swift tools `6.2` and platforms `.macOS(.v26)`, `.iOS(.v26)`, `.visionOS(.v26)` in [Package.swift](/Users/1amageek/Desktop/swift-lm/Package.swift).
+
+### Crash-Resistant Real-Model Test Procedure
+
+When correctness work touches Metal execution, real bundles, or large references, use this procedure instead of ad hoc suite runs:
+
+1. Build once with a hard timeout:
+   `perl -e 'alarm shift; exec @ARGV' 120 xcodebuild build-for-testing -scheme swift-lm-Package -destination 'platform=macOS'`
+2. Run one focused suite or one focused test process at a time:
+   `perl -e 'alarm shift; exec @ARGV' 120 xcodebuild test-without-building -scheme swift-lm-Package -destination 'platform=macOS' -only-testing:<Target>/<SuiteOrCase>`
+3. After each heavy invocation, inspect whether the process completed normally before starting the next one. Do not queue multiple `xcodebuild` test processes in parallel.
+4. If a suite restarts, crashes, or prints `unexpected exit`, stop batching immediately and reduce scope further.
+5. Do not add whole-plan snapshot capture to a heavy real-model test unless the narrow failure cannot be localized any other way.
+
+Rules:
+
+- Outer timeout must stay at `120` seconds or less. Prefer `30-60` seconds for lighter checks.
+- For correctness debugging, prefer this order:
+  1. contract test
+  2. focused real-model output test
+  3. optimizer equivalence test
+- If a suite is known to allocate large intermediates or many snapshots, split it before changing inference code.
+- If repeated synchronous helper loops load large models, add `autoreleasepool` boundaries before expanding test coverage.
+
+### Output-Correctness-First Procedure
+
+For Metal / compiler / runtime changes, validate in this order:
+
+1. fragment and planner contracts
+2. focused real-model output correctness
+3. regression tests across optimizer modes
+4. benchmark tests
+
+Rules:
+
+- Do not treat benchmark improvements as success unless output quality is already confirmed for the same model and prompt class.
+- If a model emits incorrect text, investigate correctness first. Performance numbers from that build are not meaningful.
+- For output verification, prefer deterministic or near-deterministic settings first (`temperature = 0` or fixed sampling state) before broader sampling checks.
+- When a bug appears only under sampling, inspect the host-sampling path separately from the argmax path. CPU-readable/shared logits and GPU-only/private logits must not be conflated.
+- Compare optimizer modes explicitly (`none`, `standard`, `aggressive` or their effective fallback) before concluding that a fragment or kernel is correct.
+
+### Fragment / Compiler Debugging Procedure
+
+`swift-lm` is assembled from fragments and compiler routing. A single broken fragment contract can corrupt the full model.
+
+When debugging model corruption:
+
+1. verify the declaration-level structure
+2. verify fragment expansion for the affected primitive
+3. verify dispatch-entry routing and output marking
+4. verify prefill and decode buffer-source selection
+5. verify shared/private CPU/GPU ownership assumptions
+6. only then inspect model-family specific logic
+
+Checklist:
+
+- Sibling projections that are conceptually parallel (`q_proj` / `k_proj` / `v_proj`, `gate_proj` / `up_proj`) must read from the same pre-projection source unless the design explicitly says otherwise.
+- Do not assume sequential dispatch entries imply sequential dataflow. The compiler must preserve graph semantics, not emission order.
+- Any CPU read path must use CPU-readable storage. `MTLBuffer.contents()` on `storageModePrivate` is invalid.
+- Scratch-slot routing must be validated with explicit stride/offset assertions. Hidden-size stride and slot-dimension stride are not interchangeable.
+- Residency, ownership, and submission are separate concerns. Do not hide resource lifetime assumptions inside unrelated runtime types.
+
+### Probe and Regression Guidance
+
+- Long-lived probes must be gated by `ENABLE_METAL_PROBES`. Do not tie production diagnostics to `DEBUG`.
+- Prefer probes at fragment boundaries, dispatch-entry routing boundaries, hidden/logits transfer points, and sampling entry points so corruption can be localized quickly.
+- Add a narrow regression test for every bug that crosses a layer boundary:
+  - fragment contract test
+  - optimizer-independence test
+  - buffer ownership or residency test
+  - real-model output test if the bug escaped unit coverage
 
 ## Module Structure
 
@@ -291,9 +364,14 @@ Use tests appropriate to the layer being changed.
 For performance or correctness work on Metal execution:
 
 - prefer focused target/test execution over full-suite runs
+- for crash-prone real-bundle checks, prefer `xcodebuild build-for-testing` once and then `xcodebuild test-without-building` per test case
 - for the Qwen3.5+ multimodal path, prefer the focused `SwiftLMTests` suites above over `-only-testing:SwiftLMTests`
 - keep timeouts in mind
 - when a test hangs, suspect cache/state completion, synchronization, or unfinished stream/state transitions before assuming the compiler is wrong
+- if a real-model test crashes or exhausts memory, reduce scope further before changing code: one bundle, one suite, one case per process
+- use `autoreleasepool` or tighter object lifetimes around repeated bundle loads and synchronous helper loops to avoid misleading crash signatures from retained GPU resources
+- add small contract tests for fragments, routing, stride/layout, and ownership rules; do not rely only on end-to-end text assertions
+- weak assertions such as `contains("tokyo")` are insufficient for correctness-sensitive regressions; prefer token IDs, exact prefix, or reference-aligned expectations where feasible
 
 ## Editing Guidance
 

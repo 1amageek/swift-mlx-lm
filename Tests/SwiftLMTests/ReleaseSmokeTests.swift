@@ -2,7 +2,7 @@ import Foundation
 import Testing
 @testable import SwiftLM
 
-@Suite("Release Smoke")
+@Suite("Release Smoke", .serialized)
 struct ReleaseSmokeTests {
     private static let localModelDirectory = URL(
         fileURLWithPath: "/Users/1amageek/Desktop/swift-lm/TestData/LFM2.5-1.2B-Thinking"
@@ -55,39 +55,21 @@ struct ReleaseSmokeTests {
         let loader = ModelBundleLoader()
         let container = try await loader.load(directory: localModelDirectory)
         let prepared = try await container.prepare(
-            input: ModelInput(prompt: "What is the capital of Japan? Answer briefly.")
+            input: ModelInput(prompt: RealOutputAssertionSupport.strictCapitalPrompt)
         )
         let executable = try container.makeExecutablePrompt(from: prepared)
-        let promptState = try container.makePromptState(prompt: executable)
-
-        var chunks: [String] = []
-        var completion: CompletionInfo?
-        for await generation in try container.generate(
-            from: promptState,
-            parameters: GenerateParameters(
-                maxTokens: 64,
-                streamChunkTokenCount: 1,
-                temperature: 0
-            )
-        ) {
-            if let chunk = generation.chunk {
-                chunks.append(chunk)
-            }
-            if let info = generation.info {
-                completion = info
-            }
-        }
-
-        let output = chunks.joined()
-        print("[LFM real text output] \(output)")
-        if let completion {
-            print("[LFM] tokens=\(completion.tokenCount) speed=\(String(format: "%.1f", completion.tokensPerSecond)) tok/s")
-        }
-
-        #expect(output.localizedCaseInsensitiveContains("tokyo"))
+        let comparison = try RealOutputAssertionSupport.assertGreedyDirectMatchesPromptState(
+            container: container,
+            prompt: executable,
+            label: "LFM text greedy"
+        )
+        RealOutputAssertionSupport.assertStartsWithTokyo(
+            comparison.directText,
+            label: "LFM text greedy"
+        )
     }
 
-    @Test("Local LFM chat prompt eventually mentions Tokyo", .timeLimit(.minutes(2)))
+    @Test("Local LFM chat prompt starts a strict factual answer with Tokyo", .timeLimit(.minutes(2)))
     func localBundleCapitalOfJapanChatOutput() async throws {
         guard let localModelDirectory = readableLocalModelDirectoryOrSkip() else { return }
 
@@ -95,28 +77,37 @@ struct ReleaseSmokeTests {
         let container = try await loader.load(directory: localModelDirectory)
         let prepared = try await container.prepare(
             input: ModelInput(chat: [
-                .user([.text("What is the capital of Japan? Answer briefly.")])
+                .user([.text(RealOutputAssertionSupport.strictCapitalPrompt)])
             ])
         )
         let executable = try container.makeExecutablePrompt(from: prepared)
-
-        var chunks: [String] = []
-        for await generation in try container.generate(
+        let comparison = try RealOutputAssertionSupport.assertGreedyDirectMatchesPromptState(
+            container: container,
             prompt: executable,
-            parameters: GenerateParameters(
-                maxTokens: 64,
-                streamChunkTokenCount: 1,
-                temperature: 0
-            )
-        ) {
-            if let chunk = generation.chunk {
-                chunks.append(chunk)
-            }
-        }
+            label: "LFM chat greedy"
+        )
+        RealOutputAssertionSupport.assertStartsWithTokyo(
+            comparison.directText,
+            label: "LFM chat greedy"
+        )
+    }
 
-        let output = chunks.joined()
-        print("[LFM chat text output] \(output)")
-        #expect(output.localizedCaseInsensitiveContains("tokyo"))
+    @Test("Local LFM prompt-state sampling matches direct sampling", .timeLimit(.minutes(2)))
+    func localBundlePromptStateSamplingMatchesDirect() async throws {
+        guard let localModelDirectory = readableLocalModelDirectoryOrSkip() else { return }
+
+        let loader = ModelBundleLoader()
+        let container = try await loader.load(directory: localModelDirectory)
+        let prepared = try await container.prepare(
+            input: ModelInput(prompt: RealOutputAssertionSupport.strictCapitalPrompt)
+        )
+        let executable = try container.makeExecutablePrompt(from: prepared)
+
+        try RealOutputAssertionSupport.assertPromptStateSamplingMatchesDirect(
+            container: container,
+            prompt: executable,
+            label: "LFM sampling"
+        )
     }
 
     @Test("Text-only bundle rejects multimodal input", .timeLimit(.minutes(2)))

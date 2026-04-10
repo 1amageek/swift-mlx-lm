@@ -106,6 +106,9 @@ public struct ModelConfig: Sendable {
     /// RoPE scaling metadata for Gemma 4 full-attention layers.
     public let fullAttentionRoPEScaling: RoPEScaling?
 
+    /// Optional final output logit soft-capping applied before sampling.
+    public let finalLogitSoftcapping: Float?
+
     // MARK: Dense/MoE Layer Boundary
 
     /// Number of leading layers that use dense MLP instead of MoE.
@@ -153,6 +156,7 @@ public struct ModelConfig: Sendable {
             fullAttentionRopeTheta: fullAttentionRopeTheta,
             fullAttentionPartialRotaryFactor: fullAttentionPartialRotaryFactor,
             fullAttentionRoPEScaling: fullAttentionRoPEScaling,
+            finalLogitSoftcapping: finalLogitSoftcapping,
             numDenseLayers: numDenseLayers,
             mropeAxes: axes
         )
@@ -198,6 +202,7 @@ public struct ModelConfig: Sendable {
         fullAttentionRopeTheta: Float? = nil,
         fullAttentionPartialRotaryFactor: Float? = nil,
         fullAttentionRoPEScaling: RoPEScaling? = nil,
+        finalLogitSoftcapping: Float? = nil,
         numDenseLayers: Int = 0,
         mropeAxes: MRoPEAxes? = nil
     ) {
@@ -240,6 +245,7 @@ public struct ModelConfig: Sendable {
         self.fullAttentionRopeTheta = fullAttentionRopeTheta
         self.fullAttentionPartialRotaryFactor = fullAttentionPartialRotaryFactor
         self.fullAttentionRoPEScaling = fullAttentionRoPEScaling
+        self.finalLogitSoftcapping = finalLogitSoftcapping
         self.numDenseLayers = numDenseLayers
         self.mropeAxes = mropeAxes
     }

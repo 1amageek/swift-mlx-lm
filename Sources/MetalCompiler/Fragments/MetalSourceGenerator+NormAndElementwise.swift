@@ -20,6 +20,7 @@ extension MetalSourceGenerator {
         name: String,
         dimension: Int,
         epsilon: Float,
+        weightBias: Float = 0,
         bufferPrecision: BufferPrecision,
         weightFormat: WeightFormat,
         isSequence: Bool = true
@@ -36,7 +37,8 @@ extension MetalSourceGenerator {
                 device \(bt)* output            [[buffer(2)]],
                 constant uint& dimension        [[buffer(3)]],
                 constant float& epsilon         [[buffer(4)]],
-                constant uint& sequenceLength   [[buffer(5)]],
+                constant float& weightBias      [[buffer(5)]],
+                constant uint& sequenceLength   [[buffer(6)]],
                 uint gid_x                      [[threadgroup_position_in_grid]],
                 uint tid                        [[thread_index_in_threadgroup]],
                 uint threadgroupSize            [[threads_per_threadgroup]]
@@ -68,23 +70,26 @@ extension MetalSourceGenerator {
                 float scale = shared[0];
                 device \(bt)* outRow = output + seqPos * dimension;
                 for (uint i = tid; i < dimension; i += threadgroupSize) {
-                    outRow[i] = \(bt)(float(row[i]) * scale * \(readWeight("weight[i]")));
+                    float affine = \(readWeight("weight[i]")) + weightBias;
+                    outRow[i] = \(bt)(float(row[i]) * scale * affine);
                 }
             }
             """
         } else {
             return """
             kernel void \(name)(
-                device \(bt)* data              [[buffer(0)]],
+                device const \(bt)* input       [[buffer(0)]],
                 device const \(wt)* weight      [[buffer(1)]],
-                constant uint& dimension        [[buffer(2)]],
-                constant float& epsilon         [[buffer(3)]],
+                device \(bt)* output            [[buffer(2)]],
+                constant uint& dimension        [[buffer(3)]],
+                constant float& epsilon         [[buffer(4)]],
+                constant float& weightBias      [[buffer(5)]],
                 uint tid                        [[thread_index_in_threadgroup]],
                 uint threadgroupSize            [[threads_per_threadgroup]]
             ) {
                 float sumSquared = 0.0f;
                 for (uint i = tid; i < dimension; i += threadgroupSize) {
-                    float v = float(data[i]);
+                    float v = float(input[i]);
                     sumSquared += v * v;
                 }
                 sumSquared = simd_sum(sumSquared);
@@ -104,7 +109,8 @@ extension MetalSourceGenerator {
 
                 float scale = shared[0];
                 for (uint i = tid; i < dimension; i += threadgroupSize) {
-                    data[i] = \(bt)(float(data[i]) * scale * \(readWeight("weight[i]")));
+                    float affine = \(readWeight("weight[i]")) + weightBias;
+                    output[i] = \(bt)(float(input[i]) * scale * affine);
                 }
             }
             """
@@ -124,20 +130,22 @@ extension MetalSourceGenerator {
 
         return """
         struct \(inputStructName) {
-            device \(bt)* data [[id(0)]];
+            device const \(bt)* input [[id(0)]];
             device const \(wt)* weight [[id(1)]];
+            device \(bt)* output [[id(2)]];
         };
 
         kernel void \(name)(
             constant \(inputStructName)& args         [[buffer(\(argumentBufferIndex))]],
-            constant uint& dimension                  [[buffer(2)]],
-            constant float& epsilon                   [[buffer(3)]],
+            constant uint& dimension                  [[buffer(3)]],
+            constant float& epsilon                   [[buffer(4)]],
+            constant float& weightBias                [[buffer(5)]],
             uint tid                                  [[thread_index_in_threadgroup]],
             uint threadgroupSize                      [[threads_per_threadgroup]]
         ) {
             float sumSquared = 0.0f;
             for (uint i = tid; i < dimension; i += threadgroupSize) {
-                float v = float(args.data[i]);
+                float v = float(args.input[i]);
                 sumSquared += v * v;
             }
             sumSquared = simd_sum(sumSquared);
@@ -157,7 +165,8 @@ extension MetalSourceGenerator {
 
             float scale = shared[0];
             for (uint i = tid; i < dimension; i += threadgroupSize) {
-                args.data[i] = \(bt)(float(args.data[i]) * scale * \(readWeight("args.weight[i]")));
+                float affine = \(readWeight("args.weight[i]")) + weightBias;
+                args.output[i] = \(bt)(float(args.input[i]) * scale * affine);
             }
         }
         """
@@ -289,6 +298,51 @@ extension MetalSourceGenerator {
         """
     }
 
+    public static func generateScalarMultiply(
+        name: String,
+        bufferPrecision: BufferPrecision,
+        weightFormat: WeightFormat,
+        isSequence: Bool
+    ) -> String {
+        let bt = bufferPrecision.metalType
+        let wt = weightFormat.bufferType
+        let scalar = weightFormat.readExpression("weight[0]")
+
+        if isSequence {
+            return """
+            kernel void \(name)(
+                device const \(bt)* input        [[buffer(0)]],
+                device const \(wt)* weight       [[buffer(1)]],
+                device \(bt)* output             [[buffer(2)]],
+                constant uint& dimension         [[buffer(3)]],
+                constant uint& sequenceLength    [[buffer(4)]],
+                uint2 gid                        [[thread_position_in_grid]]
+            ) {
+                uint i = gid.x;
+                uint seqPos = gid.y;
+                if (i >= dimension || seqPos >= sequenceLength) return;
+                uint idx = seqPos * dimension + i;
+                float scale = \(scalar);
+                output[idx] = \(bt)(float(input[idx]) * scale);
+            }
+            """
+        }
+
+        return """
+        kernel void \(name)(
+            device const \(bt)* input        [[buffer(0)]],
+            device const \(wt)* weight       [[buffer(1)]],
+            device \(bt)* output             [[buffer(2)]],
+            constant uint& count             [[buffer(3)]],
+            uint gid                         [[thread_position_in_grid]]
+        ) {
+            if (gid >= count) return;
+            float scale = \(scalar);
+            output[gid] = \(bt)(float(input[gid]) * scale);
+        }
+        """
+    }
+
     /// Generate MSL source for buffer copy.
     public static func generateCopy(
         name: String,
@@ -404,6 +458,44 @@ extension MetalSourceGenerator {
         }
     }
 
+    public static func generateResidualAddInPlace(
+        name: String,
+        bufferPrecision: BufferPrecision,
+        isSequence: Bool = true
+    ) -> String {
+        let bt = bufferPrecision.metalType
+
+        if isSequence {
+            return """
+            kernel void \(name)(
+                device \(bt)* inputOutput        [[buffer(0)]],
+                device const \(bt)* residual     [[buffer(1)]],
+                constant uint& dimension         [[buffer(2)]],
+                constant uint& sequenceLength    [[buffer(3)]],
+                uint2 gid                        [[thread_position_in_grid]]
+            ) {
+                uint i = gid.x;
+                uint seqPos = gid.y;
+                if (i >= dimension || seqPos >= sequenceLength) return;
+                uint idx = seqPos * dimension + i;
+                inputOutput[idx] = \(bt)(float(inputOutput[idx]) + float(residual[idx]));
+            }
+            """
+        } else {
+            return """
+            kernel void \(name)(
+                device \(bt)* inputOutput        [[buffer(0)]],
+                device const \(bt)* residual     [[buffer(1)]],
+                constant uint& count             [[buffer(2)]],
+                uint gid                         [[thread_position_in_grid]]
+            ) {
+                if (gid >= count) return;
+                inputOutput[gid] = \(bt)(float(inputOutput[gid]) + float(residual[gid]));
+            }
+            """
+        }
+    }
+
     public static func generateResidualAddArgumentTableVariant(
         name: String,
         argumentBufferIndex: Int,
@@ -430,6 +522,31 @@ extension MetalSourceGenerator {
         """
     }
 
+    public static func generateResidualAddInPlaceArgumentTableVariant(
+        name: String,
+        argumentBufferIndex: Int,
+        bufferPrecision: BufferPrecision
+    ) -> String {
+        let bt = bufferPrecision.metalType
+        let inputStructName = "\(name)_args"
+
+        return """
+        struct \(inputStructName) {
+            device \(bt)* inputOutput [[id(0)]];
+            device const \(bt)* residual [[id(1)]];
+        };
+
+        kernel void \(name)(
+            constant \(inputStructName)& args         [[buffer(\(argumentBufferIndex))]],
+            constant uint& count                      [[buffer(2)]],
+            uint gid                                  [[thread_position_in_grid]]
+        ) {
+            if (gid >= count) return;
+            args.inputOutput[gid] = \(bt)(float(args.inputOutput[gid]) + float(args.residual[gid]));
+        }
+        """
+    }
+
     /// Generate sigmoid gate kernel.
     public static func generateSigmoidGate(
         name: String,
@@ -447,6 +564,114 @@ extension MetalSourceGenerator {
             if (gid >= dimension) return;
             float g = float(gate[gid]);
             output[gid] = \(bt)(float(input[gid]) * (1.0f / (1.0f + exp(-g))));
+        }
+        """
+    }
+
+    public static func generatePackedSigmoidGate(
+        name: String,
+        bufferPrecision: BufferPrecision,
+        isSequence: Bool = true
+    ) -> String {
+        let bt = bufferPrecision.metalType
+
+        if isSequence {
+            return """
+            kernel void \(name)(
+                device const \(bt)* input        [[buffer(0)]],
+                device const \(bt)* packed       [[buffer(1)]],
+                device \(bt)* output             [[buffer(2)]],
+                constant uint& dimension         [[buffer(3)]],
+                constant uint& headDimension     [[buffer(4)]],
+                constant uint& packedHeadStride  [[buffer(5)]],
+                constant uint& gateHeadOffset    [[buffer(6)]],
+                constant uint& packedRowStride   [[buffer(7)]],
+                constant uint& outputRowStride   [[buffer(8)]],
+                constant uint& sequenceLength    [[buffer(9)]],
+                uint2 gid                        [[thread_position_in_grid]]
+            ) {
+                uint i = gid.x;
+                uint seqPos = gid.y;
+                if (i >= dimension || seqPos >= sequenceLength) return;
+
+                uint headIndex = i / headDimension;
+                uint lane = i % headDimension;
+                uint packedBase = seqPos * packedRowStride;
+                uint outputBase = seqPos * outputRowStride;
+                float g = float(packed[packedBase + headIndex * packedHeadStride + gateHeadOffset + lane]);
+                output[outputBase + i] = \(bt)(float(input[outputBase + i]) * (1.0f / (1.0f + exp(-g))));
+            }
+            """
+        }
+
+        return """
+        kernel void \(name)(
+            device const \(bt)* input        [[buffer(0)]],
+            device const \(bt)* packed       [[buffer(1)]],
+            device \(bt)* output             [[buffer(2)]],
+            constant uint& dimension         [[buffer(3)]],
+            constant uint& headDimension     [[buffer(4)]],
+            constant uint& packedHeadStride  [[buffer(5)]],
+            constant uint& gateHeadOffset    [[buffer(6)]],
+            uint gid                         [[thread_position_in_grid]]
+        ) {
+            if (gid >= dimension) return;
+            uint headIndex = gid / headDimension;
+            uint lane = gid % headDimension;
+            float g = float(packed[headIndex * packedHeadStride + gateHeadOffset + lane]);
+            output[gid] = \(bt)(float(input[gid]) * (1.0f / (1.0f + exp(-g))));
+        }
+        """
+    }
+
+    public static func generatePackedQueryExtract(
+        name: String,
+        bufferPrecision: BufferPrecision,
+        isSequence: Bool = true
+    ) -> String {
+        let bt = bufferPrecision.metalType
+
+        if isSequence {
+            return """
+            kernel void \(name)(
+                device const \(bt)* packed       [[buffer(0)]],
+                device \(bt)* output             [[buffer(1)]],
+                constant uint& headCount         [[buffer(2)]],
+                constant uint& headDimension     [[buffer(3)]],
+                constant uint& packedRowStride   [[buffer(4)]],
+                constant uint& outputRowStride   [[buffer(5)]],
+                constant uint& sequenceLength    [[buffer(6)]],
+                uint2 gid                        [[thread_position_in_grid]]
+            ) {
+                uint element = gid.x;
+                uint seqPos = gid.y;
+                uint totalDimension = headCount * headDimension;
+                if (element >= totalDimension || seqPos >= sequenceLength) return;
+
+                uint headIndex = element / headDimension;
+                uint lane = element % headDimension;
+                uint packedBase = seqPos * packedRowStride;
+                uint outputBase = seqPos * outputRowStride;
+                uint packedIndex = packedBase + headIndex * (2 * headDimension) + lane;
+                output[outputBase + element] = packed[packedIndex];
+            }
+            """
+        }
+
+        return """
+        kernel void \(name)(
+            device const \(bt)* packed       [[buffer(0)]],
+            device \(bt)* output             [[buffer(1)]],
+            constant uint& headCount         [[buffer(2)]],
+            constant uint& headDimension     [[buffer(3)]],
+            uint gid                         [[thread_position_in_grid]]
+        ) {
+            uint totalDimension = headCount * headDimension;
+            if (gid >= totalDimension) return;
+
+            uint headIndex = gid / headDimension;
+            uint lane = gid % headDimension;
+            output[gid] = packed[headIndex * (2 * headDimension) + lane];
         }
         """
     }

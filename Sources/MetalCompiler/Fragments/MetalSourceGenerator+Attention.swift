@@ -5,7 +5,8 @@ extension MetalSourceGenerator {
 public static func generateQKNorm(
     name: String,
     bufferPrecision: BufferPrecision,
-    weightFormat: WeightFormat
+    weightFormat: WeightFormat,
+    weightBias: Float = 0
 ) -> String {
     let bt = bufferPrecision.metalType
     let wt = weightFormat.bufferType
@@ -18,6 +19,7 @@ public static func generateQKNorm(
         constant uint& headCount         [[buffer(2)]],
         constant uint& headDim           [[buffer(3)]],
         constant float& epsilon          [[buffer(4)]],
+        constant float& weightBias       [[buffer(5)]],
         uint headIndex                   [[threadgroup_position_in_grid]],
         uint tid                         [[thread_index_in_threadgroup]],
         uint threadgroupSize             [[threads_per_threadgroup]]
@@ -46,7 +48,8 @@ public static func generateQKNorm(
 
         float scale = shared[0];
         for (uint i = tid; i < headDim; i += threadgroupSize) {
-            data[offset + i] = \(bt)(float(data[offset + i]) * scale * \(readWeight("weight[i]")));
+            float affine = \(readWeight("weight[i]")) + weightBias;
+            data[offset + i] = \(bt)(float(data[offset + i]) * scale * affine);
         }
     }
     """
@@ -56,7 +59,8 @@ public static func generateQKNormArgumentTableVariant(
     name: String,
     argumentBufferIndex: Int,
     bufferPrecision: BufferPrecision,
-    weightFormat: WeightFormat
+    weightFormat: WeightFormat,
+    weightBias: Float = 0
 ) -> String {
     let bt = bufferPrecision.metalType
     let wt = weightFormat.bufferType
@@ -74,6 +78,7 @@ public static func generateQKNormArgumentTableVariant(
         constant uint& headCount                  [[buffer(2)]],
         constant uint& headDim                    [[buffer(3)]],
         constant float& epsilon                   [[buffer(4)]],
+        constant float& weightBias                [[buffer(5)]],
         uint headIndex                            [[threadgroup_position_in_grid]],
         uint tid                                  [[thread_index_in_threadgroup]],
         uint threadgroupSize                      [[threads_per_threadgroup]]
@@ -102,7 +107,8 @@ public static func generateQKNormArgumentTableVariant(
 
         float scale = shared[0];
         for (uint i = tid; i < headDim; i += threadgroupSize) {
-            args.data[offset + i] = \(bt)(float(args.data[offset + i]) * scale * \(readWeight("args.weight[i]")));
+            float affine = \(readWeight("args.weight[i]")) + weightBias;
+            args.data[offset + i] = \(bt)(float(args.data[offset + i]) * scale * affine);
         }
     }
     """
@@ -112,7 +118,8 @@ public static func generateQKNormArgumentTableVariant(
 public static func generateQKNormSeq(
     name: String,
     bufferPrecision: BufferPrecision,
-    weightFormat: WeightFormat
+    weightFormat: WeightFormat,
+    weightBias: Float = 0
 ) -> String {
     let bt = bufferPrecision.metalType
     let wt = weightFormat.bufferType
@@ -125,8 +132,9 @@ public static func generateQKNormSeq(
         constant uint& headCount         [[buffer(2)]],
         constant uint& headDimension     [[buffer(3)]],
         constant float& epsilon          [[buffer(4)]],
-        constant uint& sequenceLength    [[buffer(5)]],
-        constant uint& totalDimension    [[buffer(6)]],
+        constant float& weightBias       [[buffer(5)]],
+        constant uint& sequenceLength    [[buffer(6)]],
+        constant uint& totalDimension    [[buffer(7)]],
         uint2 gid                        [[threadgroup_position_in_grid]],
         uint tid                         [[thread_index_in_threadgroup]]
     ) {
@@ -151,7 +159,94 @@ public static func generateQKNormSeq(
 
         float rms = sharedRMS[0];
         for (uint i = tid; i < headDimension; i += SIMD_WIDTH) {
-            data[offset + i] = \(bt)(float(data[offset + i]) * rms * \(readWeight("weight[i]")));
+            float affine = \(readWeight("weight[i]")) + weightBias;
+            data[offset + i] = \(bt)(float(data[offset + i]) * rms * affine);
+        }
+    }
+    """
+}
+
+public static func generatePerHeadRMSNorm(
+    name: String,
+    bufferPrecision: BufferPrecision,
+    isSequence: Bool
+) -> String {
+    let bt = bufferPrecision.metalType
+
+    if isSequence {
+        return """
+        kernel void \(name)(
+            device \(bt)* data               [[buffer(0)]],
+            constant uint& headCount         [[buffer(1)]],
+            constant uint& headDimension     [[buffer(2)]],
+            constant float& epsilon          [[buffer(3)]],
+            constant uint& sequenceLength    [[buffer(4)]],
+            constant uint& totalDimension    [[buffer(5)]],
+            uint2 gid                        [[threadgroup_position_in_grid]],
+            uint tid                         [[thread_index_in_threadgroup]]
+        ) {
+            uint head = gid.x;
+            uint seqPos = gid.y;
+            if (head >= headCount || seqPos >= sequenceLength) return;
+
+            uint offset = seqPos * totalDimension + head * headDimension;
+
+            float sumSq = 0.0f;
+            for (uint i = tid; i < headDimension; i += SIMD_WIDTH) {
+                float v = float(data[offset + i]);
+                sumSq += v * v;
+            }
+            sumSq = simd_sum(sumSq);
+
+            threadgroup float sharedRMS[1];
+            if (tid == 0) {
+                sharedRMS[0] = rsqrt(sumSq / float(headDimension) + epsilon);
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+
+            float rms = sharedRMS[0];
+            for (uint i = tid; i < headDimension; i += SIMD_WIDTH) {
+                data[offset + i] = \(bt)(float(data[offset + i]) * rms);
+            }
+        }
+        """
+    }
+
+    return """
+    kernel void \(name)(
+        device \(bt)* data               [[buffer(0)]],
+        constant uint& headCount         [[buffer(1)]],
+        constant uint& headDimension     [[buffer(2)]],
+        constant float& epsilon          [[buffer(3)]],
+        uint headIndex                   [[threadgroup_position_in_grid]],
+        uint tid                         [[thread_index_in_threadgroup]],
+        uint threadgroupSize             [[threads_per_threadgroup]]
+    ) {
+        if (headIndex >= headCount) return;
+        uint offset = headIndex * headDimension;
+
+        float sumSq = 0.0f;
+        for (uint i = tid; i < headDimension; i += threadgroupSize) {
+            float v = float(data[offset + i]);
+            sumSq += v * v;
+        }
+        sumSq = simd_sum(sumSq);
+
+        threadgroup float shared[32];
+        if (tid % SIMD_WIDTH == 0) shared[tid / SIMD_WIDTH] = sumSq;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        if (tid == 0) {
+            float total = 0.0f;
+            uint sgCount = (threadgroupSize + SIMD_WIDTH - 1) / SIMD_WIDTH;
+            for (uint i = 0; i < sgCount; i++) total += shared[i];
+            shared[0] = rsqrt(total / float(headDimension) + epsilon);
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        float scale = shared[0];
+        for (uint i = tid; i < headDimension; i += threadgroupSize) {
+            data[offset + i] = \(bt)(float(data[offset + i]) * scale);
         }
     }
     """
@@ -167,7 +262,7 @@ public static func generateRoPE(
     let bt = bufferPrecision.metalType
 
     return """
-    inline uint \(name)_mrope_axis(
+    inline uint2 \(name)_mrope_mapping(
         uint halfDimIndex,
         uint temporalSections,
         uint heightSections,
@@ -175,16 +270,22 @@ public static func generateRoPE(
         bool interleaved
     ) {
         if (temporalSections == 0 && heightSections == 0 && widthSections == 0) {
-            return 0;
+            return uint2(0, halfDimIndex);
         }
         if (!interleaved) {
-            if (halfDimIndex < temporalSections) return 0;
-            if (halfDimIndex < temporalSections + heightSections) return 1;
-            return 2;
+            if (halfDimIndex < temporalSections) return uint2(0, halfDimIndex);
+            if (halfDimIndex < temporalSections + heightSections) {
+                return uint2(1, halfDimIndex - temporalSections);
+            }
+            return uint2(2, halfDimIndex - temporalSections - heightSections);
         }
-        if (halfDimIndex < heightSections * 3 && halfDimIndex % 3 == 1) return 1;
-        if (halfDimIndex < widthSections * 3 && halfDimIndex % 3 == 2) return 2;
-        return 0;
+        if ((halfDimIndex % 3) == 1 && halfDimIndex < heightSections * 3) {
+            return uint2(1, halfDimIndex);
+        }
+        if ((halfDimIndex % 3) == 2 && halfDimIndex < widthSections * 3) {
+            return uint2(2, halfDimIndex);
+        }
+        return uint2(0, halfDimIndex);
     }
 
     kernel void \(name)(
@@ -200,38 +301,47 @@ public static func generateRoPE(
         constant uint& heightSections        [[buffer(9)]],
         constant uint& widthSections         [[buffer(10)]],
         constant uint& mropeInterleaved      [[buffer(11)]],
+        constant uint& proportionalRoPE      [[buffer(12)]],
         uint headIndex                       [[threadgroup_position_in_grid]],
         uint tid                             [[thread_index_in_threadgroup]]
     ) {
-        const uint halfRopeDim = ropeDimension / 2;
-        if (tid >= halfRopeDim) return;
+        const bool useProportional = proportionalRoPE != 0;
+        const uint pairCount = useProportional ? (headDimension / 2) : (ropeDimension / 2);
+        const uint rotatedPairs = ropeDimension / 2;
+        if (tid >= pairCount) return;
 
-        const uint axis = \(name)_mrope_axis(
+        const uint2 ropeMapping = \(name)_mrope_mapping(
             tid,
             temporalSections,
             heightSections,
             widthSections,
             mropeInterleaved != 0
         );
+        const uint axis = ropeMapping.x;
         const uint position = positionAxesBuffer[axis];
-        const float theta = float(position) * pow(ropeBase, -2.0f * float(tid) / float(ropeDimension));
-        const float cosTheta = cos(theta);
-        const float sinTheta = sin(theta);
+        float cosTheta = 1.0f;
+        float sinTheta = 0.0f;
+        if (!useProportional || tid < rotatedPairs) {
+            const float thetaDenominator = useProportional ? float(headDimension) : float(ropeDimension);
+            const float theta = float(position) * pow(ropeBase, -2.0f * float(ropeMapping.y) / thetaDenominator);
+            cosTheta = cos(theta);
+            sinTheta = sin(theta);
+        }
 
         if (headIndex < headCount) {
             uint qOffset = headIndex * headDimension + tid;
             float q0 = float(query[qOffset]);
-            float q1 = float(query[qOffset + halfRopeDim]);
+            float q1 = float(query[qOffset + pairCount]);
             query[qOffset] = \(bt)(q0 * cosTheta - q1 * sinTheta);
-            query[qOffset + halfRopeDim] = \(bt)(q0 * sinTheta + q1 * cosTheta);
+            query[qOffset + pairCount] = \(bt)(q0 * sinTheta + q1 * cosTheta);
         }
 
         if (headIndex < kvHeadCount) {
             uint kOffset = headIndex * headDimension + tid;
             float k0 = float(key[kOffset]);
-            float k1 = float(key[kOffset + halfRopeDim]);
+            float k1 = float(key[kOffset + pairCount]);
             key[kOffset] = \(bt)(k0 * cosTheta - k1 * sinTheta);
-            key[kOffset + halfRopeDim] = \(bt)(k0 * sinTheta + k1 * cosTheta);
+            key[kOffset + pairCount] = \(bt)(k0 * sinTheta + k1 * cosTheta);
         }
     }
     """
@@ -252,7 +362,7 @@ public static func generateRoPEArgumentTableVariant(
         device const uint* positionAxesBuffer [[id(2)]];
     };
 
-    inline uint \(name)_mrope_axis(
+    inline uint2 \(name)_mrope_mapping(
         uint halfDimIndex,
         uint temporalSections,
         uint heightSections,
@@ -260,16 +370,22 @@ public static func generateRoPEArgumentTableVariant(
         bool interleaved
     ) {
         if (temporalSections == 0 && heightSections == 0 && widthSections == 0) {
-            return 0;
+            return uint2(0, halfDimIndex);
         }
         if (!interleaved) {
-            if (halfDimIndex < temporalSections) return 0;
-            if (halfDimIndex < temporalSections + heightSections) return 1;
-            return 2;
+            if (halfDimIndex < temporalSections) return uint2(0, halfDimIndex);
+            if (halfDimIndex < temporalSections + heightSections) {
+                return uint2(1, halfDimIndex - temporalSections);
+            }
+            return uint2(2, halfDimIndex - temporalSections - heightSections);
         }
-        if (halfDimIndex < heightSections * 3 && halfDimIndex % 3 == 1) return 1;
-        if (halfDimIndex < widthSections * 3 && halfDimIndex % 3 == 2) return 2;
-        return 0;
+        if ((halfDimIndex % 3) == 1 && halfDimIndex < heightSections * 3) {
+            return uint2(1, halfDimIndex);
+        }
+        if ((halfDimIndex % 3) == 2 && halfDimIndex < widthSections * 3) {
+            return uint2(2, halfDimIndex);
+        }
+        return uint2(0, halfDimIndex);
     }
 
     kernel void \(name)(
@@ -283,38 +399,47 @@ public static func generateRoPEArgumentTableVariant(
         constant uint& heightSections             [[buffer(9)]],
         constant uint& widthSections              [[buffer(10)]],
         constant uint& mropeInterleaved           [[buffer(11)]],
+        constant uint& proportionalRoPE           [[buffer(12)]],
         uint headIndex                            [[threadgroup_position_in_grid]],
         uint tid                                  [[thread_index_in_threadgroup]]
     ) {
-        const uint halfRopeDim = ropeDimension / 2;
-        if (tid >= halfRopeDim) return;
+        const bool useProportional = proportionalRoPE != 0;
+        const uint pairCount = useProportional ? (headDimension / 2) : (ropeDimension / 2);
+        const uint rotatedPairs = ropeDimension / 2;
+        if (tid >= pairCount) return;
 
-        const uint axis = \(name)_mrope_axis(
+        const uint2 ropeMapping = \(name)_mrope_mapping(
             tid,
             temporalSections,
             heightSections,
             widthSections,
             mropeInterleaved != 0
         );
+        const uint axis = ropeMapping.x;
         const uint position = args.positionAxesBuffer[axis];
-        const float theta = float(position) * pow(ropeBase, -2.0f * float(tid) / float(ropeDimension));
-        const float cosTheta = cos(theta);
-        const float sinTheta = sin(theta);
+        float cosTheta = 1.0f;
+        float sinTheta = 0.0f;
+        if (!useProportional || tid < rotatedPairs) {
+            const float thetaDenominator = useProportional ? float(headDimension) : float(ropeDimension);
+            const float theta = float(position) * pow(ropeBase, -2.0f * float(ropeMapping.y) / thetaDenominator);
+            cosTheta = cos(theta);
+            sinTheta = sin(theta);
+        }
 
         if (headIndex < headCount) {
             uint qOffset = headIndex * headDimension + tid;
             float q0 = float(args.query[qOffset]);
-            float q1 = float(args.query[qOffset + halfRopeDim]);
+            float q1 = float(args.query[qOffset + pairCount]);
             args.query[qOffset] = \(bt)(q0 * cosTheta - q1 * sinTheta);
-            args.query[qOffset + halfRopeDim] = \(bt)(q0 * sinTheta + q1 * cosTheta);
+            args.query[qOffset + pairCount] = \(bt)(q0 * sinTheta + q1 * cosTheta);
         }
 
         if (headIndex < kvHeadCount) {
             uint kOffset = headIndex * headDimension + tid;
             float k0 = float(args.key[kOffset]);
-            float k1 = float(args.key[kOffset + halfRopeDim]);
+            float k1 = float(args.key[kOffset + pairCount]);
             args.key[kOffset] = \(bt)(k0 * cosTheta - k1 * sinTheta);
-            args.key[kOffset + halfRopeDim] = \(bt)(k0 * sinTheta + k1 * cosTheta);
+            args.key[kOffset + pairCount] = \(bt)(k0 * sinTheta + k1 * cosTheta);
         }
     }
     """
@@ -328,7 +453,7 @@ public static func generateRoPESeq(
     let bt = bufferPrecision.metalType
 
     return """
-    inline uint \(name)_mrope_axis(
+    inline uint2 \(name)_mrope_mapping(
         uint halfDimIndex,
         uint temporalSections,
         uint heightSections,
@@ -336,16 +461,22 @@ public static func generateRoPESeq(
         bool interleaved
     ) {
         if (temporalSections == 0 && heightSections == 0 && widthSections == 0) {
-            return 0;
+            return uint2(0, halfDimIndex);
         }
         if (!interleaved) {
-            if (halfDimIndex < temporalSections) return 0;
-            if (halfDimIndex < temporalSections + heightSections) return 1;
-            return 2;
+            if (halfDimIndex < temporalSections) return uint2(0, halfDimIndex);
+            if (halfDimIndex < temporalSections + heightSections) {
+                return uint2(1, halfDimIndex - temporalSections);
+            }
+            return uint2(2, halfDimIndex - temporalSections - heightSections);
         }
-        if (halfDimIndex < heightSections * 3 && halfDimIndex % 3 == 1) return 1;
-        if (halfDimIndex < widthSections * 3 && halfDimIndex % 3 == 2) return 2;
-        return 0;
+        if ((halfDimIndex % 3) == 1 && halfDimIndex < heightSections * 3) {
+            return uint2(1, halfDimIndex);
+        }
+        if ((halfDimIndex % 3) == 2 && halfDimIndex < widthSections * 3) {
+            return uint2(2, halfDimIndex);
+        }
+        return uint2(0, halfDimIndex);
     }
 
     kernel void \(name)(
@@ -362,6 +493,7 @@ public static func generateRoPESeq(
         constant uint& widthSections [[buffer(10)]],
         constant uint& mropeInterleaved [[buffer(11)]],
         constant uint& sequenceLength [[buffer(12)]],
+        constant uint& proportionalRoPE [[buffer(13)]],
         uint2 gid                    [[threadgroup_position_in_grid]],
         uint tid                     [[thread_index_in_threadgroup]]
     ) {
@@ -374,23 +506,31 @@ public static func generateRoPESeq(
         device \(bt)* data = (head < headCount) ? Q : K;
         uint localHead = (head < headCount) ? head : (head - headCount);
         uint offset = seqPos * qkvDimension + localHead * headDimension;
-        uint halfRope = ropeDimension / 2;
-        for (uint i = tid; i < halfRope; i += SIMD_WIDTH) {
-            const uint axis = \(name)_mrope_axis(
+        const bool useProportional = proportionalRoPE != 0;
+        const uint pairCount = useProportional ? (headDimension / 2) : (ropeDimension / 2);
+        const uint rotatedPairs = ropeDimension / 2;
+        for (uint i = tid; i < pairCount; i += SIMD_WIDTH) {
+            const uint2 ropeMapping = \(name)_mrope_mapping(
                 i,
                 temporalSections,
                 heightSections,
                 widthSections,
                 mropeInterleaved != 0
             );
+            const uint axis = ropeMapping.x;
             uint position = positionAxesBuffer[seqPos * 3 + axis];
-            float theta = float(position) / pow(base, float(2 * i) / float(ropeDimension));
-            float cosTheta = cos(theta);
-            float sinTheta = sin(theta);
+            float cosTheta = 1.0f;
+            float sinTheta = 0.0f;
+            if (!useProportional || i < rotatedPairs) {
+                const float thetaDenominator = useProportional ? float(headDimension) : float(ropeDimension);
+                const float theta = float(position) / pow(base, float(2 * ropeMapping.y) / thetaDenominator);
+                cosTheta = cos(theta);
+                sinTheta = sin(theta);
+            }
             float x0 = float(data[offset + i]);
-            float x1 = float(data[offset + i + halfRope]);
+            float x1 = float(data[offset + i + pairCount]);
             data[offset + i] = \(bt)(x0 * cosTheta - x1 * sinTheta);
-            data[offset + i + halfRope] = \(bt)(x1 * cosTheta + x0 * sinTheta);
+            data[offset + i + pairCount] = \(bt)(x1 * cosTheta + x0 * sinTheta);
         }
     }
     """
@@ -426,16 +566,16 @@ public static func generateFlashAttentionKernel(
         """ : ""
 
     let mropeAxisHelper = inlineRoPE ? """
-        inline uint \(name)_mrope_axis(uint h, uint tS, uint hS, uint wS, bool interleaved) {
-            if (tS == 0 && hS == 0 && wS == 0) return 0;
+        inline uint2 \(name)_mrope_mapping(uint h, uint tS, uint hS, uint wS, bool interleaved) {
+            if (tS == 0 && hS == 0 && wS == 0) return uint2(0, h);
             if (!interleaved) {
-                if (h < tS) return 0;
-                if (h < tS + hS) return 1;
-                return 2;
+                if (h < tS) return uint2(0, h);
+                if (h < tS + hS) return uint2(1, h - tS);
+                return uint2(2, h - tS - hS);
             }
-            if (h < hS * 3 && h % 3 == 1) return 1;
-            if (h < wS * 3 && h % 3 == 2) return 2;
-            return 0;
+            if ((h % 3) == 1 && h < hS * 3) return uint2(1, h);
+            if ((h % 3) == 2 && h < wS * 3) return uint2(2, h);
+            return uint2(0, h);
         }
 
         """ : ""
@@ -448,15 +588,25 @@ public static func generateFlashAttentionKernel(
                     }
                     threadgroup_barrier(mem_flags::mem_threadgroup);
                     {
-                        const uint halfRopeDim = ropeDimension / 2;
-                        for (uint h = tid; h < halfRopeDim; h += threadgroupSize) {
-                            uint axis = \(name)_mrope_axis(h, temporalSections, heightSections, widthSections, mropeInterleaved != 0);
+                        const bool useProportional = proportionalRoPE != 0;
+                        const uint pairCount = useProportional ? (headDim / 2) : (ropeDimension / 2);
+                        const uint rotatedPairs = ropeDimension / 2;
+                        for (uint h = tid; h < pairCount; h += threadgroupSize) {
+                            uint2 ropeMapping = \(name)_mrope_mapping(h, temporalSections, heightSections, widthSections, mropeInterleaved != 0);
+                            uint axis = ropeMapping.x;
                             float pos = float(ropePositionAxes[axis]);
-                            float theta = pos * pow(ropeBase_, -2.0f * float(h) / float(ropeDimension));
-                            float cosT = cos(theta), sinT = sin(theta);
-                            float k0 = rotBuf[h], k1 = rotBuf[h + halfRopeDim];
+                            float cosT = 1.0f, sinT = 0.0f;
+                            if (!useProportional || h < rotatedPairs) {
+                                float theta = pos * pow(
+                                    ropeBase_,
+                                    -2.0f * float(ropeMapping.y) / float(useProportional ? headDim : ropeDimension)
+                                );
+                                cosT = cos(theta);
+                                sinT = sin(theta);
+                            }
+                            float k0 = rotBuf[h], k1 = rotBuf[h + pairCount];
                             rotBuf[h] = k0 * cosT - k1 * sinT;
-                            rotBuf[h + halfRopeDim] = k0 * sinT + k1 * cosT;
+                            rotBuf[h + pairCount] = k0 * sinT + k1 * cosT;
                         }
                     }
                     threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -469,15 +619,25 @@ public static func generateFlashAttentionKernel(
                 }
                 threadgroup_barrier(mem_flags::mem_threadgroup);
                 {
-                    const uint halfRopeDim = ropeDimension / 2;
-                    for (uint h = tid; h < halfRopeDim; h += threadgroupSize) {
-                        uint axis = \(name)_mrope_axis(h, temporalSections, heightSections, widthSections, mropeInterleaved != 0);
+                    const bool useProportional = proportionalRoPE != 0;
+                    const uint pairCount = useProportional ? (headDim / 2) : (ropeDimension / 2);
+                    const uint rotatedPairs = ropeDimension / 2;
+                    for (uint h = tid; h < pairCount; h += threadgroupSize) {
+                        uint2 ropeMapping = \(name)_mrope_mapping(h, temporalSections, heightSections, widthSections, mropeInterleaved != 0);
+                        uint axis = ropeMapping.x;
                         float pos = float(ropePositionAxes[axis]);
-                        float theta = pos * pow(ropeBase_, -2.0f * float(h) / float(ropeDimension));
-                        float cosT = cos(theta), sinT = sin(theta);
-                        float q0 = rotQuery[h], q1 = rotQuery[h + halfRopeDim];
+                        float cosT = 1.0f, sinT = 0.0f;
+                        if (!useProportional || h < rotatedPairs) {
+                            float theta = pos * pow(
+                                ropeBase_,
+                                -2.0f * float(ropeMapping.y) / float(useProportional ? headDim : ropeDimension)
+                            );
+                            cosT = cos(theta);
+                            sinT = sin(theta);
+                        }
+                        float q0 = rotQuery[h], q1 = rotQuery[h + pairCount];
                         rotQuery[h] = q0 * cosT - q1 * sinT;
-                        rotQuery[h + halfRopeDim] = q0 * sinT + q1 * cosT;
+                        rotQuery[h + pairCount] = q0 * sinT + q1 * cosT;
                     }
                 }
                 threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -508,6 +668,7 @@ public static func generateFlashAttentionKernel(
         device half* qjlResidualK            [[buffer(19)]],
         constant uint& numRotorGroups        [[buffer(20)]],
         constant uint& qjlDimension         [[buffer(21)]],
+        constant uint& executionFlags        [[buffer(29)]],
     \(ropeKernelParams)    uint headIndex                       [[threadgroup_position_in_grid]],
         uint tid                             [[thread_index_in_threadgroup]],
         uint tiisg                           [[thread_index_in_simdgroup]],
@@ -520,7 +681,9 @@ public static func generateFlashAttentionKernel(
         const uint kvHeadIndex = headIndex * kvHeadCount / headCount;
         const uint kvIn = kvHeadIndex * headDim;
         const uint canonicalWriterHead = kvHeadIndex * headCount / kvHeadCount;
-        const bool writesCurrentKV = (headIndex == canonicalWriterHead);
+        const bool readsExistingKV = (executionFlags & 1u) != 0;
+        const bool proportionalRoPE = (executionFlags & 2u) != 0;
+        const bool writesCurrentKV = !readsExistingKV && (headIndex == canonicalWriterHead);
         const bool kRotor = is_rotor_scheme(kQuantScheme);
         const bool vRotor = is_rotor_scheme(vQuantScheme);
 
@@ -529,7 +692,64 @@ public static func generateFlashAttentionKernel(
 
         // --- Step 1: Append new K/V to cache ---
         threadgroup float rotBuf[512];
+        threadgroup float currentKey[512];
+        threadgroup float currentValue[512];
         threadgroup float quantSMin[32], quantSMax[32];
+
+        if (!readsExistingKV) {
+        \(ropeApplyK)
+        if (kRotor) {
+            for (uint g = tid; g < numRotorGroups; g += threadgroupSize) {
+                uint base = g * 3;
+                \(inlineRoPE ? """
+                float v1 = (base < headDim) ? rotBuf[base] : 0.0f;
+                float v2 = (base + 1 < headDim) ? rotBuf[base + 1] : 0.0f;
+                float v3 = (base + 2 < headDim) ? rotBuf[base + 2] : 0.0f;
+                """ : """
+                float v1 = (base < headDim) ? \(castIn("newKey[kvIn + base]")) : 0.0f;
+                float v2 = (base + 1 < headDim) ? \(castIn("newKey[kvIn + base + 1]")) : 0.0f;
+                float v3 = (base + 2 < headDim) ? \(castIn("newKey[kvIn + base + 2]")) : 0.0f;
+                """)
+                float4 R = float4(float(headRotors[g * 4]), float(headRotors[g * 4 + 1]),
+                                  float(headRotors[g * 4 + 2]), float(headRotors[g * 4 + 3]));
+                float3 r = rotor_sandwich(R, float3(v1, v2, v3));
+                if (base < headDim) currentKey[base] = r.x;
+                if (base + 1 < headDim) currentKey[base + 1] = r.y;
+                if (base + 2 < headDim) currentKey[base + 2] = r.z;
+            }
+        \(inlineRoPE ? """
+        } else {
+            for (uint d = tid; d < headDim; d += threadgroupSize) {
+                currentKey[d] = rotBuf[d];
+            }
+        """ : """
+        } else {
+            for (uint d = tid; d < headDim; d += threadgroupSize) {
+                currentKey[d] = \(castIn("newKey[kvIn + d]"));
+            }
+        """
+        )
+        }
+        if (vRotor) {
+            for (uint g = tid; g < numRotorGroups; g += threadgroupSize) {
+                uint base = g * 3;
+                float v1 = (base < headDim) ? \(castIn("newValue[kvIn + base]")) : 0.0f;
+                float v2 = (base + 1 < headDim) ? \(castIn("newValue[kvIn + base + 1]")) : 0.0f;
+                float v3 = (base + 2 < headDim) ? \(castIn("newValue[kvIn + base + 2]")) : 0.0f;
+                float4 R = float4(float(headRotors[g * 4]), float(headRotors[g * 4 + 1]),
+                                  float(headRotors[g * 4 + 2]), float(headRotors[g * 4 + 3]));
+                float3 r = rotor_sandwich(R, float3(v1, v2, v3));
+                if (base < headDim) currentValue[base] = r.x;
+                if (base + 1 < headDim) currentValue[base + 1] = r.y;
+                if (base + 2 < headDim) currentValue[base + 2] = r.z;
+            }
+        } else {
+            for (uint d = tid; d < headDim; d += threadgroupSize) {
+                currentValue[d] = \(castIn("newValue[kvIn + d]"));
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        }
 
         if (writesCurrentKV) {
             uint kWriteByteOffset;
@@ -540,51 +760,26 @@ public static func generateFlashAttentionKernel(
                 kWriteByteOffset = position * kvHeadCount * kHeadSlotBytes
                     + kvHeadIndex * kHeadSlotBytes;
             }
-
-    \(ropeApplyK)
                 if (kRotor) {
-                    // \(inlineRoPE ? "Rotor sandwich on RoPE-rotated K in rotBuf" : "Fused load + rotate"): each thread loads and rotates its own rotor groups
-                    for (uint g = tid; g < numRotorGroups; g += threadgroupSize) {
-                        uint base = g * 3;
-    \(inlineRoPE ? """
-                        float v1 = (base < headDim) ? rotBuf[base] : 0.0f;
-                        float v2 = (base + 1 < headDim) ? rotBuf[base + 1] : 0.0f;
-                        float v3 = (base + 2 < headDim) ? rotBuf[base + 2] : 0.0f;
-    """ : """
-                        float v1 = (base < headDim) ? \(castIn("newKey[kvIn + base]")) : 0.0f;
-                        float v2 = (base + 1 < headDim) ? \(castIn("newKey[kvIn + base + 1]")) : 0.0f;
-                        float v3 = (base + 2 < headDim) ? \(castIn("newKey[kvIn + base + 2]")) : 0.0f;
-    """)
-                        float4 R = float4(float(headRotors[g * 4]), float(headRotors[g * 4 + 1]),
-                                          float(headRotors[g * 4 + 2]), float(headRotors[g * 4 + 3]));
-                        float3 r = rotor_sandwich(R, float3(v1, v2, v3));
-                        if (base < headDim) rotBuf[base] = r.x;
-                        if (base + 1 < headDim) rotBuf[base + 1] = r.y;
-                        if (base + 2 < headDim) rotBuf[base + 2] = r.z;
-                    }
-                    threadgroup_barrier(mem_flags::mem_threadgroup);
                     uint kBase = rotor_base_scheme(kQuantScheme);
                     if (kBase == 0x40) {
-                        write_kv_quantized_q4(rotBuf, keyCache + kWriteByteOffset, headDim, tid, threadgroupSize, tiisg, sgitg, quantSMin, quantSMax);
+                        write_kv_quantized_q4(currentKey, keyCache + kWriteByteOffset, headDim, tid, threadgroupSize, tiisg, sgitg, quantSMin, quantSMax);
                     } else {
-                        write_kv_quantized_q8(rotBuf, keyCache + kWriteByteOffset, headDim, tid, threadgroupSize, tiisg, sgitg, quantSMin, quantSMax);
+                        write_kv_quantized_q8(currentKey, keyCache + kWriteByteOffset, headDim, tid, threadgroupSize, tiisg, sgitg, quantSMin, quantSMax);
                     }
-                    // QJL: compute and store projected K residual
                     if (qjlDimension > 0) {
                         threadgroup_barrier(mem_flags::mem_device);
                         device half* qjlOut = qjlResidualK + (position * kvHeadCount + kvHeadIndex) * qjlDimension;
-                        qjl_compute_residual(rotBuf, keyCache + kWriteByteOffset, kQuantScheme,
+                        qjl_compute_residual(currentKey, keyCache + kWriteByteOffset, kQuantScheme,
                             qjlMatrix, qjlOut, headDim, qjlDimension, kHeadSlotBytes, tid, threadgroupSize);
                     }
     \(inlineRoPE ? """
                 } else if (kQuantScheme == 0x00 || kQuantScheme == 0x01 || kQuantScheme == 0x02) {
-                    // Write RoPE-rotated K from rotBuf to dense KV cache
                     for (uint d = tid; d < headDim; d += threadgroupSize) {
                         write_kv_element_dense(
-                            keyCache + kWriteByteOffset, d, rotBuf[d], kQuantScheme);
+                            keyCache + kWriteByteOffset, d, currentKey[d], kQuantScheme);
                     }
                 } else {
-                    // Write RoPE-rotated K from rotBuf with group quantization
                     const uint groupSize = 32;
                     const uint bytesPerBlock = 36;
                     const uint numGroups = (headDim + groupSize - 1) / groupSize;
@@ -592,7 +787,7 @@ public static func generateFlashAttentionKernel(
                         uint groupStart = g * groupSize;
                         float localMin = HUGE_VALF, localMax = -HUGE_VALF;
                         for (uint i = tid; i < groupSize && (groupStart + i) < headDim; i += threadgroupSize) {
-                            float val = rotBuf[groupStart + i];
+                            float val = currentKey[groupStart + i];
                             localMin = min(localMin, val); localMax = max(localMax, val);
                         }
                         localMin = simd_min(localMin); localMax = simd_max(localMax);
@@ -616,10 +811,10 @@ public static func generateFlashAttentionKernel(
                         }
                         threadgroup_barrier(mem_flags::mem_device);
                         for (uint i = tid; i < groupSize && (groupStart + i) < headDim; i += threadgroupSize) {
-                            float val = rotBuf[groupStart + i];
+                            float val = currentKey[groupStart + i];
                             int quantized = int(round((val - groupMin) / groupScale));
                             quantized = clamp(quantized, 0, 255);
-                            *(device char*)(blockOutput + 4 + i) = char(quantized);
+                            *(device uchar*)(blockOutput + 4 + i) = uchar(quantized);
                         }
                     }
                 }
@@ -627,7 +822,7 @@ public static func generateFlashAttentionKernel(
                 } else if (kQuantScheme == 0x00 || kQuantScheme == 0x01 || kQuantScheme == 0x02) {
                     for (uint d = tid; d < headDim; d += threadgroupSize) {
                         write_kv_element_dense(
-                            keyCache + kWriteByteOffset, d, \(castIn("newKey[kvIn + d]")), kQuantScheme);
+                            keyCache + kWriteByteOffset, d, currentKey[d], kQuantScheme);
                     }
                 } else {
                     const uint groupSize = 32;
@@ -637,7 +832,7 @@ public static func generateFlashAttentionKernel(
                         uint groupStart = g * groupSize;
                         float localMin = HUGE_VALF, localMax = -HUGE_VALF;
                         for (uint i = tid; i < groupSize && (groupStart + i) < headDim; i += threadgroupSize) {
-                            float val = \(castIn("newKey[kvIn + groupStart + i]"));
+                            float val = currentKey[groupStart + i];
                             localMin = min(localMin, val); localMax = max(localMax, val);
                         }
                         localMin = simd_min(localMin); localMax = simd_max(localMax);
@@ -661,10 +856,10 @@ public static func generateFlashAttentionKernel(
                         }
                         threadgroup_barrier(mem_flags::mem_device);
                         for (uint i = tid; i < groupSize && (groupStart + i) < headDim; i += threadgroupSize) {
-                            float val = \(castIn("newKey[kvIn + groupStart + i]"));
+                            float val = currentKey[groupStart + i];
                             int quantized = int(round((val - groupMin) / groupScale));
                             quantized = clamp(quantized, 0, 255);
-                            *(device char*)(blockOutput + 4 + i) = char(quantized);
+                            *(device uchar*)(blockOutput + 4 + i) = uchar(quantized);
                         }
                     }
                 }
@@ -681,30 +876,16 @@ public static func generateFlashAttentionKernel(
             }
 
             if (vRotor) {
-                // Fused load + rotate
-                for (uint g = tid; g < numRotorGroups; g += threadgroupSize) {
-                    uint base = g * 3;
-                    float v1 = (base < headDim) ? \(castIn("newValue[kvIn + base]")) : 0.0f;
-                    float v2 = (base + 1 < headDim) ? \(castIn("newValue[kvIn + base + 1]")) : 0.0f;
-                    float v3 = (base + 2 < headDim) ? \(castIn("newValue[kvIn + base + 2]")) : 0.0f;
-                    float4 R = float4(float(headRotors[g * 4]), float(headRotors[g * 4 + 1]),
-                                      float(headRotors[g * 4 + 2]), float(headRotors[g * 4 + 3]));
-                    float3 r = rotor_sandwich(R, float3(v1, v2, v3));
-                    if (base < headDim) rotBuf[base] = r.x;
-                    if (base + 1 < headDim) rotBuf[base + 1] = r.y;
-                    if (base + 2 < headDim) rotBuf[base + 2] = r.z;
-                }
-                threadgroup_barrier(mem_flags::mem_threadgroup);
                 uint vBase = rotor_base_scheme(vQuantScheme);
                 if (vBase == 0x40) {
-                    write_kv_quantized_q4(rotBuf, valueCache + vWriteByteOffset, headDim, tid, threadgroupSize, tiisg, sgitg, quantSMin, quantSMax);
+                    write_kv_quantized_q4(currentValue, valueCache + vWriteByteOffset, headDim, tid, threadgroupSize, tiisg, sgitg, quantSMin, quantSMax);
                 } else {
-                    write_kv_quantized_q8(rotBuf, valueCache + vWriteByteOffset, headDim, tid, threadgroupSize, tiisg, sgitg, quantSMin, quantSMax);
+                    write_kv_quantized_q8(currentValue, valueCache + vWriteByteOffset, headDim, tid, threadgroupSize, tiisg, sgitg, quantSMin, quantSMax);
                 }
             } else if (vQuantScheme == 0x00 || vQuantScheme == 0x01 || vQuantScheme == 0x02) {
                 for (uint d = tid; d < headDim; d += threadgroupSize) {
                     write_kv_element_dense(
-                        valueCache + vWriteByteOffset, d, \(castIn("newValue[kvIn + d]")), vQuantScheme);
+                        valueCache + vWriteByteOffset, d, currentValue[d], vQuantScheme);
                 }
             } else {
                 const uint groupSize = 32;
@@ -714,7 +895,7 @@ public static func generateFlashAttentionKernel(
                     uint groupStart = g * groupSize;
                     float localMin = HUGE_VALF, localMax = -HUGE_VALF;
                     for (uint i = tid; i < groupSize && (groupStart + i) < headDim; i += threadgroupSize) {
-                        float val = \(castIn("newValue[kvIn + groupStart + i]"));
+                        float val = currentValue[groupStart + i];
                         localMin = min(localMin, val); localMax = max(localMax, val);
                     }
                     localMin = simd_min(localMin); localMax = simd_max(localMax);
@@ -738,10 +919,10 @@ public static func generateFlashAttentionKernel(
                     }
                     threadgroup_barrier(mem_flags::mem_device);
                     for (uint i = tid; i < groupSize && (groupStart + i) < headDim; i += threadgroupSize) {
-                        float val = \(castIn("newValue[kvIn + groupStart + i]"));
+                        float val = currentValue[groupStart + i];
                         int quantized = int(round((val - groupMin) / groupScale));
                         quantized = clamp(quantized, 0, 255);
-                        *(device char*)(blockOutput + 4 + i) = char(quantized);
+                        *(device uchar*)(blockOutput + 4 + i) = uchar(quantized);
                     }
                 }
             }
@@ -802,12 +983,14 @@ public static func generateFlashAttentionKernel(
             float score = 0.0f;
             for (uint d = tid; d < headDim; d += threadgroupSize) {
                 float q = \(inlineRoPE ? "rotQuery[d]" : "kRotor ? rotQuery[d] : \(castIn("query[queryOffset + d]"))");
-                float k = read_kv_element(keyCache + kByteOffset, d, kQuantScheme, kHeadSlotBytes, headDim);
+                float k = (!readsExistingKV && t == position)
+                    ? currentKey[d]
+                    : read_kv_element(keyCache + kByteOffset, d, kQuantScheme, kHeadSlotBytes, headDim);
                 score += q * k;
             }
 
             // QJL correction for Q·K
-            if (kRotor && qjlDimension > 0) {
+            if (kRotor && qjlDimension > 0 && (readsExistingKV || t != position)) {
                 device const half* qjlRes = qjlResidualK + (t * kvHeadCount + kvHeadIndex) * qjlDimension;
                 score += qjl_score_correction(qjlQueryProj, qjlRes, qjlDimension, tid, threadgroupSize);
             }
@@ -839,7 +1022,9 @@ public static func generateFlashAttentionKernel(
 
             float weight = exp(score - maxScore);
             for (uint d = tid; d < headDim; d += threadgroupSize) {
-                float v = read_kv_element(valueCache + vByteOffset, d, vQuantScheme, vHeadSlotBytes, headDim);
+                float v = (!readsExistingKV && t == position)
+                    ? currentValue[d]
+                    : read_kv_element(valueCache + vByteOffset, d, vQuantScheme, vHeadSlotBytes, headDim);
                 sharedOutput[d] = sharedOutput[d] * expCorrection + weight * v;
             }
         }
@@ -905,7 +1090,9 @@ public static func generateFlashAttentionArgumentTableVariant(
         constant uint& kHeadSlotBytes             [[buffer(15)]],
         constant uint& vHeadSlotBytes             [[buffer(16)]],
         constant uint& numRotorGroups             [[buffer(20)]],
-        constant uint& qjlDimension              [[buffer(21)]],
+        constant uint& qjlDimension               [[buffer(21)]],
+        constant uint& useExistingKV              [[buffer(29)]],
+        constant uint& windowLeft                 [[buffer(30)]],
         uint headIndex                            [[threadgroup_position_in_grid]],
         uint tid                                  [[thread_index_in_threadgroup]],
         uint tiisg                                [[thread_index_in_simdgroup]],
@@ -918,14 +1105,57 @@ public static func generateFlashAttentionArgumentTableVariant(
         const uint kvHeadIndex = headIndex * kvHeadCount / headCount;
         const uint kvIn = kvHeadIndex * headDim;
         const uint canonicalWriterHead = kvHeadIndex * headCount / kvHeadCount;
-        const bool writesCurrentKV = (headIndex == canonicalWriterHead);
+        const bool readsExistingKV = (useExistingKV != 0);
+        const bool writesCurrentKV = !readsExistingKV && (headIndex == canonicalWriterHead);
         const bool kRotor = is_rotor_scheme(kQuantScheme);
         const bool vRotor = is_rotor_scheme(vQuantScheme);
 
         device const half* headRotors = args.rotorParams + kvHeadIndex * numRotorGroups * 4;
 
         threadgroup float rotBuf[512];
+        threadgroup float currentKey[512];
+        threadgroup float currentValue[512];
         threadgroup float quantSMin[32], quantSMax[32];
+
+        if (!readsExistingKV) {
+        if (kRotor) {
+            for (uint g = tid; g < numRotorGroups; g += threadgroupSize) {
+                uint base = g * 3;
+                float v1 = (base < headDim) ? \(castIn("args.newKey[kvIn + base]")) : 0.0f;
+                float v2 = (base + 1 < headDim) ? \(castIn("args.newKey[kvIn + base + 1]")) : 0.0f;
+                float v3 = (base + 2 < headDim) ? \(castIn("args.newKey[kvIn + base + 2]")) : 0.0f;
+                float4 R = float4(float(headRotors[g * 4]), float(headRotors[g * 4 + 1]),
+                                  float(headRotors[g * 4 + 2]), float(headRotors[g * 4 + 3]));
+                float3 r = rotor_sandwich(R, float3(v1, v2, v3));
+                if (base < headDim) currentKey[base] = r.x;
+                if (base + 1 < headDim) currentKey[base + 1] = r.y;
+                if (base + 2 < headDim) currentKey[base + 2] = r.z;
+            }
+        } else {
+            for (uint d = tid; d < headDim; d += threadgroupSize) {
+                currentKey[d] = \(castIn("args.newKey[kvIn + d]"));
+            }
+        }
+        if (vRotor) {
+            for (uint g = tid; g < numRotorGroups; g += threadgroupSize) {
+                uint base = g * 3;
+                float v1 = (base < headDim) ? \(castIn("args.newValue[kvIn + base]")) : 0.0f;
+                float v2 = (base + 1 < headDim) ? \(castIn("args.newValue[kvIn + base + 1]")) : 0.0f;
+                float v3 = (base + 2 < headDim) ? \(castIn("args.newValue[kvIn + base + 2]")) : 0.0f;
+                float4 R = float4(float(headRotors[g * 4]), float(headRotors[g * 4 + 1]),
+                                  float(headRotors[g * 4 + 2]), float(headRotors[g * 4 + 3]));
+                float3 r = rotor_sandwich(R, float3(v1, v2, v3));
+                if (base < headDim) currentValue[base] = r.x;
+                if (base + 1 < headDim) currentValue[base + 1] = r.y;
+                if (base + 2 < headDim) currentValue[base + 2] = r.z;
+            }
+        } else {
+            for (uint d = tid; d < headDim; d += threadgroupSize) {
+                currentValue[d] = \(castIn("args.newValue[kvIn + d]"));
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        }
 
         if (writesCurrentKV) {
             uint kWriteByteOffset;
@@ -936,35 +1166,21 @@ public static func generateFlashAttentionArgumentTableVariant(
             }
 
             if (kRotor) {
-                // Fused load + rotate
-                for (uint g = tid; g < numRotorGroups; g += threadgroupSize) {
-                    uint base = g * 3;
-                    float v1 = (base < headDim) ? \(castIn("args.newKey[kvIn + base]")) : 0.0f;
-                    float v2 = (base + 1 < headDim) ? \(castIn("args.newKey[kvIn + base + 1]")) : 0.0f;
-                    float v3 = (base + 2 < headDim) ? \(castIn("args.newKey[kvIn + base + 2]")) : 0.0f;
-                    float4 R = float4(float(headRotors[g * 4]), float(headRotors[g * 4 + 1]),
-                                      float(headRotors[g * 4 + 2]), float(headRotors[g * 4 + 3]));
-                    float3 r = rotor_sandwich(R, float3(v1, v2, v3));
-                    if (base < headDim) rotBuf[base] = r.x;
-                    if (base + 1 < headDim) rotBuf[base + 1] = r.y;
-                    if (base + 2 < headDim) rotBuf[base + 2] = r.z;
-                }
-                threadgroup_barrier(mem_flags::mem_threadgroup);
                 uint kBase = rotor_base_scheme(kQuantScheme);
                 if (kBase == 0x40) {
-                    write_kv_quantized_q4(rotBuf, args.keyCache + kWriteByteOffset, headDim, tid, threadgroupSize, tiisg, sgitg, quantSMin, quantSMax);
+                    write_kv_quantized_q4(currentKey, args.keyCache + kWriteByteOffset, headDim, tid, threadgroupSize, tiisg, sgitg, quantSMin, quantSMax);
                 } else {
-                    write_kv_quantized_q8(rotBuf, args.keyCache + kWriteByteOffset, headDim, tid, threadgroupSize, tiisg, sgitg, quantSMin, quantSMax);
+                    write_kv_quantized_q8(currentKey, args.keyCache + kWriteByteOffset, headDim, tid, threadgroupSize, tiisg, sgitg, quantSMin, quantSMax);
                 }
                 if (qjlDimension > 0) {
                     threadgroup_barrier(mem_flags::mem_device);
                     device half* qjlOut = args.qjlResidualK + (position * kvHeadCount + kvHeadIndex) * qjlDimension;
-                    qjl_compute_residual(rotBuf, args.keyCache + kWriteByteOffset, kQuantScheme,
+                    qjl_compute_residual(currentKey, args.keyCache + kWriteByteOffset, kQuantScheme,
                         args.qjlMatrix, qjlOut, headDim, qjlDimension, kHeadSlotBytes, tid, threadgroupSize);
                 }
             } else if (kQuantScheme == 0x00 || kQuantScheme == 0x01 || kQuantScheme == 0x02) {
                 for (uint d = tid; d < headDim; d += threadgroupSize) {
-                    write_kv_element_dense(args.keyCache + kWriteByteOffset, d, \(castIn("args.newKey[kvIn + d]")), kQuantScheme);
+                    write_kv_element_dense(args.keyCache + kWriteByteOffset, d, currentKey[d], kQuantScheme);
                 }
             } else {
                 const uint groupSize = 32;
@@ -974,7 +1190,7 @@ public static func generateFlashAttentionArgumentTableVariant(
                     uint groupStart = g * groupSize;
                     float localMin = HUGE_VALF, localMax = -HUGE_VALF;
                     for (uint i = tid; i < groupSize && (groupStart + i) < headDim; i += threadgroupSize) {
-                        float val = \(castIn("args.newKey[kvIn + groupStart + i]"));
+                        float val = currentKey[groupStart + i];
                         localMin = min(localMin, val); localMax = max(localMax, val);
                     }
                     localMin = simd_min(localMin); localMax = simd_max(localMax);
@@ -998,10 +1214,10 @@ public static func generateFlashAttentionArgumentTableVariant(
                     }
                     threadgroup_barrier(mem_flags::mem_device);
                     for (uint i = tid; i < groupSize && (groupStart + i) < headDim; i += threadgroupSize) {
-                        float val = \(castIn("args.newKey[kvIn + groupStart + i]"));
+                        float val = currentKey[groupStart + i];
                         int quantized = int(round((val - groupMin) / groupScale));
                         quantized = clamp(quantized, 0, 255);
-                        *(device char*)(blockOutput + 4 + i) = char(quantized);
+                        *(device uchar*)(blockOutput + 4 + i) = uchar(quantized);
                     }
                 }
             }
@@ -1015,29 +1231,15 @@ public static func generateFlashAttentionArgumentTableVariant(
             }
 
             if (vRotor) {
-                // Fused load + rotate
-                for (uint g = tid; g < numRotorGroups; g += threadgroupSize) {
-                    uint base = g * 3;
-                    float v1 = (base < headDim) ? \(castIn("args.newValue[kvIn + base]")) : 0.0f;
-                    float v2 = (base + 1 < headDim) ? \(castIn("args.newValue[kvIn + base + 1]")) : 0.0f;
-                    float v3 = (base + 2 < headDim) ? \(castIn("args.newValue[kvIn + base + 2]")) : 0.0f;
-                    float4 R = float4(float(headRotors[g * 4]), float(headRotors[g * 4 + 1]),
-                                      float(headRotors[g * 4 + 2]), float(headRotors[g * 4 + 3]));
-                    float3 r = rotor_sandwich(R, float3(v1, v2, v3));
-                    if (base < headDim) rotBuf[base] = r.x;
-                    if (base + 1 < headDim) rotBuf[base + 1] = r.y;
-                    if (base + 2 < headDim) rotBuf[base + 2] = r.z;
-                }
-                threadgroup_barrier(mem_flags::mem_threadgroup);
                 uint vBase = rotor_base_scheme(vQuantScheme);
                 if (vBase == 0x40) {
-                    write_kv_quantized_q4(rotBuf, args.valueCache + vWriteByteOffset, headDim, tid, threadgroupSize, tiisg, sgitg, quantSMin, quantSMax);
+                    write_kv_quantized_q4(currentValue, args.valueCache + vWriteByteOffset, headDim, tid, threadgroupSize, tiisg, sgitg, quantSMin, quantSMax);
                 } else {
-                    write_kv_quantized_q8(rotBuf, args.valueCache + vWriteByteOffset, headDim, tid, threadgroupSize, tiisg, sgitg, quantSMin, quantSMax);
+                    write_kv_quantized_q8(currentValue, args.valueCache + vWriteByteOffset, headDim, tid, threadgroupSize, tiisg, sgitg, quantSMin, quantSMax);
                 }
             } else if (vQuantScheme == 0x00 || vQuantScheme == 0x01 || vQuantScheme == 0x02) {
                 for (uint d = tid; d < headDim; d += threadgroupSize) {
-                    write_kv_element_dense(args.valueCache + vWriteByteOffset, d, \(castIn("args.newValue[kvIn + d]")), vQuantScheme);
+                    write_kv_element_dense(args.valueCache + vWriteByteOffset, d, currentValue[d], vQuantScheme);
                 }
             } else {
                 const uint groupSize = 32;
@@ -1047,7 +1249,7 @@ public static func generateFlashAttentionArgumentTableVariant(
                     uint groupStart = g * groupSize;
                     float localMin = HUGE_VALF, localMax = -HUGE_VALF;
                     for (uint i = tid; i < groupSize && (groupStart + i) < headDim; i += threadgroupSize) {
-                        float val = \(castIn("args.newValue[kvIn + groupStart + i]"));
+                        float val = currentValue[groupStart + i];
                         localMin = min(localMin, val); localMax = max(localMax, val);
                     }
                     localMin = simd_min(localMin); localMax = simd_max(localMax);
@@ -1071,10 +1273,10 @@ public static func generateFlashAttentionArgumentTableVariant(
                     }
                     threadgroup_barrier(mem_flags::mem_device);
                     for (uint i = tid; i < groupSize && (groupStart + i) < headDim; i += threadgroupSize) {
-                        float val = \(castIn("args.newValue[kvIn + groupStart + i]"));
+                        float val = currentValue[groupStart + i];
                         int quantized = int(round((val - groupMin) / groupScale));
                         quantized = clamp(quantized, 0, 255);
-                        *(device char*)(blockOutput + 4 + i) = char(quantized);
+                        *(device uchar*)(blockOutput + 4 + i) = uchar(quantized);
                     }
                 }
             }
@@ -1113,7 +1315,11 @@ public static func generateFlashAttentionArgumentTableVariant(
             sharedOutput[d] = 0.0f;
         }
 
-        for (uint t = 0; t < sequenceLength; t++) {
+        const uint attentionStart = (windowLeft == 0xFFFFFFFFu)
+            ? 0u
+            : ((position + 1 > windowLeft) ? (position - windowLeft + 1u) : 0u);
+
+        for (uint t = attentionStart; t < sequenceLength; t++) {
             uint kByteOffset;
             if (layoutMode == 0) {
                 kByteOffset = kvHeadIndex * maxSequenceLength * kHeadSlotBytes + t * kHeadSlotBytes;
@@ -1124,11 +1330,13 @@ public static func generateFlashAttentionArgumentTableVariant(
             float score = 0.0f;
             for (uint d = tid; d < headDim; d += threadgroupSize) {
                 float q = kRotor ? rotQuery[d] : \(castIn("args.query[queryOffset + d]"));
-                float k = read_kv_element(args.keyCache + kByteOffset, d, kQuantScheme, kHeadSlotBytes, headDim);
+                float k = (!readsExistingKV && t == position)
+                    ? currentKey[d]
+                    : read_kv_element(args.keyCache + kByteOffset, d, kQuantScheme, kHeadSlotBytes, headDim);
                 score += q * k;
             }
 
-            if (kRotor && qjlDimension > 0) {
+            if (kRotor && qjlDimension > 0 && (readsExistingKV || t != position)) {
                 device const half* qjlRes = args.qjlResidualK + (t * kvHeadCount + kvHeadIndex) * qjlDimension;
                 score += qjl_score_correction(qjlQueryProj, qjlRes, qjlDimension, tid, threadgroupSize);
             }
@@ -1160,7 +1368,9 @@ public static func generateFlashAttentionArgumentTableVariant(
             }
 
             for (uint d = tid; d < headDim; d += threadgroupSize) {
-                float v = read_kv_element(args.valueCache + vByteOffset, d, vQuantScheme, vHeadSlotBytes, headDim);
+                float v = (!readsExistingKV && t == position)
+                    ? currentValue[d]
+                    : read_kv_element(args.valueCache + vByteOffset, d, vQuantScheme, vHeadSlotBytes, headDim);
                 sharedOutput[d] = sharedOutput[d] * expScale + expScore * v;
             }
             threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -1209,7 +1419,7 @@ public static func generateKVCacheFillSeq(
         device const half* qjlMatrix           [[buffer(14)]],
         device half* qjlResidualK              [[buffer(15)]],
         constant uint& numRotorGroups          [[buffer(16)]],
-        constant uint& qjlDimension           [[buffer(17)]],
+        constant uint& qjlDimension            [[buffer(17)]],
         uint groupId                            [[threadgroup_position_in_grid]],
         uint tid                               [[thread_index_in_threadgroup]],
         uint tiisg                             [[thread_index_in_simdgroup]],
@@ -1370,7 +1580,8 @@ public static func generateBatchFlashAttention(
         device const half* qjlMatrix          [[buffer(16)]],
         device const half* qjlResidualK       [[buffer(17)]],
         constant uint& numRotorGroups         [[buffer(18)]],
-        constant uint& qjlDimension          [[buffer(19)]],
+        constant uint& qjlDimension           [[buffer(19)]],
+        constant uint& windowLeft             [[buffer(20)]],
         uint flatGroupId                      [[threadgroup_position_in_grid]],
         uint tid                              [[thread_index_in_threadgroup]],
         uint tiisg                            [[thread_index_in_simdgroup]],
@@ -1420,7 +1631,11 @@ public static func generateBatchFlashAttention(
             sharedOutput[d] = 0.0f;
         }
 
-        for (uint t = 0; t <= posId; t++) {
+        const uint attentionStart = (windowLeft == 0xFFFFFFFFu)
+            ? 0u
+            : ((posId + 1 > windowLeft) ? (posId - windowLeft + 1u) : 0u);
+
+        for (uint t = attentionStart; t <= posId; t++) {
             uint kByteOffset;
             if (layoutMode == 0) {
                 kByteOffset = kvHeadIndex * maxSequenceLength * kHeadSlotBytes + t * kHeadSlotBytes;
@@ -1484,6 +1699,204 @@ public static func generateBatchFlashAttention(
 
         for (uint d = tid; d < headDim; d += threadgroupSize) {
             output[queryOffset + d] = \(castOut("sharedOutput[d]"));
+        }
+    }
+    """
+}
+
+/// Generate post-prefill KV transfer kernel.
+///
+/// This supports the deferred-quantization path used when prefill keeps a dense
+/// KV cache for quality, then converts into the decode cache format before the
+/// first decode step.
+public static func generateKVCacheTransfer(name: String) -> String {
+    """
+    struct KVCacheTransferParams {
+        uint layerCount;
+        uint kvHeadCount;
+        uint headDimension;
+        uint maxSequenceLength;
+        uint sequenceLength;
+        uint layoutMode;
+        uint sourceKScheme;
+        uint sourceVScheme;
+        uint destinationKScheme;
+        uint destinationVScheme;
+        uint sourceKHeadSlotBytes;
+        uint sourceVHeadSlotBytes;
+        uint destinationKHeadSlotBytes;
+        uint destinationVHeadSlotBytes;
+        uint numRotorGroups;
+        uint qjlDimension;
+    };
+
+    kernel void \(name)(
+        device const uchar* sourceKeyCache    [[buffer(0)]],
+        device const uchar* sourceValueCache  [[buffer(1)]],
+        device uchar* destinationKeyCache     [[buffer(2)]],
+        device uchar* destinationValueCache   [[buffer(3)]],
+        constant KVCacheTransferParams& params [[buffer(4)]],
+        device const half* rotorParams        [[buffer(5)]],
+        device const half* qjlMatrix          [[buffer(6)]],
+        device half* qjlResidualK             [[buffer(7)]],
+        uint flatGroupId                      [[threadgroup_position_in_grid]],
+        uint tid                              [[thread_index_in_threadgroup]],
+        uint tiisg                            [[thread_index_in_simdgroup]],
+        uint sgitg                            [[simdgroup_index_in_threadgroup]],
+        uint threadgroupSize                  [[threads_per_threadgroup]]
+    ) {
+        if (params.sequenceLength == 0) return;
+
+        const uint layerIndex = flatGroupId / params.sequenceLength;
+        const uint positionIndex = flatGroupId % params.sequenceLength;
+        if (layerIndex >= params.layerCount || positionIndex >= params.sequenceLength) return;
+
+        const uint headDim = params.headDimension;
+        const bool destinationKRotor = is_rotor_scheme(params.destinationKScheme);
+        const bool destinationVRotor = is_rotor_scheme(params.destinationVScheme);
+        const uint sourceKLayerBytes = params.maxSequenceLength * params.kvHeadCount * params.sourceKHeadSlotBytes;
+        const uint sourceVLayerBytes = params.maxSequenceLength * params.kvHeadCount * params.sourceVHeadSlotBytes;
+        const uint destinationKLayerBytes = params.maxSequenceLength * params.kvHeadCount * params.destinationKHeadSlotBytes;
+        const uint destinationVLayerBytes = params.maxSequenceLength * params.kvHeadCount * params.destinationVHeadSlotBytes;
+
+        threadgroup float convertedK[512];
+        threadgroup float convertedV[512];
+        threadgroup float quantSMin[32], quantSMax[32];
+
+        for (uint kvHead = 0; kvHead < params.kvHeadCount; kvHead++) {
+            uint sourceKByteOffset, sourceVByteOffset;
+            uint destinationKByteOffset, destinationVByteOffset;
+            if (params.layoutMode == 0) {
+                sourceKByteOffset = layerIndex * sourceKLayerBytes + kvHead * params.maxSequenceLength * params.sourceKHeadSlotBytes + positionIndex * params.sourceKHeadSlotBytes;
+                sourceVByteOffset = layerIndex * sourceVLayerBytes + kvHead * params.maxSequenceLength * params.sourceVHeadSlotBytes + positionIndex * params.sourceVHeadSlotBytes;
+                destinationKByteOffset = layerIndex * destinationKLayerBytes + kvHead * params.maxSequenceLength * params.destinationKHeadSlotBytes + positionIndex * params.destinationKHeadSlotBytes;
+                destinationVByteOffset = layerIndex * destinationVLayerBytes + kvHead * params.maxSequenceLength * params.destinationVHeadSlotBytes + positionIndex * params.destinationVHeadSlotBytes;
+            } else {
+                sourceKByteOffset = layerIndex * sourceKLayerBytes + positionIndex * params.kvHeadCount * params.sourceKHeadSlotBytes + kvHead * params.sourceKHeadSlotBytes;
+                sourceVByteOffset = layerIndex * sourceVLayerBytes + positionIndex * params.kvHeadCount * params.sourceVHeadSlotBytes + kvHead * params.sourceVHeadSlotBytes;
+                destinationKByteOffset = layerIndex * destinationKLayerBytes + positionIndex * params.kvHeadCount * params.destinationKHeadSlotBytes + kvHead * params.destinationKHeadSlotBytes;
+                destinationVByteOffset = layerIndex * destinationVLayerBytes + positionIndex * params.kvHeadCount * params.destinationVHeadSlotBytes + kvHead * params.destinationVHeadSlotBytes;
+            }
+
+            for (uint d = tid; d < headDim; d += threadgroupSize) {
+                convertedK[d] = read_kv_element(
+                    sourceKeyCache + sourceKByteOffset,
+                    d,
+                    params.sourceKScheme,
+                    params.sourceKHeadSlotBytes,
+                    headDim
+                );
+                convertedV[d] = read_kv_element(
+                    sourceValueCache + sourceVByteOffset,
+                    d,
+                    params.sourceVScheme,
+                    params.sourceVHeadSlotBytes,
+                    headDim
+                );
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+
+            if (destinationKRotor || destinationVRotor) {
+                device const half* headRotors = rotorParams + ((layerIndex * params.kvHeadCount + kvHead) * params.numRotorGroups * 4);
+                if (destinationKRotor) {
+                    rotor_apply_forward(convertedK, headRotors, headDim, params.numRotorGroups, tid, threadgroupSize);
+                }
+                if (destinationVRotor) {
+                    rotor_apply_forward(convertedV, headRotors, headDim, params.numRotorGroups, tid, threadgroupSize);
+                }
+            }
+
+            const uint destinationKBaseScheme = rotor_base_scheme(params.destinationKScheme);
+            if (destinationKBaseScheme == 0x40) {
+                write_kv_quantized_q4(
+                    convertedK,
+                    destinationKeyCache + destinationKByteOffset,
+                    headDim,
+                    tid,
+                    threadgroupSize,
+                    tiisg,
+                    sgitg,
+                    quantSMin,
+                    quantSMax
+                );
+            } else if (destinationKBaseScheme == 0x10) {
+                write_kv_quantized_q8(
+                    convertedK,
+                    destinationKeyCache + destinationKByteOffset,
+                    headDim,
+                    tid,
+                    threadgroupSize,
+                    tiisg,
+                    sgitg,
+                    quantSMin,
+                    quantSMax
+                );
+            } else {
+                for (uint d = tid; d < headDim; d += threadgroupSize) {
+                    write_kv_element_dense(
+                        destinationKeyCache + destinationKByteOffset,
+                        d,
+                        convertedK[d],
+                        params.destinationKScheme
+                    );
+                }
+            }
+
+            if (params.qjlDimension > 0) {
+                threadgroup_barrier(mem_flags::mem_device);
+                device half* qjlOut = qjlResidualK
+                    + ((layerIndex * params.maxSequenceLength + positionIndex) * params.kvHeadCount + kvHead) * params.qjlDimension;
+                qjl_compute_residual(
+                    convertedK,
+                    destinationKeyCache + destinationKByteOffset,
+                    params.destinationKScheme,
+                    qjlMatrix,
+                    qjlOut,
+                    headDim,
+                    params.qjlDimension,
+                    params.destinationKHeadSlotBytes,
+                    tid,
+                    threadgroupSize
+                );
+            }
+            threadgroup_barrier(mem_flags::mem_device);
+
+            const uint destinationVBaseScheme = rotor_base_scheme(params.destinationVScheme);
+            if (destinationVBaseScheme == 0x40) {
+                write_kv_quantized_q4(
+                    convertedV,
+                    destinationValueCache + destinationVByteOffset,
+                    headDim,
+                    tid,
+                    threadgroupSize,
+                    tiisg,
+                    sgitg,
+                    quantSMin,
+                    quantSMax
+                );
+            } else if (destinationVBaseScheme == 0x10) {
+                write_kv_quantized_q8(
+                    convertedV,
+                    destinationValueCache + destinationVByteOffset,
+                    headDim,
+                    tid,
+                    threadgroupSize,
+                    tiisg,
+                    sgitg,
+                    quantSMin,
+                    quantSMax
+                );
+            } else {
+                for (uint d = tid; d < headDim; d += threadgroupSize) {
+                    write_kv_element_dense(
+                        destinationValueCache + destinationVByteOffset,
+                        d,
+                        convertedV[d],
+                        params.destinationVScheme
+                    );
+                }
+            }
+            threadgroup_barrier(mem_flags::mem_device);
         }
     }
     """
@@ -1718,7 +2131,7 @@ inline float read_kv_element(
     uint blockOffset = group * bytesPerBlock;
     float scale = float(*(device const half*)(cache + blockOffset));
     float zero = float(*(device const half*)(cache + blockOffset + 2));
-    char quantized = *(device const char*)(cache + blockOffset + 4 + indexInGroup);
+    uchar quantized = *(device const uchar*)(cache + blockOffset + 4 + indexInGroup);
     return scale * float(quantized) + zero;
 }
 
@@ -1860,7 +2273,7 @@ inline void write_kv_quantized_q8(
             float val = src[groupStart + i];
             int q = int(round((val - groupMin) / groupScale));
             q = clamp(q, 0, 255);
-            *(device char*)(block + 4 + i) = char(q);
+            *(device uchar*)(block + 4 + i) = uchar(q);
         }
     }
 }

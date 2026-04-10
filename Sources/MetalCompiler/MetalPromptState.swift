@@ -3,6 +3,7 @@ import Metal
 public struct MetalPromptState: @unchecked Sendable {
     public let position: Int
     public let firstToken: Int32
+    let residencyLease: MetalResidencyLease
     let hidden: MTLBuffer
     let residual: MTLBuffer
     let scratch: MTLBuffer
@@ -17,9 +18,12 @@ public struct MetalPromptState: @unchecked Sendable {
     let recurrentState: MTLBuffer?
     let perLayerInputs: MTLBuffer?
 
+    public var logitsBuffer: MTLBuffer { logits }
+
     init(
         position: Int,
         firstToken: Int32,
+        residencyLease: MetalResidencyLease,
         hidden: MTLBuffer,
         residual: MTLBuffer,
         scratch: MTLBuffer,
@@ -36,6 +40,7 @@ public struct MetalPromptState: @unchecked Sendable {
     ) {
         self.position = position
         self.firstToken = firstToken
+        self.residencyLease = residencyLease
         self.hidden = hidden
         self.residual = residual
         self.scratch = scratch

@@ -8,15 +8,17 @@ public struct RoPEFragment: PrimitiveMetalKernelFragment {
     public let headDimension: Int
     public let ropeDimension: Int
     public let base: Float
+    public let scaling: RoPEScaling?
     public let mropeAxes: MRoPEAxes?
 
     public init(headCount: Int, kvHeadCount: Int, headDimension: Int,
-                ropeDimension: Int, base: Float, mropeAxes: MRoPEAxes? = nil) {
+                ropeDimension: Int, base: Float, scaling: RoPEScaling? = nil, mropeAxes: MRoPEAxes? = nil) {
         self.headCount = headCount
         self.kvHeadCount = kvHeadCount
         self.headDimension = headDimension
         self.ropeDimension = ropeDimension
         self.base = base
+        self.scaling = scaling
         self.mropeAxes = mropeAxes
     }
 
@@ -53,6 +55,7 @@ public struct RoPEFragment: PrimitiveMetalKernelFragment {
                 uint32Binding(9, UInt32(sectionCount(at: 1))),
                 uint32Binding(10, UInt32(sectionCount(at: 2))),
                 uint32Binding(11, UInt32(mropeAxes?.interleaved == true ? 1 : 0)),
+                uint32Binding(12, UInt32(usesProportionalRoPE ? 1 : 0)),
             ],
             outputIsHidden: false,
             writeBufferIndices: Set<Int>([0, 1])
@@ -86,6 +89,7 @@ public struct RoPEFragment: PrimitiveMetalKernelFragment {
                     uint32Binding(10, UInt32(sectionCount(at: 2))),
                     uint32Binding(11, UInt32(mropeAxes?.interleaved == true ? 1 : 0)),
                     uint32Binding(12, UInt32(context.maximumSequenceLength)),
+                    uint32Binding(13, UInt32(usesProportionalRoPE ? 1 : 0)),
                 ],
                 threadgroupMemoryLength: 0,
                 sync: .bufferBarrier,
@@ -103,5 +107,9 @@ public struct RoPEFragment: PrimitiveMetalKernelFragment {
             return 0
         }
         return mropeAxes.sections[index]
+    }
+
+    private var usesProportionalRoPE: Bool {
+        scaling?.kind == .custom("proportional")
     }
 }

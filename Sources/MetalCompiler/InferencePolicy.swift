@@ -5,7 +5,7 @@
 /// the compiler decides HOW to achieve it.
 ///
 /// ```swift
-/// // Default: FP16 KV cache, 4096 max tokens
+/// // Default: model-aware loader default, 4096 max tokens
 /// let policy = InferencePolicy.default
 ///
 /// // Custom: Q4 K cache, FP16 V cache, 8192 max tokens
@@ -33,7 +33,11 @@ public struct InferencePolicy: Sendable {
         self.kvCache = kvCache
     }
 
-    /// Default policy: automatic scheme selection, 4096 max sequence length.
+    /// Default policy: conservative automatic KV cache, 4096 max sequence length.
+    ///
+    /// Loaders may resolve this into a model-aware default after inspecting
+    /// the compiled graph. For attention-backed decode paths, `SwiftLM`
+    /// upgrades this to RotorQuant Q4 by default.
     public static let `default` = InferencePolicy()
 }
 
@@ -81,8 +85,24 @@ public struct KVCachePolicy: Sendable {
         self.qjlDimension = qjlDimension
     }
 
-    /// Automatic: compiler selects scheme based on weight format.
+    /// Automatic: compiler selects a conservative dense scheme based on weight format.
     public static let automatic = KVCachePolicy()
+
+    /// Whether either K or V requests a RotorQuant scheme explicitly.
+    public var usesRotorQuant: Bool {
+        switch keyScheme {
+        case .fixed(let scheme) where scheme.isRotorScheme:
+            return true
+        default:
+            break
+        }
+        switch valueScheme {
+        case .fixed(let scheme) where scheme.isRotorScheme:
+            return true
+        default:
+            return false
+        }
+    }
 }
 
 /// How to select a KV cache quantization scheme.
@@ -92,3 +112,6 @@ public enum SchemeSelection: Sendable {
     /// Use a specific quantization scheme.
     case fixed(QuantizationSchemeIdentifier)
 }
+
+extension SchemeSelection: Equatable {}
+extension KVCachePolicy: Equatable {}

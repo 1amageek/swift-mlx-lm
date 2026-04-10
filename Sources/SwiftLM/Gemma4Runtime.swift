@@ -55,6 +55,7 @@ final class Gemma4Runtime {
     func makePromptContext(from prepared: PreparedInput) throws -> Gemma4PromptContext {
         var promptEmbeddings = try textRuntime.tokenEmbeddings(tokenIDs: prepared.tokenIDs)
         var perLayerTokenIDs = prepared.tokenIDs
+        var usesEmbeddingOverrides = false
 
         if let multimodal = prepared.multimodalMetadata {
             if !multimodal.videos.isEmpty {
@@ -80,6 +81,7 @@ final class Gemma4Runtime {
                 for (index, embedding) in zip(imageIndices, imageEmbeddings) {
                     promptEmbeddings[index] = embedding
                     perLayerTokenIDs[index] = padTokenID
+                    usesEmbeddingOverrides = true
                 }
             }
         }
@@ -89,7 +91,8 @@ final class Gemma4Runtime {
             perLayerInputs: try textRuntime.buildPrefillPerLayerInputs(
                 tokenIDs: perLayerTokenIDs,
                 promptEmbeddings: promptEmbeddings
-            )
+            ),
+            usesEmbeddingOverrides: usesEmbeddingOverrides
         )
     }
 

@@ -10,6 +10,8 @@ struct STAFPayloadConverter: Sendable {
             return try convertDensePayload(entry: entry, tensorData: tensorData)
         case .bf16RowMajor:
             return tensorData
+        case .fp32RowMajor:
+            return tensorData
         case .q4Group64ScaleF16, .q4Group128ScaleF16:
             return try repackMLXQuantized(entry: entry, weightData: tensorData)
         default:

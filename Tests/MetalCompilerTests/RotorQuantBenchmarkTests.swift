@@ -59,6 +59,66 @@ struct RotorQuantBenchmarkTests {
         return (model, store)
     }
 
+    private static func printPerKernelProfile(
+        title: String,
+        profiles: [BenchmarkSupport.StepProfile],
+        iterations: Int
+    ) {
+        struct KernelAggregate {
+            var totalMicroseconds: Double = 0
+            var count: Int = 0
+            var gridSample: MTLSize = .init()
+            var tgSample: MTLSize = .init()
+        }
+
+        var aggregates: [String: KernelAggregate] = [:]
+        let totalMicroseconds = profiles.reduce(0.0) { $0 + $1.totalMicroseconds }
+        let avgTotalUs = totalMicroseconds / Double(iterations)
+
+        for profile in profiles {
+            let avgUs = profile.totalMicroseconds / Double(iterations)
+            aggregates[profile.kernelName, default: KernelAggregate()].totalMicroseconds += avgUs
+            aggregates[profile.kernelName, default: KernelAggregate()].count += 1
+            if aggregates[profile.kernelName]?.gridSample.width == 0 {
+                aggregates[profile.kernelName]?.gridSample = profile.gridSize
+                aggregates[profile.kernelName]?.tgSample = profile.threadgroupSize
+            }
+        }
+
+        let sorted = aggregates.sorted { $0.value.totalMicroseconds > $1.value.totalMicroseconds }
+
+        print("\n=== \(title) ===")
+        print("Total steps: \(profiles.count)")
+        print("Total: \(String(format: "%.0f", avgTotalUs)) us (\(String(format: "%.1f", avgTotalUs / 1000)) ms)")
+        print("")
+        let header = "Kernel".padding(toLength: 40, withPad: " ", startingAt: 0)
+            + "Count  Total us     %  Grid          TG"
+        print(header)
+        print(String(repeating: "-", count: 100))
+
+        for (name, aggregate) in sorted.prefix(15) {
+            let pct = aggregate.totalMicroseconds / avgTotalUs * 100
+            let grid = "\(aggregate.gridSample.width)x\(aggregate.gridSample.height)x\(aggregate.gridSample.depth)"
+            let tg = "\(aggregate.tgSample.width)"
+            let pad = name.padding(toLength: 40, withPad: " ", startingAt: 0)
+            print("\(pad)\(String(format: "%5d %9.0f %5.1f%%", aggregate.count, aggregate.totalMicroseconds, pct))  \(grid.padding(toLength: 14, withPad: " ", startingAt: 0))\(tg)")
+        }
+
+        let attentionMicroseconds = aggregates
+            .filter { $0.key.localizedCaseInsensitiveContains("attn") }
+            .reduce(0.0) { $0 + $1.value.totalMicroseconds }
+        let gemvMicroseconds = aggregates
+            .filter { $0.key.localizedCaseInsensitiveContains("gemv") }
+            .reduce(0.0) { $0 + $1.value.totalMicroseconds }
+        let projectionMicroseconds = aggregates
+            .filter { $0.key.localizedCaseInsensitiveContains("projection") }
+            .reduce(0.0) { $0 + $1.value.totalMicroseconds }
+        print("")
+        print("Attention share: \(String(format: "%.1f", attentionMicroseconds / avgTotalUs * 100))%")
+        print("GEMV share:      \(String(format: "%.1f", gemvMicroseconds / avgTotalUs * 100))%")
+        print("Projection share:\(String(format: "%.1f", projectionMicroseconds / avgTotalUs * 100))%")
+    }
+
     // MARK: - KV Cache Memory Comparison
 
     @Test("KV cache memory: FP16 vs Q8 vs RotorQ8 vs RotorQ4")
@@ -776,8 +836,7 @@ struct RotorQuantBenchmarkTests {
 
     @Test("Gemma4 FP16 per-kernel decode profile")
     func gemma4PerKernelProfile() throws {
-        guard let device = MTLCreateSystemDefaultDevice(),
-              let queue = device.makeCommandQueue() else { return }
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
 
         let policy = InferencePolicy(
             maximumSequenceLength: 256,
@@ -791,7 +850,7 @@ struct RotorQuantBenchmarkTests {
         let iterations = 10
         let profiles = try BenchmarkSupport.profileDecodeSteps(
             model: &m,
-            queue: queue,
+            device: device,
             iterations: iterations,
             filter: { _ in true })
 
@@ -857,5 +916,61 @@ struct RotorQuantBenchmarkTests {
         let hostOverhead = breakdown.totalMicroseconds - breakdown.gpuMicroseconds
         let hostPct = hostOverhead / breakdown.totalMicroseconds * 100
         print("  Host overhead:  \(String(format: "%7.0f", hostOverhead)) us (\(String(format: "%.1f", hostPct))%)")
+    }
+
+    @Test("LFM FP16 vs RotorQ4 per-kernel decode profile")
+    func lfmPerKernelProfile() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+
+        let fp16Policy = InferencePolicy(
+            maximumSequenceLength: 256,
+            kvCache: .init(keyScheme: .automatic, valueScheme: .automatic))
+        let rotorQ4Policy = InferencePolicy(
+            maximumSequenceLength: 256,
+            kvCache: .init(
+                keyScheme: .fixed(.rotorQ4Group64ScaleF16),
+                valueScheme: .fixed(.rotorQ4Group64ScaleF16)))
+
+        let iterations = 10
+
+        do {
+            let (model, _) = try Self.setupWithPolicy(inferencePolicy: fp16Policy)
+            var m = model
+            let profiles = try BenchmarkSupport.profileDecodeSteps(
+                model: &m,
+                device: device,
+                iterations: iterations,
+                filter: { _ in true })
+            Self.printPerKernelProfile(
+                title: "Per-Kernel Decode Profile: LFM2.5-1.2B FP16 (avg of \(iterations) runs)",
+                profiles: profiles,
+                iterations: iterations
+            )
+            print("\n=== LFM FP16 CPU/GPU Breakdown (50 iterations) ===")
+            let breakdown = try BenchmarkSupport.measureDecodeSyncBreakdown(model: &m, iterations: 50)
+            print("  Encode+submit:  \(String(format: "%7.0f", breakdown.encodeSubmitMicroseconds)) us")
+            print("  GPU time:       \(String(format: "%7.0f", breakdown.gpuMicroseconds)) us")
+            print("  Total:          \(String(format: "%7.0f", breakdown.totalMicroseconds)) us")
+        }
+
+        do {
+            let (model, _) = try Self.setupWithPolicy(inferencePolicy: rotorQ4Policy)
+            var m = model
+            let profiles = try BenchmarkSupport.profileDecodeSteps(
+                model: &m,
+                device: device,
+                iterations: iterations,
+                filter: { _ in true })
+            Self.printPerKernelProfile(
+                title: "Per-Kernel Decode Profile: LFM2.5-1.2B RotorQ4 (avg of \(iterations) runs)",
+                profiles: profiles,
+                iterations: iterations
+            )
+            print("\n=== LFM RotorQ4 CPU/GPU Breakdown (50 iterations) ===")
+            let breakdown = try BenchmarkSupport.measureDecodeSyncBreakdown(model: &m, iterations: 50)
+            print("  Encode+submit:  \(String(format: "%7.0f", breakdown.encodeSubmitMicroseconds)) us")
+            print("  GPU time:       \(String(format: "%7.0f", breakdown.gpuMicroseconds)) us")
+            print("  Total:          \(String(format: "%7.0f", breakdown.totalMicroseconds)) us")
+        }
     }
 }

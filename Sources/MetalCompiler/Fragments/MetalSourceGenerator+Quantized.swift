@@ -126,7 +126,7 @@ public static func generateQuantizedGEMV_Q8(
             device const uchar* block = rowBase + b * BYTES_PER_BLOCK;
             float blockScale = float(*(device const half*)(block));
             float blockZero = float(*(device const half*)(block + 2));
-            device const char* quantized = (device const char*)(block + 4);
+            device const uchar* quantized = (device const uchar*)(block + 4);
             uint startWeight = b * GROUP_SIZE;
             for (uint i = 0; i < GROUP_SIZE; i++) {
                 float w = blockScale * float(quantized[i]) + blockZero;
@@ -207,7 +207,7 @@ kernel void quantize_kv_q8(
     if (scale < 1e-10f) scale = 1e-10f;
     device uchar* blockOut = output + gid * bytesPerBlock;
     *(device half*)(blockOut) = half(scale); *(device half*)(blockOut + 2) = half(zero);
-    for (uint i = 0; i < groupSize; i++) { int q = int(round((float(groupInput[i]) - zero) / scale)); *(device char*)(blockOut + 4 + i) = char(clamp(q, 0, 255)); }
+    for (uint i = 0; i < groupSize; i++) { int q = int(round((float(groupInput[i]) - zero) / scale)); *(device uchar*)(blockOut + 4 + i) = uchar(clamp(q, 0, 255)); }
 }
 kernel void dequantize_kv_q8(
     device const uchar* input [[buffer(0)]], device half* output [[buffer(1)]],
@@ -217,7 +217,7 @@ kernel void dequantize_kv_q8(
     if (gid >= totalElements / groupSize) return;
     device const uchar* block = input + gid * bytesPerBlock;
     float scale = float(*(device const half*)(block)); float zero = float(*(device const half*)(block + 2));
-    for (uint i = 0; i < groupSize; i++) output[gid * groupSize + i] = half(scale * float(*(device const char*)(block + 4 + i)) + zero);
+    for (uint i = 0; i < groupSize; i++) output[gid * groupSize + i] = half(scale * float(*(device const uchar*)(block + 4 + i)) + zero);
 }
 """
 

@@ -8,12 +8,22 @@ import MetalCompiler
 public struct PromptState: @unchecked Sendable {
     let metalState: MetalPromptState
     let ropePositionOffset: Int
+    let samplingSeed: UInt64
+    let promptTokenTail: [Int]
     /// Number of tokens in the prompt prefix used to create this state.
     public let promptTokenCount: Int
 
-    init(metalState: MetalPromptState, promptTokenCount: Int, ropePositionOffset: Int = 0) {
+    init(
+        metalState: MetalPromptState,
+        promptTokenCount: Int,
+        ropePositionOffset: Int = 0,
+        samplingSeed: UInt64,
+        promptTokenTail: [Int]
+    ) {
         self.metalState = metalState
         self.ropePositionOffset = ropePositionOffset
+        self.samplingSeed = samplingSeed
+        self.promptTokenTail = promptTokenTail
         self.promptTokenCount = promptTokenCount
     }
 }

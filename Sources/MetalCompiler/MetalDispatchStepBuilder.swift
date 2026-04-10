@@ -27,6 +27,11 @@ struct MetalDispatchStepBuilder {
             stafWeightStore: stafWeightStore,
             hiddenSize: hiddenSize,
             slotDimension: slotDimension,
+            fallbackWeightFormat: planBuildContext.kernelContext.weightFormat,
+            minimumFallbackLength: max(
+                hiddenSize * hiddenSize,
+                hiddenSize * slotDimension
+            ) * planBuildContext.kernelContext.weightFormat.storageByteSize,
             accessPolicyResolver: accessPolicyResolver
         )
 
@@ -35,6 +40,17 @@ struct MetalDispatchStepBuilder {
             routingPlanner.lastFragmentWriteBufferIndices = nil
             let bindings = routingPlanner.bindings(for: entry)
             let writeIndices = routingPlanner.lastFragmentWriteBufferIndices
+            let weightTensorName = Self.primaryWeightTensorName(for: entry)
+            if let step = try makeDecodeStructuralAddInPlaceStepIfNeeded(
+                entry: entry,
+                resolved: resolved,
+                bindings: bindings,
+                planBuildContext: planBuildContext,
+                weightTensorName: weightTensorName
+            ) {
+                steps.append(step)
+                continue
+            }
             steps.append(MetalDispatchStep(
                 pipeline: resolved.pipeline,
                 gridSize: resolved.config.grid,
@@ -49,7 +65,9 @@ struct MetalDispatchStepBuilder {
                     writeBufferIndices: writeIndices),
                 metadata: MetalDispatchStepMetadata(
                     kernelName: resolved.name,
-                    layerIndex: entry.layerIndex
+                    entryIndex: entry.index,
+                    layerIndex: entry.layerIndex,
+                    weightTensorName: weightTensorName
                 )
             ))
         }
@@ -66,12 +84,14 @@ struct MetalDispatchStepBuilder {
             argumentEncoders: argumentEncoders
         )
         let optimizedBarrierSteps = Self.optimizeDecodeBarrierPolicies(encodedArgumentSteps)
+        let supplementalResidencyBuffers = Self.supplementalResidencyBuffers(in: optimizedBarrierSteps)
 
         return MetalDispatchPlan(
             steps: optimizedBarrierSteps,
             buffers: bufferSet,
             unfusedEntryCount: unfusedCount,
-            fusedEntryCount: fusedEntries.count
+            fusedEntryCount: fusedEntries.count,
+            supplementalResidencyBuffers: supplementalResidencyBuffers
         )
     }
 
@@ -185,9 +205,22 @@ struct MetalDispatchStepBuilder {
                 bufferAccesses: step.bufferAccesses,
                 metadata: MetalDispatchStepMetadata(
                     kernelName: variantKernelName,
-                    layerIndex: step.metadata.layerIndex
+                    entryIndex: step.metadata.entryIndex,
+                    layerIndex: step.metadata.layerIndex,
+                    weightTensorName: step.metadata.weightTensorName
                 )
             )
+        }
+    }
+
+    private static func primaryWeightTensorName(for entry: DispatchEntry) -> String? {
+        switch entry.kind {
+        case .projection(let projection, _):
+            return entry.parameterBindings.first(where: { $0.role == projection.field })?.tensorName
+        case .fusedSwiGLUProjection(let fused):
+            return entry.parameterBindings.first(where: { $0.role == fused.gateField })?.tensorName
+        default:
+            return nil
         }
     }
 
@@ -202,6 +235,21 @@ struct MetalDispatchStepBuilder {
             return .inline([])
         }
         return bindings
+    }
+
+    private static func supplementalResidencyBuffers(
+        in steps: [MetalDispatchStep]
+    ) -> [MTLBuffer] {
+        var seen = Set<ObjectIdentifier>()
+        var buffers: [MTLBuffer] = []
+        for step in steps {
+            for buffer in step.bindings.ownedResidencyBuffers {
+                let identifier = ObjectIdentifier(buffer as AnyObject)
+                guard seen.insert(identifier).inserted else { continue }
+                buffers.append(buffer)
+            }
+        }
+        return buffers
     }
 
     private static func decodeBufferAccesses(
@@ -267,12 +315,19 @@ struct MetalDispatchStepBuilder {
     private static func optimizeDecodeBarrierPolicies(
         _ steps: [MetalDispatchStep]
     ) -> [MetalDispatchStep] {
+        var pendingReads = Set<BufferRegion>()
         var pendingWrites = Set<BufferRegion>()
         return steps.map { step in
-            let requiresBarrier = step.bufferAccesses.requiresBarrier(after: pendingWrites)
+            let requiresBarrier = step.bufferAccesses.requiresBarrier(
+                after: pendingReads,
+                pendingWrites: pendingWrites
+            )
             let barrierPolicy: MetalBarrierPolicy
             if requiresBarrier {
-                let resources = step.bufferAccesses.conflictingResources(from: pendingWrites)
+                let resources = step.bufferAccesses.conflictingResources(
+                    from: pendingReads,
+                    pendingWrites: pendingWrites
+                )
                 barrierPolicy = resources.isEmpty ? .bufferBarrier : .resourceBarrier(resources: resources)
             } else {
                 barrierPolicy = .none
@@ -286,8 +341,10 @@ struct MetalDispatchStepBuilder {
             )
 
             if requiresBarrier {
+                pendingReads = step.bufferAccesses.reads
                 pendingWrites = step.bufferAccesses.writes
             } else {
+                pendingReads.formUnion(step.bufferAccesses.reads)
                 pendingWrites.formUnion(step.bufferAccesses.writes)
             }
 
@@ -298,6 +355,60 @@ struct MetalDispatchStepBuilder {
                 metadata: step.metadata
             )
         }
+    }
+
+    private func makeDecodeStructuralAddInPlaceStepIfNeeded(
+        entry: DispatchEntry,
+        resolved: (
+            name: String,
+            pipeline: MTLComputePipelineState,
+            config: (grid: MTLSize, threadgroup: MTLSize, sharedMemoryBytes: Int)
+        ),
+        bindings: (buffers: [(Int, MTLBuffer, Int)], bytes: [(Int, [UInt8])]),
+        planBuildContext: PlanBuildContext,
+        weightTensorName: String?
+    ) throws -> MetalDispatchStep? {
+        guard case .structuralAdd = entry.kind else { return nil }
+        guard bindings.buffers.count == 3, bindings.bytes.count == 1 else { return nil }
+
+        let input = bindings.buffers[0]
+        let residual = bindings.buffers[1]
+        let output = bindings.buffers[2]
+        guard input.1 === output.1, input.2 == output.2 else { return nil }
+
+        guard let inplacePipeline = planBuildContext.pipelineCache["residual_add_inplace"] else {
+            throw MetalCompilerError.kernelNotFound("residual_add_inplace")
+        }
+
+        return MetalDispatchStep(
+            pipeline: inplacePipeline,
+            gridSize: resolved.config.grid,
+            threadgroupSize: resolved.config.threadgroup,
+            bufferBindings: [
+                (0, input.1, input.2),
+                (1, residual.1, residual.2),
+            ],
+            bytesBindings: [
+                (2, bindings.bytes[0].1),
+            ],
+            threadgroupMemoryLength: 0,
+            sync: .bufferBarrier,
+            bufferAccesses: MetalBufferAccesses(
+                reads: [
+                    BufferRegion(buffer: input.1, offset: input.2),
+                    BufferRegion(buffer: residual.1, offset: residual.2),
+                ],
+                writes: [
+                    BufferRegion(buffer: input.1, offset: input.2),
+                ]
+            ),
+            metadata: MetalDispatchStepMetadata(
+                kernelName: "residual_add_inplace",
+                entryIndex: entry.index,
+                layerIndex: entry.layerIndex,
+                weightTensorName: weightTensorName
+            )
+        )
     }
 
     private static func encodedArgumentTableKernelName(
@@ -311,6 +422,8 @@ struct MetalDispatchStepBuilder {
         case [0, 1]:
             switch kernelName {
             case "argmax":
+                return MetalKernelNameResolver.argumentTableVariantKernelName(for: kernelName)
+            case "residual_add_inplace":
                 return MetalKernelNameResolver.argumentTableVariantKernelName(for: kernelName)
             case "rms_norm", "rms_norm_bf16":
                 return MetalKernelNameResolver.argumentTableVariantKernelName(for: kernelName)
@@ -397,10 +510,14 @@ struct DecodeRoutingPlanner {
     let stafWeightStore: STAFWeightStore?
     let hiddenSize: Int
     let slotDimension: Int
+    let fallbackWeightFormat: WeightFormat
+    let minimumFallbackLength: Int
     let accessPolicyResolver: ProjectionWeightAccessPolicyResolver
-    private let elementSize = MemoryLayout<Float16>.size
+    private let elementSize: Int
     private var kvCacheIndex: Int = 0
     private var routingState = BufferRoutingState()
+    private var activeCompositeID: Int?
+    private var compositeInputSource: (buffer: MTLBuffer, offset: Int)?
 
     /// Write buffer indices from the most recent fragment binding.
     /// Set by `bindings(for:)` when entry is .fragment or .batchedFragment.
@@ -412,13 +529,18 @@ struct DecodeRoutingPlanner {
         stafWeightStore: STAFWeightStore?,
         hiddenSize: Int,
         slotDimension: Int,
+        fallbackWeightFormat: WeightFormat,
+        minimumFallbackLength: Int,
         accessPolicyResolver: ProjectionWeightAccessPolicyResolver
     ) {
         self.bufferSet = bufferSet
         self.stafWeightStore = stafWeightStore
         self.hiddenSize = hiddenSize
         self.slotDimension = slotDimension
+        self.fallbackWeightFormat = fallbackWeightFormat
+        self.minimumFallbackLength = minimumFallbackLength
         self.accessPolicyResolver = accessPolicyResolver
+        self.elementSize = bufferSet.bufferPrecision.byteSize
     }
 
     mutating func bindings(
@@ -427,10 +549,14 @@ struct DecodeRoutingPlanner {
         buffers: [(index: Int, buffer: MTLBuffer, offset: Int)],
         bytes: [(index: Int, value: [UInt8])]
     ) {
+        updateCompositeInputSource(for: entry)
+
         let weightResolver = WeightResolver(
             entry: entry,
             stafWeightStore: stafWeightStore,
             fallbackBuffer: bufferSet.hidden,
+            fallbackWeightFormat: fallbackWeightFormat,
+            minimumFallbackLength: minimumFallbackLength,
             logsMisses: true,
             executionPhase: .decode,
             accessPolicyResolver: accessPolicyResolver
@@ -444,6 +570,7 @@ struct DecodeRoutingPlanner {
             routingState.lastOutputIsHidden = false
             routingState.currentInputOffset = 0
             routingState.projectionIndex = 0
+            refreshCompositeInputSource()
             return (
                 buffers: [
                     (0, bufferSet.hidden, 0),
@@ -476,7 +603,10 @@ struct DecodeRoutingPlanner {
 
             let inputBuffer: MTLBuffer
             let inputOffset: Int
-            if routingState.lastOutputIsHidden {
+            if !isOutput, let compositeInputSource {
+                inputBuffer = compositeInputSource.buffer
+                inputOffset = compositeInputSource.offset
+            } else if routingState.lastOutputIsHidden {
                 inputBuffer = bufferSet.hidden
                 inputOffset = 0
             } else {
@@ -500,6 +630,7 @@ struct DecodeRoutingPlanner {
                 outputBuffer = bufferSet.scratch
                 outputOffset = scratchSlot * slotDimension * elementSize
                 routingState.lastOutputIsHidden = false
+                routingState.currentInputOffset = outputOffset
             }
 
             routingState.projectionIndex += 1
@@ -576,10 +707,20 @@ struct DecodeRoutingPlanner {
             )
 
         case .structuralAdd(let dimension):
+            let inputBuffer: MTLBuffer
+            let inputOffset: Int
+            if routingState.lastOutputIsHidden {
+                inputBuffer = bufferSet.hidden
+                inputOffset = 0
+            } else {
+                inputBuffer = bufferSet.scratch
+                inputOffset = routingState.currentInputOffset
+            }
             routingState.lastOutputIsHidden = true
+            routingState.currentInputOffset = 0
             return (
                 buffers: [
-                    (0, bufferSet.hidden, 0),
+                    (0, inputBuffer, inputOffset),
                     (1, bufferSet.residual, 0),
                     (2, bufferSet.hidden, 0),
                 ],
@@ -589,12 +730,24 @@ struct DecodeRoutingPlanner {
             )
 
         case .fragment(let fragment):
+            let resolvedKVCacheIndex = fragment.kvCacheIndexOverride ?? kvCacheIndex
+            let currentInputBuffer: MTLBuffer
+            let currentInputOffset: Int
+            if routingState.lastOutputIsHidden {
+                currentInputBuffer = bufferSet.hidden
+                currentInputOffset = 0
+            } else {
+                currentInputBuffer = bufferSet.scratch
+                currentInputOffset = routingState.currentInputOffset
+            }
             let bindingContext = BufferBindingContext(
                 bufferSet: bufferSet,
                 slotDimension: slotDimension,
                 elementSize: elementSize,
+                currentInputBuffer: currentInputBuffer,
+                currentInputOffset: currentInputOffset,
                 layerIndex: entry.layerIndex,
-                kvCacheIndex: kvCacheIndex,
+                kvCacheIndex: resolvedKVCacheIndex,
                 convLayerIndex: routingState.convLayerIndex,
                 recurrentLayerIndex: routingState.recurrentLayerIndex,
                 resolveWeight: weightResolver.resolve
@@ -610,6 +763,9 @@ struct DecodeRoutingPlanner {
             if bindings.consumesConvLayer { routingState.convLayerIndex += 1 }
             if bindings.consumesRecurrentLayer { routingState.recurrentLayerIndex += 1 }
             routingState.lastOutputIsHidden = bindings.outputIsHidden
+            if bindings.resetsProjectionIndex {
+                refreshCompositeInputSource()
+            }
             lastFragmentWriteBufferIndices = bindings.writeBufferIndices
             return (buffers: bindings.buffers, bytes: bindings.bytes)
 
@@ -639,7 +795,7 @@ struct DecodeRoutingPlanner {
                 inputOffset = 0
             } else {
                 inputBuffer = bufferSet.scratch
-                inputOffset = 0
+                inputOffset = routingState.currentInputOffset
             }
 
             let count = batched.projections.count
@@ -647,6 +803,7 @@ struct DecodeRoutingPlanner {
                 (0, inputBuffer, inputOffset),
             ]
             var bytesBindings: [(index: Int, value: [UInt8])] = []
+            var lastOutputOffset = routingState.currentInputOffset
 
             for (i, proj) in batched.projections.enumerated() {
                 let (weightBuf, weightOff) = weightResolver.resolve(role: proj.field)
@@ -656,6 +813,7 @@ struct DecodeRoutingPlanner {
             for i in 0..<count {
                 let scratchSlot = routingState.projectionIndex + 1
                 let outputOffset = scratchSlot * slotDimension * elementSize
+                lastOutputOffset = outputOffset
                 bufferBindings.append((1 + count + i, bufferSet.scratch, outputOffset))
                 routingState.projectionIndex += 1
             }
@@ -667,44 +825,129 @@ struct DecodeRoutingPlanner {
             }
 
             routingState.lastOutputIsHidden = false
+            routingState.currentInputOffset = lastOutputOffset
             return (buffers: bufferBindings, bytes: bytesBindings)
 
         case .batchedFragment(let batch):
-            let slotBytes = slotDimension * elementSize
+            let currentInputBuffer: MTLBuffer
+            let currentInputOffset: Int
+            if routingState.lastOutputIsHidden {
+                currentInputBuffer = bufferSet.hidden
+                currentInputOffset = 0
+            } else {
+                currentInputBuffer = bufferSet.scratch
+                currentInputOffset = routingState.currentInputOffset
+            }
+
             var bufferBindings: [(index: Int, buffer: MTLBuffer, offset: Int)] = []
             var bytesBindings: [(index: Int, value: [UInt8])] = []
+            var mappedWriteIndices = Set<Int>()
+            var consumedKVLayers = 0
+            var consumedConvLayers = 0
+            var consumedRecurrentLayers = 0
+            var resetsProjectionIndex = false
+            var outputIsHidden = false
+            var expectedHeadDimension: Int?
+            var expectedEpsilon: Float?
 
-            for i in 0..<batch.fragments.count {
-                let scratchSlotIndex = 1 + i
-                bufferBindings.append((i, bufferSet.scratch, scratchSlotIndex * slotBytes))
+            let fragmentCount = batch.fragments.count
+            bufferBindings.reserveCapacity(fragmentCount * 2)
+
+            for (fragmentIndex, fragment) in batch.fragments.enumerated() {
+                let resolvedKVCacheIndex = fragment.kvCacheIndexOverride ?? (kvCacheIndex + consumedKVLayers)
+                let bindingContext = BufferBindingContext(
+                    bufferSet: bufferSet,
+                    slotDimension: slotDimension,
+                    elementSize: elementSize,
+                    currentInputBuffer: currentInputBuffer,
+                    currentInputOffset: currentInputOffset,
+                    layerIndex: entry.layerIndex,
+                    kvCacheIndex: resolvedKVCacheIndex,
+                    convLayerIndex: routingState.convLayerIndex + consumedConvLayers,
+                    recurrentLayerIndex: routingState.recurrentLayerIndex + consumedRecurrentLayers,
+                    resolveWeight: weightResolver.resolve
+                )
+                let fragmentBindings = fragment.decodeBindings(context: bindingContext)
+
+                guard let dataBinding = fragmentBindings.buffers.first(where: { $0.index == 0 }) else {
+                    preconditionFailure("Batched fragment \(type(of: fragment)) missing data binding[0]")
+                }
+                guard let weightBinding = fragmentBindings.buffers.first(where: { $0.index == 1 }) else {
+                    preconditionFailure("Batched fragment \(type(of: fragment)) missing weight binding[1]")
+                }
+                guard case .perHead(let headCount) = fragment.dispatchDimension else {
+                    preconditionFailure("Batched fragment \(type(of: fragment)) must use .perHead dispatch")
+                }
+
+                let headDimension: Int
+                if let qkNorm = fragment as? QKNormFragment {
+                    headDimension = qkNorm.headDimension
+                } else {
+                    preconditionFailure("Unsupported batched fragment type: \(type(of: fragment))")
+                }
+
+                if let expectedHeadDimension, expectedHeadDimension != headDimension {
+                    preconditionFailure("Batched fragments must share the same head dimension")
+                }
+                expectedHeadDimension = headDimension
+
+                let epsilon = fragment.normEpsilon ?? 1e-6
+                if let expectedEpsilon, expectedEpsilon != epsilon {
+                    preconditionFailure("Batched fragments must share the same epsilon")
+                }
+                expectedEpsilon = epsilon
+
+                bufferBindings.append((fragmentIndex, dataBinding.buffer, dataBinding.offset))
+                bufferBindings.append((fragmentCount + fragmentIndex, weightBinding.buffer, weightBinding.offset))
+                bytesBindings.append(uint32Binding(2 * fragmentCount + fragmentIndex, UInt32(headCount)))
+
+                if fragmentBindings.writeBufferIndices?.contains(dataBinding.index) == true {
+                    mappedWriteIndices.insert(fragmentIndex)
+                }
+
+                resetsProjectionIndex = resetsProjectionIndex || fragmentBindings.resetsProjectionIndex
+                outputIsHidden = fragmentBindings.outputIsHidden
+                if fragmentBindings.consumesKVCacheLayer { consumedKVLayers += 1 }
+                if fragmentBindings.consumesConvLayer { consumedConvLayers += 1 }
+                if fragmentBindings.consumesRecurrentLayer { consumedRecurrentLayers += 1 }
             }
 
-            for (i, frag) in batch.fragments.enumerated() {
-                if let weightSlot = frag.weightSlots.first {
-                    let role = weightSlot.field ?? "weight"
-                    let (weightBuffer, weightOffset) = weightResolver.resolve(role: role)
-                    bufferBindings.append((batch.fragments.count + i, weightBuffer, weightOffset))
+            if let expectedHeadDimension {
+                bytesBindings.append(uint32Binding(3 * fragmentCount, UInt32(expectedHeadDimension)))
+            }
+            if let expectedEpsilon {
+                bytesBindings.append(floatBinding(3 * fragmentCount + 1, expectedEpsilon))
+            }
+
+            if resetsProjectionIndex {
+                routingState.projectionIndex = 0
+                if !outputIsHidden {
+                    routingState.currentInputOffset = 0
                 }
             }
-
-            let bytesStart = 2 * batch.fragments.count
-            for (i, frag) in batch.fragments.enumerated() {
-                if case .perHead(let headCount) = frag.dispatchDimension {
-                    bytesBindings.append(uint32Binding(bytesStart + i, UInt32(headCount)))
-                }
+            kvCacheIndex += consumedKVLayers
+            routingState.convLayerIndex += consumedConvLayers
+            routingState.recurrentLayerIndex += consumedRecurrentLayers
+            routingState.lastOutputIsHidden = outputIsHidden
+            if resetsProjectionIndex {
+                refreshCompositeInputSource()
             }
-
-            if case .perHead = batch.dispatchDimension,
-               let firstFrag = batch.fragments.first,
-               case .perHead(let firstHeadCount) = firstFrag.dispatchDimension
-            {
-                let headDimension = hiddenSize / firstHeadCount
-                bytesBindings.append(uint32Binding(bytesStart + batch.fragments.count, UInt32(headDimension)))
-                let epsilon = batch.fragments.first?.normEpsilon ?? 1e-6
-                bytesBindings.append(floatBinding(bytesStart + batch.fragments.count + 1, epsilon))
-            }
-
+            lastFragmentWriteBufferIndices = mappedWriteIndices
             return (buffers: bufferBindings, bytes: bytesBindings)
+        }
+    }
+
+    private mutating func updateCompositeInputSource(for entry: DispatchEntry) {
+        guard activeCompositeID != entry.compositeID else { return }
+        activeCompositeID = entry.compositeID
+        refreshCompositeInputSource()
+    }
+
+    private mutating func refreshCompositeInputSource() {
+        if routingState.lastOutputIsHidden {
+            compositeInputSource = (bufferSet.hidden, 0)
+        } else {
+            compositeInputSource = (bufferSet.scratch, routingState.currentInputOffset)
         }
     }
 }

@@ -141,8 +141,6 @@ struct STAFSpecializedWeightStoreBuilder {
                 }
             }
         }
-        requestResidency(for: packedBuffer)
-
         let labelSuffix: String
         switch layout {
         case .rowMajor:
@@ -171,19 +169,5 @@ struct STAFSpecializedWeightStoreBuilder {
             rowsPerBlock: 8,
             layout: .blockedRows8Tiles128
         )
-    }
-
-    private func requestResidency(for buffer: MTLBuffer) {
-        if #available(macOS 15.0, iOS 18.0, *) {
-            do {
-                let descriptor = MTLResidencySetDescriptor()
-                let residencySet = try device.makeResidencySet(descriptor: descriptor)
-                residencySet.addAllocation(buffer)
-                residencySet.commit()
-                residencySet.requestResidency()
-            } catch {
-                // Residency is an optional optimization.
-            }
-        }
     }
 }

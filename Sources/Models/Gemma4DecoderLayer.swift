@@ -23,6 +23,23 @@ struct Gemma4DecoderLayer: ModelComponent {
         return layerIndex >= firstSharedLayerIndex
     }
 
+    private var sharedKeyValueSourceLayerIndex: Int? {
+        guard let numKVSharedLayers = config.numKVSharedLayers,
+              numKVSharedLayers > 0 else {
+            return nil
+        }
+        let firstSharedLayerIndex = config.layerCount - numKVSharedLayers
+        guard layerIndex >= firstSharedLayerIndex, firstSharedLayerIndex > 0 else {
+            return nil
+        }
+        let previousLayerTypes = Array(config.layerTypes![..<firstSharedLayerIndex])
+        let currentType = config.layerTypes![layerIndex]
+        guard let sourceOffset = previousLayerTypes.lastIndex(of: currentType) else {
+            return nil
+        }
+        return sourceOffset
+    }
+
     private var attentionHeadDimension: Int {
         isFullAttention ? (config.globalHeadDim ?? config.headDim) : config.headDim
     }
@@ -35,11 +52,13 @@ struct Gemma4DecoderLayer: ModelComponent {
     }
 
     private var ropeDimension: Int {
-        guard isFullAttention,
-              let factor = config.fullAttentionPartialRotaryFactor else {
+        guard isFullAttention else {
             return config.ropeDimension
         }
-        return Int(Float(attentionHeadDimension) * factor)
+        let dimension = Int(
+            Float(attentionHeadDimension) * (config.fullAttentionPartialRotaryFactor ?? 1.0)
+        )
+        return dimension - (dimension % 2)
     }
 
     private var ropeBase: Float {
@@ -63,6 +82,7 @@ struct Gemma4DecoderLayer: ModelComponent {
                 headCount: config.attentionHeads,
                 kvHeadCount: attentionKVHeads,
                 headDimension: attentionHeadDimension,
+                attentionScale: 1.0,
                 bias: config.attentionBias,
                 rope: RoPEAttributes(
                     dimension: ropeDimension,
@@ -70,9 +90,14 @@ struct Gemma4DecoderLayer: ModelComponent {
                     scaling: ropeScaling
                 ),
                 qkNorm: .rmsNorm,
+                valueNorm: .rmsNormNoScale,
+                valueProjectionSource: isFullAttention && config.attentionKEqualsV
+                    ? .keyProjection
+                    : .dedicatedProjection,
                 window: isFullAttention ? nil : config.slidingWindow.map {
-                    AttentionWindow(left: $0, right: $0)
-                }
+                    AttentionWindow(left: $0, right: 0)
+                },
+                sharedKeyValueSourceLayerIndex: sharedKeyValueSourceLayerIndex
             )
             RMSNorm(dimension: config.hiddenSize, epsilon: config.normEps)
         }
@@ -100,5 +125,7 @@ struct Gemma4DecoderLayer: ModelComponent {
                 )
             }
         }
+
+        LayerScale(dimension: config.hiddenSize)
     }
 }

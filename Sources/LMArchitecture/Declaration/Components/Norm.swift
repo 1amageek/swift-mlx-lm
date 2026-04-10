@@ -9,19 +9,21 @@ public struct RMSNorm: ModelComponent {
 
     public let dimension: Int
     public let epsilon: Float
+    public let weightBias: Float
 
-    public init(dimension: Int, epsilon: Float = 1e-6) {
+    public init(dimension: Int, epsilon: Float = 1e-6, weightBias: Float = 0) {
         precondition(dimension > 0, "dimension must be positive")
         precondition(epsilon > 0, "epsilon must be positive")
         self.dimension = dimension
         self.epsilon = epsilon
+        self.weightBias = weightBias
     }
 }
 
 extension RMSNorm: PrimitiveComponent {
 
     package var operationKind: OperationKind {
-        .primitive(RMSNormAttributes(dimension: dimension, epsilon: epsilon))
+        .primitive(RMSNormAttributes(dimension: dimension, epsilon: epsilon, weightBias: weightBias))
     }
 
     package var operationSignature: OperationSignature {

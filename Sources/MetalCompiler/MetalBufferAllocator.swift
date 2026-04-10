@@ -9,10 +9,11 @@ struct MetalBufferAllocator {
         let elementSize = context.decodeBufferPrecision.byteSize
         let resolvedIntermediateSize = context.resolvedIntermediateSize
         let resolvedVocabSize = context.resolvedVocabSize
+        let sizingEntries = walkContext.entries
         let slotDimension = max(
             context.hiddenSize,
             resolvedIntermediateSize,
-            maximumScratchProjectionDimension(in: fusedEntries)
+            maximumScratchProjectionDimension(in: sizingEntries)
         )
         let scratchElementCount = max(slotDimension * 5, resolvedIntermediateSize * 5)
 
@@ -22,7 +23,7 @@ struct MetalBufferAllocator {
         let hiddenBuffer = context.device.makeBuffer(length: context.hiddenSize * elementSize, options: gpuOnlyOptions)!
         let residualBuffer = context.device.makeBuffer(length: context.hiddenSize * elementSize, options: gpuOnlyOptions)!
         let scratchBuffer = context.device.makeBuffer(length: scratchElementCount * elementSize, options: gpuOnlyOptions)!
-        let logitsBuffer = context.device.makeBuffer(length: resolvedVocabSize * elementSize, options: gpuOnlyOptions)!
+        let logitsBuffer = context.device.makeBuffer(length: resolvedVocabSize * elementSize, options: cpuAccessOptions)!
         let positionBuffer = context.device.makeBuffer(length: 4, options: cpuAccessOptions)!
         let ropePositionAxesBuffer = context.device.makeBuffer(length: 3 * 4, options: cpuAccessOptions)!
         let tokenInputBuffer = context.device.makeBuffer(length: 4, options: cpuAccessOptions)!
@@ -51,13 +52,17 @@ struct MetalBufferAllocator {
             kvCache = nil
         }
 
-        let convState = convStateRequirements(in: fusedEntries)
+        let convState = convStateRequirements(in: sizingEntries)
+        let convStateElementSize = MemoryLayout<Float16>.size
         let perLayerInput = perLayerInputRequirements(in: fusedEntries)
         let statefulGPUOnlyOptions: MTLResourceOptions = [.storageModePrivate]
         let sharedStateOptions: MTLResourceOptions = [.storageModeShared]
         let convStateBuffer: MTLBuffer?
         if convState.layerCount > 0 {
-            let byteCount = convState.layerCount * convState.kernelSize * convState.dimension * elementSize
+            let byteCount = convState.layerCount
+                * convState.kernelSize
+                * convState.dimension
+                * convStateElementSize
             convStateBuffer = context.device.makeBuffer(length: byteCount, options: statefulGPUOnlyOptions)
         } else {
             convStateBuffer = nil
@@ -76,7 +81,7 @@ struct MetalBufferAllocator {
             perLayerInputBuffer = nil
         }
 
-        let recurrentState = recurrentStateRequirements(in: fusedEntries)
+        let recurrentState = recurrentStateRequirements(in: sizingEntries)
         let recurrentStateBuffer: MTLBuffer?
         if recurrentState.layerCount > 0 {
             recurrentStateBuffer = context.device.makeBuffer(
@@ -87,29 +92,31 @@ struct MetalBufferAllocator {
             recurrentStateBuffer = nil
         }
 
-        let weightBuffers = context.stafWeightStore.map { [$0.buffer] } ?? []
-        let bufferSet = MetalBufferSet(
-            bufferPrecision: context.decodeBufferPrecision,
-            hidden: hiddenBuffer,
-            residual: residualBuffer,
-            scratch: scratchBuffer,
-            weights: weightBuffers,
-            kvCache: kvCache,
-            convState: convStateBuffer,
-            recurrentState: recurrentStateBuffer,
-            convStateDimension: convState.dimension,
-            convStateKernelSize: convState.kernelSize,
-            recurrentStateBytesPerLayer: recurrentState.bytesPerLayer,
-            perLayerInputs: perLayerInputBuffer,
-            perLayerInputDimension: perLayerInput.dimension,
-            perLayerInputLayerCount: perLayerInput.layerCount,
-            logits: logitsBuffer,
-            position: positionBuffer,
-            ropePositionAxes: ropePositionAxesBuffer,
-            tokenIn: tokenInputBuffer,
-            tokenOut: tokenOutputBuffer
+        let weightBuffers = context.stafWeightStore?.residencyCandidateBuffers ?? []
+        return DecodeBufferAllocation(
+            bufferSet: MetalBufferSet(
+                bufferPrecision: context.decodeBufferPrecision,
+                hidden: hiddenBuffer,
+                residual: residualBuffer,
+                scratch: scratchBuffer,
+                weights: weightBuffers,
+                kvCache: kvCache,
+                convState: convStateBuffer,
+                recurrentState: recurrentStateBuffer,
+                convStateDimension: convState.dimension,
+                convStateKernelSize: convState.kernelSize,
+                recurrentStateBytesPerLayer: recurrentState.bytesPerLayer,
+                perLayerInputs: perLayerInputBuffer,
+                perLayerInputDimension: perLayerInput.dimension,
+                perLayerInputLayerCount: perLayerInput.layerCount,
+                logits: logitsBuffer,
+                position: positionBuffer,
+                ropePositionAxes: ropePositionAxesBuffer,
+                tokenIn: tokenInputBuffer,
+                tokenOut: tokenOutputBuffer
+            ),
+            slotDimension: slotDimension
         )
-        return DecodeBufferAllocation(bufferSet: bufferSet, slotDimension: slotDimension)
     }
 
     func makePrefillBufferAllocation(
@@ -128,10 +135,11 @@ struct MetalBufferAllocator {
         let resolvedIntermediateSize = context.resolvedIntermediateSize
         let resolvedVocabSize = context.resolvedVocabSize
         let maximumSequenceLength = context.maximumSequenceLength
+        let sizingEntries = walkContext.entries
         let slotDimension = max(
             context.hiddenSize,
             resolvedIntermediateSize,
-            maximumScratchProjectionDimension(in: fusedEntries)
+            maximumScratchProjectionDimension(in: sizingEntries)
         )
         let scratchElementCount = max(slotDimension * 5, resolvedIntermediateSize * 5)
         // Hidden stays shared for vision model CPU access (overwriteHiddenRows, addDeepstackRows).
@@ -139,8 +147,8 @@ struct MetalBufferAllocator {
         let cpuGpuOptions: MTLResourceOptions = [.storageModeShared]
         let gpuOnlyOptions: MTLResourceOptions = [.storageModePrivate]
 
-        let convStateRequirements = convStateRequirements(in: fusedEntries)
-        let perLayerInputRequirements = perLayerInputRequirements(in: fusedEntries)
+        let convStateRequirements = convStateRequirements(in: sizingEntries)
+        let perLayerInputRequirements = perLayerInputRequirements(in: sizingEntries)
         let prefillConvStateBuffer: MTLBuffer?
         let resolvedConvDimension: Int
         let resolvedConvKernelSize: Int
@@ -190,7 +198,7 @@ struct MetalBufferAllocator {
             prefillKVCache = nil
         }
 
-        let recurrentStateRequirements = recurrentStateRequirements(in: fusedEntries)
+        let recurrentStateRequirements = recurrentStateRequirements(in: sizingEntries)
         let prefillRecurrentStateBuffer: MTLBuffer?
         let resolvedRecurrentBytesPerLayer: Int
         if let sharedRecurrentState {
@@ -215,7 +223,7 @@ struct MetalBufferAllocator {
             hidden: context.device.makeBuffer(length: maximumSequenceLength * context.hiddenSize * f32ElementSize, options: cpuGpuOptions)!,
             residual: context.device.makeBuffer(length: maximumSequenceLength * context.hiddenSize * f32ElementSize, options: gpuOnlyOptions)!,
             scratch: context.device.makeBuffer(length: maximumSequenceLength * scratchElementCount * f32ElementSize, options: gpuOnlyOptions)!,
-            weights: context.stafWeightStore.map { [$0.buffer] } ?? [],
+            weights: context.stafWeightStore?.residencyCandidateBuffers ?? [],
             kvCache: prefillKVCache,
             convState: prefillConvStateBuffer,
             recurrentState: prefillRecurrentStateBuffer,
@@ -240,11 +248,15 @@ struct MetalBufferAllocator {
             }(),
             perLayerInputDimension: perLayerInputRequirements.dimension,
             perLayerInputLayerCount: perLayerInputRequirements.layerCount,
-            logits: context.device.makeBuffer(length: resolvedVocabSize * f32ElementSize, options: gpuOnlyOptions)!,
+            logits: context.device.makeBuffer(length: resolvedVocabSize * f32ElementSize, options: [.storageModeShared])!,
             tokenIDs: context.device.makeBuffer(length: maximumSequenceLength * 4, options: [.storageModeShared])!,
             positions: context.device.makeBuffer(length: maximumSequenceLength * 4, options: [.storageModeShared])!,
             ropePositionAxes: context.device.makeBuffer(length: maximumSequenceLength * 3 * 4, options: [.storageModeShared])!,
-            tokenOut: context.device.makeBuffer(length: 4, options: [.storageModeShared])!
+            tokenOut: context.device.makeBuffer(length: 4, options: [.storageModeShared])!,
+            runtimeConstantBuffer: context.device.makeBuffer(
+                length: PrefillBufferSet.runtimeConstantBufferSize(maximumSequenceLength: maximumSequenceLength),
+                options: [.storageModeShared]
+            )!
         )
 
         return PrefillBufferAllocation(
@@ -257,13 +269,31 @@ struct MetalBufferAllocator {
     }
 
     private func maximumScratchProjectionDimension(in entries: [DispatchEntry]) -> Int {
-        var maximumOutputDimension = 0
-        for entry in entries {
-            if case .projection(let projection, let isOutput) = entry.kind, !isOutput {
-                maximumOutputDimension = max(maximumOutputDimension, projection.outputDimension)
-            }
+        entries.reduce(into: 0) { maximumOutputDimension, entry in
+            maximumOutputDimension = max(
+                maximumOutputDimension,
+                maximumScratchProjectionDimension(in: entry.kind)
+            )
         }
-        return maximumOutputDimension
+    }
+
+    private func maximumScratchProjectionDimension(in kind: DispatchKind) -> Int {
+        switch kind {
+        case .projection(let projection, let isOutput):
+            return isOutput ? 0 : projection.outputDimension
+        case .batchedProjection(let batched):
+            return batched.projections.map(\.outputDimension).max() ?? 0
+        case .fusedSwiGLUProjection(let fused):
+            return fused.outputDimension
+        case .fragment,
+             .batchedFragment,
+             .fusedCopyNorm,
+             .fusedResidualAddCopyNorm,
+             .fusedResidualAddNorm,
+             .structuralCopy,
+             .structuralAdd:
+            return 0
+        }
     }
 
     private func convStateRequirements(in entries: [DispatchEntry]) -> ConvStateRequirements {

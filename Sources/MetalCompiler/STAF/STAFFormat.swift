@@ -22,7 +22,7 @@ public enum STAF {
     public static let currentMetadataSchemaVersion: UInt32 = 1
 
     /// Current STAF converter metadata version.
-    public static let currentConverterVersion: UInt32 = 1
+    public static let currentConverterVersion: UInt32 = 2
 
     /// File header size in bytes (packed, no alignment padding).
     public static let headerSize: Int = 64

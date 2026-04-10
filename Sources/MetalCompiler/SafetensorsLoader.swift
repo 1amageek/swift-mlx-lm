@@ -237,10 +237,6 @@ public struct SafetensorsLoader: Sendable {
 
     /// Load multiple safetensors files into a MetalWeightStore.
     ///
-    /// Uses zero-copy mmap for each file. Optionally creates a MTLResidencySet
-    /// to keep weight buffers GPU-resident (macOS 15+ / iOS 18+), preventing
-    /// page faults during inference.
-    ///
     /// - Parameters:
     ///   - urls: Paths to safetensors files.
     ///   - device: Metal device for buffer creation.
@@ -257,23 +253,6 @@ public struct SafetensorsLoader: Sendable {
                 globalTensorMap[name] = (fileIndex: index, info: info)
             }
             files.append(file)
-        }
-
-        // Request GPU residency for all weight buffers.
-        // Prevents page faults during inference after first token.
-        if #available(macOS 15.0, iOS 18.0, *) {
-            do {
-                let descriptor = MTLResidencySetDescriptor()
-                let residencySet = try device.makeResidencySet(descriptor: descriptor)
-                for file in files {
-                    residencySet.addAllocation(file.buffer)
-                }
-                residencySet.commit()
-                residencySet.requestResidency()
-                // residencySet is retained by the MTLDevice — no need to store it
-            } catch {
-                // Residency set is optional optimization — proceed without it
-            }
         }
 
         return MetalWeightStore(files: files, tensorMap: globalTensorMap)
@@ -301,6 +280,10 @@ public struct MetalWeightStore: @unchecked Sendable {
     public let files: [MetalWeightFile]
     /// Global tensor lookup: name → (file index, tensor info).
     public let tensorMap: [String: (fileIndex: Int, info: SafetensorsTensorInfo)]
+
+    var residencyCandidateBuffers: [MTLBuffer] {
+        files.map(\.buffer)
+    }
 
     /// Get the MTLBuffer and offset for a named tensor.
     ///

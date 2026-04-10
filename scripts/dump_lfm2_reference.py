@@ -11,6 +11,7 @@ Usage:
 """
 
 import argparse
+import json
 import torch
 import numpy as np
 from pathlib import Path
@@ -19,7 +20,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig
 
 
 # Fixed input tokens (matches existing DecodeTests.swift)
-INPUT_TOKENS = [1, 1, 6, 6423, 708]
+DEFAULT_INPUT_TOKENS = [1, 1, 6, 6423, 708]
 NUM_DECODE_STEPS = 3
 MODEL_ID = "LiquidAI/LFM2.5-1.2B-Thinking"
 
@@ -47,6 +48,17 @@ def identify_conv_layers(config):
     print(f"Conv layers: {conv_indices} ({len(conv_indices)} total)")
     print(f"Attention layers: {attn_indices} ({len(attn_indices)} total)")
     return conv_indices
+
+
+def conv_state_from_cache_layer(past_key_values, layer_index):
+    """Read a conv-state tensor from either the old or new transformers cache API."""
+    if hasattr(past_key_values, "layers"):
+        layer = past_key_values.layers[layer_index]
+        if hasattr(layer, "conv_states") and layer.conv_states is not None:
+            return layer.conv_states[0].detach().half().cpu()
+    if hasattr(past_key_values, "conv_cache"):
+        return past_key_values.conv_cache[layer_index][0].detach().half().cpu()
+    raise AttributeError(f"Conv cache not found for layer {layer_index}")
 
 
 def run_prefill_with_hooks(model, config, input_tokens):
@@ -112,7 +124,7 @@ def run_prefill_with_hooks(model, config, input_tokens):
         if i in conv_layer_indices:
             # Python layout: [batch=1, hidden_size, L_cache]
             # Swift layout:  [L_cache, hidden_size] (temporal-first)
-            conv_state = past.conv_cache[i][0].detach().half().cpu()  # [hidden, L_cache]
+            conv_state = conv_state_from_cache_layer(past, i)  # [hidden, L_cache]
             conv_state_swift = conv_state.permute(1, 0).contiguous()  # [L_cache, hidden]
             captures[f"ref.prefill.conv_state.{conv_idx}"] = conv_state_swift
             conv_idx += 1
@@ -130,13 +142,13 @@ def run_prefill_with_hooks(model, config, input_tokens):
     return captures, outputs.past_key_values, argmax
 
 
-def run_decode_steps(model, config, past_key_values, first_token, num_steps):
+def run_decode_steps(model, config, past_key_values, first_token, num_steps, input_tokens):
     """Run decode steps and capture intermediate tensors."""
     captures = {}
     conv_layer_indices = identify_conv_layers(config)
     current_token = first_token
     past = past_key_values
-    position = len(INPUT_TOKENS)
+    position = len(input_tokens)
 
     for step in range(num_steps):
         handles = []
@@ -195,7 +207,7 @@ def run_decode_steps(model, config, past_key_values, first_token, num_steps):
         conv_idx = 0
         for i in range(config.num_hidden_layers):
             if i in conv_layer_indices:
-                conv_state = past.conv_cache[i][0].detach().half().cpu()
+                conv_state = conv_state_from_cache_layer(past, i)
                 conv_state_swift = conv_state.permute(1, 0).contiguous()
                 captures[f"ref.decode_{step}.conv_state.{conv_idx}"] = conv_state_swift
                 conv_idx += 1
@@ -214,11 +226,11 @@ def run_decode_steps(model, config, past_key_values, first_token, num_steps):
     return captures
 
 
-def save_reference(all_captures, output_path):
+def save_reference(all_captures, output_path, input_tokens):
     """Save all captured tensors to safetensors."""
     # Add input tokens
     all_captures["ref.input_tokens"] = torch.tensor(
-        INPUT_TOKENS, dtype=torch.int32)
+        input_tokens, dtype=torch.int32)
 
     # Ensure all tensors are contiguous
     for key in all_captures:
@@ -253,26 +265,41 @@ def main():
         "--model", type=str, default=MODEL_ID,
         help="HuggingFace model ID",
     )
+    parser.add_argument(
+        "--input-tokens",
+        type=str,
+        default=json.dumps(DEFAULT_INPUT_TOKENS),
+        help="JSON array of input token IDs to run through prefill/decode",
+    )
+    parser.add_argument(
+        "--decode-steps",
+        type=int,
+        default=NUM_DECODE_STEPS,
+        help="Number of greedy decode steps to capture after prefill",
+    )
     args = parser.parse_args()
 
     model_id = args.model
+    input_tokens = json.loads(args.input_tokens)
+    if not isinstance(input_tokens, list) or not all(isinstance(token, int) for token in input_tokens):
+        raise ValueError("--input-tokens must decode to a JSON array of integers")
 
     # Load model
     model, config = load_model_from(model_id)
 
     # Run prefill with hooks
     prefill_captures, past_key_values, first_token = run_prefill_with_hooks(
-        model, config, INPUT_TOKENS)
+        model, config, input_tokens)
 
     # Run decode steps
     decode_captures = run_decode_steps(
-        model, config, past_key_values, first_token, NUM_DECODE_STEPS)
+        model, config, past_key_values, first_token, args.decode_steps, input_tokens)
 
     # Merge and save
     all_captures = {**prefill_captures, **decode_captures}
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    save_reference(all_captures, output_path)
+    save_reference(all_captures, output_path, input_tokens)
 
     print("\nDone. Run Swift comparison test:")
     print(f"  xcodebuild test -scheme swift-lm-Package -destination 'platform=macOS' "

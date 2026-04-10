@@ -206,12 +206,13 @@ public static func generateSSMConvSiluHelper(weightFormat: WeightFormat) -> Stri
         device const half* convState,
         device const \(wt)* convWeight,
         uint channel,
+        uint convDimension,
         uint convKernelSize
     ) {
         float sum = 0.0f;
-        uint base = channel * convKernelSize;
         for (uint k = 0; k < convKernelSize; ++k) {
-            sum += float(convState[base + k]) * \(readWeight("convWeight[base + k]"));
+            sum += float(convState[k * convDimension + channel])
+                * \(readWeight("convWeight[channel * convKernelSize + k]"));
         }
         return sum * stable_sigmoid(sum);
     }
@@ -266,16 +267,15 @@ public static func generateSSMRecurrence(
         // Fused conv-shift + conv_silu: shift conv state and compute convolution
         // in one pass using registers, eliminating device barrier and redundant reads.
         for (uint channel = tid; channel < convDim; channel += tgSize) {
-            const uint base = channel * convKernelSize;
             float sum = 0.0f;
             for (uint k = 0; k + 1 < convKernelSize; ++k) {
-                float val = float(convState[base + k + 1]);
-                convState[base + k] = half(val);
-                sum += val * \(readWeight("convWeight[base + k]"));
+                float val = float(convState[(k + 1) * convDim + channel]);
+                convState[k * convDim + channel] = half(val);
+                sum += val * \(readWeight("convWeight[channel * convKernelSize + k]"));
             }
             float newVal = float(projectedQKV[channel]);
-            convState[base + convKernelSize - 1] = half(newVal);
-            sum += newVal * \(readWeight("convWeight[base + convKernelSize - 1]"));
+            convState[(convKernelSize - 1) * convDim + channel] = half(newVal);
+            sum += newVal * \(readWeight("convWeight[channel * convKernelSize + convKernelSize - 1]"));
             convSiluCache[channel] = sum * stable_sigmoid(sum);
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -298,8 +298,8 @@ public static func generateSSMRecurrence(
                 float beta = stable_sigmoid(float(projectedBeta[headIndex]));
                 device float* state = recurrentState + headIndex * dk * dv;
 
-                const uint qBase = keyGroupDim + keyGroupIndex * dk;
-                const uint kBase = keyGroupIndex * dk;
+                const uint qBase = keyGroupIndex * dk;
+                const uint kBase = keyGroupDim + keyGroupIndex * dk;
                 const uint vBase = 2 * keyGroupDim + headIndex * dv;
 
                 float qNormSq = 0.0f;
@@ -422,16 +422,15 @@ public static func generateSSMRecurrenceSequence(
             // Fused conv-shift + conv_silu: shift conv state and compute convolution
             // in one pass using registers, eliminating device barrier and redundant reads.
             for (uint channel = tid; channel < convDim; channel += tgSize) {
-                const uint base = channel * convKernelSize;
                 float sum = 0.0f;
                 for (uint k = 0; k + 1 < convKernelSize; ++k) {
-                    float val = float(convState[base + k + 1]);
-                    convState[base + k] = half(val);
-                    sum += val * \(readWeight("convWeight[base + k]"));
+                    float val = float(convState[(k + 1) * convDim + channel]);
+                    convState[k * convDim + channel] = half(val);
+                    sum += val * \(readWeight("convWeight[channel * convKernelSize + k]"));
                 }
                 float newVal = float(projectedQKVPos[channel]);
-                convState[base + convKernelSize - 1] = half(newVal);
-                sum += newVal * \(readWeight("convWeight[base + convKernelSize - 1]"));
+                convState[(convKernelSize - 1) * convDim + channel] = half(newVal);
+                sum += newVal * \(readWeight("convWeight[channel * convKernelSize + convKernelSize - 1]"));
                 convSiluCache[channel] = sum * stable_sigmoid(sum);
             }
             threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -453,8 +452,8 @@ public static func generateSSMRecurrenceSequence(
                     float beta = stable_sigmoid(float(projectedBetaPos[headIndex]));
                     device float* state = recurrentState + headIndex * dk * dv;
 
-                    const uint qBase = keyGroupDim + keyGroupIndex * dk;
-                    const uint kBase = keyGroupIndex * dk;
+                    const uint qBase = keyGroupIndex * dk;
+                    const uint kBase = keyGroupDim + keyGroupIndex * dk;
                     const uint vBase = 2 * keyGroupDim + headIndex * dv;
 
                     float qNormSq = 0.0f;

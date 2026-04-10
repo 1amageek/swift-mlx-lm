@@ -16,6 +16,11 @@ public struct AttentionAttributes: OperationAttributes, Codable, Equatable {
     /// Dimension of each attention head.
     public let headDimension: Int
 
+    /// Optional override for attention score scaling.
+    ///
+    /// When nil, the executor uses the backend default `1 / sqrt(headDimension)`.
+    public let attentionScale: Float?
+
     /// Whether projections include bias terms.
     public let bias: Bool
 
@@ -28,6 +33,12 @@ public struct AttentionAttributes: OperationAttributes, Codable, Equatable {
     /// QK normalization strategy.
     public let qkNorm: QKNormKind?
 
+    /// Optional value normalization strategy.
+    public let valueNorm: AttentionValueNormKind?
+
+    /// How the raw V tensor is sourced before value normalization.
+    public let valueProjectionSource: AttentionValueProjectionSource
+
     /// Sliding window attention configuration.
     public let window: AttentionWindow?
 
@@ -37,30 +48,44 @@ public struct AttentionAttributes: OperationAttributes, Codable, Equatable {
     /// Optional output gate applied after SDPA + output projection.
     public let outputGate: AttentionGateKind?
 
+    /// Optional source layer index whose KV cache should be reused.
+    ///
+    /// Used by Gemma 4 KV-shared layers, which only compute queries and
+    /// attend against the last non-shared layer of the same attention type.
+    public let sharedKeyValueSourceLayerIndex: Int?
+
     public init(
         hiddenSize: Int,
         headCount: Int,
         kvHeadCount: Int,
         headDimension: Int,
+        attentionScale: Float? = nil,
         bias: Bool = false,
         causal: Bool = true,
         rope: RoPEAttributes? = nil,
         qkNorm: QKNormKind? = nil,
+        valueNorm: AttentionValueNormKind? = nil,
+        valueProjectionSource: AttentionValueProjectionSource = .dedicatedProjection,
         window: AttentionWindow? = nil,
         implementationHint: AttentionImplementationHint? = nil,
-        outputGate: AttentionGateKind? = nil
+        outputGate: AttentionGateKind? = nil,
+        sharedKeyValueSourceLayerIndex: Int? = nil
     ) {
         self.hiddenSize = hiddenSize
         self.headCount = headCount
         self.kvHeadCount = kvHeadCount
         self.headDimension = headDimension
+        self.attentionScale = attentionScale
         self.bias = bias
         self.causal = causal
         self.rope = rope
         self.qkNorm = qkNorm
+        self.valueNorm = valueNorm
+        self.valueProjectionSource = valueProjectionSource
         self.window = window
         self.implementationHint = implementationHint
         self.outputGate = outputGate
+        self.sharedKeyValueSourceLayerIndex = sharedKeyValueSourceLayerIndex
     }
 }
 
@@ -68,6 +93,7 @@ public struct AttentionAttributes: OperationAttributes, Codable, Equatable {
 public enum QKNormKind: Codable, Equatable, Sendable {
     case none
     case rmsNorm
+    case rmsNormUnitOffset
     case layerNorm
     case custom(String)
 }
@@ -111,4 +137,18 @@ public enum AttentionGateKind: Codable, Equatable, Sendable {
     /// The first half is queries, the second half is gate values.
     /// Gate is applied as: `output = sigmoid(gate) * attn_output`.
     case sigmoidPackedInQProj
+}
+
+/// Optional normalization applied to V projections before attention.
+public enum AttentionValueNormKind: Codable, Equatable, Sendable {
+    /// Per-head RMS normalization without a learned scale.
+    case rmsNormNoScale
+}
+
+/// How the raw V path is produced before value normalization.
+public enum AttentionValueProjectionSource: Codable, Equatable, Sendable {
+    /// Use a dedicated V projection.
+    case dedicatedProjection
+    /// Reuse the raw K projection for the V path.
+    case keyProjection
 }

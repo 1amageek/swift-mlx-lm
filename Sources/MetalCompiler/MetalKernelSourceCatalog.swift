@@ -7,7 +7,14 @@ struct KernelWeightFormatResolver {
         guard let staf = stafWeightStore,
               let binding = entry.parameterBindings.first(where: { $0.role == role }),
               let info = staf.tensor(for: binding.tensorName) else { return .float16 }
-        return info.format.schemeIdentifier == .bf16RowMajor ? .bfloat16 : .float16
+        switch info.format.schemeIdentifier {
+        case .bf16RowMajor:
+            return .bfloat16
+        case .fp32RowMajor:
+            return .float32
+        default:
+            return .float16
+        }
     }
 
     func resolve(forFragment fragment: any PrimitiveMetalKernelFragment, entry: DispatchEntry) -> MetalSourceGenerator.WeightFormat {
@@ -62,7 +69,7 @@ struct MetalKernelSourceCatalog {
         for entry in entries {
             let name: String
             switch entry.kind {
-            case .projection(let projection, _):
+            case .projection(let projection, let isOutput):
                 let weightFormat = weightFormatResolver.resolve(role: projection.field, entry: entry)
                 let decodeFamily = bufferPrecision == .float32
                     ? nil
@@ -88,10 +95,17 @@ struct MetalKernelSourceCatalog {
                 } else {
                     name = weightFormat == .bfloat16 ? "gemv_bf16" : "gemv"
                 }
-                let isSequenceKernel = bufferPrecision == .float32
+                let usesSequenceGEMV =
+                    bufferPrecision == .float32
+                    && isOutput
+                    && projection.field == "weight"
+                    && projection.outputDimension > projection.inputDimension
+                let isSequenceKernel = bufferPrecision == .float32 && !usesSequenceGEMV
                 let emittedName = isSequenceKernel
                     ? name.replacingOccurrences(of: "gemv", with: "gemm") + "_f32s"
-                    : name
+                    : (usesSequenceGEMV
+                        ? (weightFormat == .bfloat16 ? "gemv_bf16_f32s" : "gemv_f32s")
+                        : name)
                 if generatedNames.insert(emittedName).inserted {
                     if isSequenceKernel {
                         let gemmName = weightFormat == .bfloat16 ? "gemm_bf16_f32s" : "gemm_f32s"
@@ -101,6 +115,12 @@ struct MetalKernelSourceCatalog {
                             name: gemmName,
                             bufferPrecision: bufferPrecision,
                             weightFormat: weightFormat))
+                    } else if usesSequenceGEMV {
+                        sources.append(MetalSourceGenerator.generateGEMV(
+                            name: emittedName,
+                            bufferPrecision: bufferPrecision,
+                            weightFormat: weightFormat,
+                            tileElements: 256))
                     } else if decodeFamily == .vocabDense {
                         sources.append(MetalSourceGenerator.generateVocabGEMV(
                             name: name,
@@ -271,7 +291,10 @@ struct MetalKernelSourceCatalog {
                         }
                     }
                     if bufferPrecision == .float32, let ssmFragment = fragment as? SSMRecurrenceFragment {
-                        let sequenceKernelName = "ssm_recurrence_seq_f32"
+                        let sequenceKernelName = SSMRecurrenceFragment.sequenceKernelName(
+                            bufferPrecision: bufferPrecision,
+                            weightFormat: weightFormat
+                        )
                         if generatedNames.insert(sequenceKernelName).inserted {
                             sources.append(MetalSourceGenerator.generateSSMRecurrenceSequence(
                                 name: sequenceKernelName,
@@ -360,23 +383,22 @@ struct MetalKernelSourceCatalog {
 
             case .fusedCopyNorm:
                 let weightFormat = weightFormatResolver.resolve(role: "scale", entry: entry)
-                if bufferPrecision != .float32 {
-                    let kernelName = weightFormat == .bfloat16 ? "fused_copy_rms_norm_bf16" : "fused_copy_rms_norm"
-                    if generatedNames.insert(kernelName).inserted {
-                        sources.append(MetalSourceGenerator.generateFusedCopyRMSNorm(
-                            name: kernelName,
+                let kernelName = weightFormat == .bfloat16 ? "fused_copy_rms_norm_bf16" : "fused_copy_rms_norm"
+                if generatedNames.insert(kernelName).inserted {
+                    sources.append(MetalSourceGenerator.generateFusedCopyRMSNorm(
+                        name: kernelName,
+                        bufferPrecision: bufferPrecision,
+                        weightFormat: weightFormat))
+                    let argumentKernelName = MetalKernelNameResolver.argumentTableVariantKernelName(for: kernelName)
+                    if generatedNames.insert(argumentKernelName).inserted {
+                        sources.append(MetalSourceGenerator.generateFusedCopyRMSNormArgumentTableVariant(
+                            name: argumentKernelName,
+                            argumentBufferIndex: MetalInferenceCompiler.argumentTableBindingIndex,
                             bufferPrecision: bufferPrecision,
                             weightFormat: weightFormat))
-                        let argumentKernelName = MetalKernelNameResolver.argumentTableVariantKernelName(for: kernelName)
-                        if generatedNames.insert(argumentKernelName).inserted {
-                            sources.append(MetalSourceGenerator.generateFusedCopyRMSNormArgumentTableVariant(
-                                name: argumentKernelName,
-                                argumentBufferIndex: MetalInferenceCompiler.argumentTableBindingIndex,
-                                bufferPrecision: bufferPrecision,
-                                weightFormat: weightFormat))
-                        }
                     }
-                } else {
+                }
+                if bufferPrecision == .float32 {
                     let copyName = "copy_buffer_seq_f32"
                     let normName = weightFormat == .bfloat16 ? "rms_norm_seq_bf16_f32_inplace" : "rms_norm_seq_f32_inplace"
                     if generatedNames.insert(copyName).inserted {
@@ -394,28 +416,31 @@ struct MetalKernelSourceCatalog {
 
             case .fusedResidualAddCopyNorm:
                 let weightFormat = weightFormatResolver.resolve(role: "scale", entry: entry)
-                if bufferPrecision != .float32 {
-                    let kernelName = weightFormat == .bfloat16 ? "fused_residual_add_copy_rms_norm_bf16" : "fused_residual_add_copy_rms_norm"
-                    if generatedNames.insert(kernelName).inserted {
-                        sources.append(MetalSourceGenerator.generateFusedResidualAddCopyRMSNorm(
-                            name: kernelName,
+                let kernelName = weightFormat == .bfloat16 ? "fused_residual_add_copy_rms_norm_bf16" : "fused_residual_add_copy_rms_norm"
+                if generatedNames.insert(kernelName).inserted {
+                    sources.append(MetalSourceGenerator.generateFusedResidualAddCopyRMSNorm(
+                        name: kernelName,
+                        bufferPrecision: bufferPrecision,
+                        weightFormat: weightFormat))
+                    let argumentKernelName = MetalKernelNameResolver.argumentTableVariantKernelName(for: kernelName)
+                    if generatedNames.insert(argumentKernelName).inserted {
+                        sources.append(MetalSourceGenerator.generateFusedResidualAddCopyRMSNormArgumentTableVariant(
+                            name: argumentKernelName,
+                            argumentBufferIndex: MetalInferenceCompiler.argumentTableBindingIndex,
                             bufferPrecision: bufferPrecision,
                             weightFormat: weightFormat))
-                        let argumentKernelName = MetalKernelNameResolver.argumentTableVariantKernelName(for: kernelName)
-                        if generatedNames.insert(argumentKernelName).inserted {
-                            sources.append(MetalSourceGenerator.generateFusedResidualAddCopyRMSNormArgumentTableVariant(
-                                name: argumentKernelName,
-                                argumentBufferIndex: MetalInferenceCompiler.argumentTableBindingIndex,
-                                bufferPrecision: bufferPrecision,
-                                weightFormat: weightFormat))
-                        }
                     }
-                } else {
+                }
+                if bufferPrecision == .float32 {
                     let addName = "residual_add_seq_f32"
+                    let inplaceAddName = "residual_add_inplace_seq_f32"
                     let copyName = "copy_buffer_seq_f32"
                     let normName = weightFormat == .bfloat16 ? "rms_norm_seq_bf16_f32_inplace" : "rms_norm_seq_f32_inplace"
                     if generatedNames.insert(addName).inserted {
                         sources.append(MetalSourceGenerator.generateResidualAdd(name: addName, bufferPrecision: bufferPrecision))
+                    }
+                    if generatedNames.insert(inplaceAddName).inserted {
+                        sources.append(MetalSourceGenerator.generateResidualAddInPlace(name: inplaceAddName, bufferPrecision: bufferPrecision))
                     }
                     if generatedNames.insert(copyName).inserted {
                         sources.append(MetalSourceGenerator.generateCopy(name: copyName, bufferPrecision: bufferPrecision))
@@ -441,6 +466,7 @@ struct MetalKernelSourceCatalog {
 
             case .structuralAdd:
                 let kernelName = bufferPrecision == .float32 ? "residual_add_seq_f32" : "residual_add"
+                let inplaceKernelName = bufferPrecision == .float32 ? "residual_add_inplace_seq_f32" : "residual_add_inplace"
                 if generatedNames.insert(kernelName).inserted {
                     sources.append(MetalSourceGenerator.generateResidualAdd(
                         name: kernelName,
@@ -456,11 +482,26 @@ struct MetalKernelSourceCatalog {
                         }
                     }
                 }
+                if generatedNames.insert(inplaceKernelName).inserted {
+                    sources.append(MetalSourceGenerator.generateResidualAddInPlace(
+                        name: inplaceKernelName,
+                        bufferPrecision: bufferPrecision,
+                        isSequence: bufferPrecision == .float32))
+                    if bufferPrecision != .float32 {
+                        let argumentKernelName = MetalKernelNameResolver.argumentTableVariantKernelName(for: inplaceKernelName)
+                        if generatedNames.insert(argumentKernelName).inserted {
+                            sources.append(MetalSourceGenerator.generateResidualAddInPlaceArgumentTableVariant(
+                                name: argumentKernelName,
+                                argumentBufferIndex: MetalInferenceCompiler.argumentTableBindingIndex,
+                                bufferPrecision: bufferPrecision))
+                        }
+                    }
+                }
 
             case .fusedResidualAddNorm:
                 let weightFormat = weightFormatResolver.resolve(role: "scale", entry: entry)
                 let kernelName = weightFormat == .bfloat16 ? "fused_residual_add_rms_norm_bf16" : "fused_residual_add_rms_norm"
-                if bufferPrecision != .float32, generatedNames.insert(kernelName).inserted {
+                if generatedNames.insert(kernelName).inserted {
                     sources.append(MetalSourceGenerator.generateFusedResidualAddRMSNorm(
                         name: kernelName,
                         bufferPrecision: bufferPrecision,
@@ -477,46 +518,45 @@ struct MetalKernelSourceCatalog {
 
             case .fusedSwiGLUProjection(let fused):
                 let weightFormat = weightFormatResolver.resolve(role: fused.gateField, entry: entry)
-                if bufferPrecision != .float32 {
-                    let family = FusedSwiGLUProjectionFamily.resolve(
-                        inputDimension: fused.inputDimension,
-                        outputDimension: fused.outputDimension)
-                    let baseName = family.kernelBaseName(activation: fused.activation)
-                    let kernelName = weightFormat == .bfloat16
-                        ? baseName + "_bf16"
-                        : baseName
-                    if generatedNames.insert(kernelName).inserted {
-                        if family == .input2048Dense {
-                            sources.append(MetalSourceGenerator.generateInput2048FusedSwiGLUProjection(
-                                name: kernelName,
+                let family = FusedSwiGLUProjectionFamily.resolve(
+                    inputDimension: fused.inputDimension,
+                    outputDimension: fused.outputDimension)
+                let baseName = family.kernelBaseName(activation: fused.activation)
+                let kernelName = weightFormat == .bfloat16
+                    ? baseName + "_bf16"
+                    : baseName
+                if generatedNames.insert(kernelName).inserted {
+                    if family == .input2048Dense {
+                        sources.append(MetalSourceGenerator.generateInput2048FusedSwiGLUProjection(
+                            name: kernelName,
+                            bufferPrecision: bufferPrecision,
+                            weightFormat: weightFormat,
+                            activation: fused.activation,
+                            fixedRowsPerThreadgroup: 8,
+                            fixedSimdgroups: 8,
+                            unrollFactor: 8))
+                        let argumentKernelName = MetalKernelNameResolver.argumentTableVariantKernelName(for: kernelName)
+                        if generatedNames.insert(argumentKernelName).inserted {
+                            sources.append(MetalSourceGenerator.generateInput2048FusedSwiGLUProjectionArgumentTableVariant(
+                                name: argumentKernelName,
+                                argumentBufferIndex: MetalInferenceCompiler.argumentTableBindingIndex,
                                 bufferPrecision: bufferPrecision,
                                 weightFormat: weightFormat,
                                 activation: fused.activation,
+                                stagesInputAsFloat: false,
                                 fixedRowsPerThreadgroup: 8,
                                 fixedSimdgroups: 8,
                                 unrollFactor: 8))
-                            let argumentKernelName = MetalKernelNameResolver.argumentTableVariantKernelName(for: kernelName)
-                            if generatedNames.insert(argumentKernelName).inserted {
-                                sources.append(MetalSourceGenerator.generateInput2048FusedSwiGLUProjectionArgumentTableVariant(
-                                    name: argumentKernelName,
-                                    argumentBufferIndex: MetalInferenceCompiler.argumentTableBindingIndex,
-                                    bufferPrecision: bufferPrecision,
-                                    weightFormat: weightFormat,
-                                    activation: fused.activation,
-                                    stagesInputAsFloat: false,
-                                    fixedRowsPerThreadgroup: 8,
-                                    fixedSimdgroups: 8,
-                                    unrollFactor: 8))
-                            }
-                        } else {
-                            sources.append(MetalSourceGenerator.generateFusedSwiGLUProjection(
-                                name: kernelName,
-                                bufferPrecision: bufferPrecision,
-                                weightFormat: weightFormat,
-                                activation: fused.activation))
                         }
+                    } else {
+                        sources.append(MetalSourceGenerator.generateFusedSwiGLUProjection(
+                            name: kernelName,
+                            bufferPrecision: bufferPrecision,
+                            weightFormat: weightFormat,
+                            activation: fused.activation))
                     }
-                } else {
+                }
+                if bufferPrecision == .float32 {
                     let gemmName = weightFormat == .bfloat16 ? "gemm_bf16_f32s" : "gemm_f32s"
                     mppGEMMNames.insert(gemmName)
                     mppGEMMWeightFormat = weightFormat
@@ -541,52 +581,51 @@ struct MetalKernelSourceCatalog {
             case .batchedProjection(let batched):
                 let count = batched.projections.count
                 let weightFormat = weightFormatResolver.resolve(role: batched.projections[0].field, entry: entry)
-                if bufferPrecision != .float32 {
-                    let suffix = weightFormat == .bfloat16 ? "_bf16" : ""
-                    let kernelName = "batched_gemv\(count)\(suffix)"
-                    if generatedNames.insert(kernelName).inserted {
-                        if count == 2 {
-                            sources.append(MetalSourceGenerator.generateBatchedGEMV2(
-                                name: kernelName,
+                let suffix = weightFormat == .bfloat16 ? "_bf16" : ""
+                let kernelName = "batched_gemv\(count)\(suffix)"
+                if generatedNames.insert(kernelName).inserted {
+                    if count == 2 {
+                        sources.append(MetalSourceGenerator.generateBatchedGEMV2(
+                            name: kernelName,
+                            bufferPrecision: bufferPrecision,
+                            weightFormat: weightFormat))
+                        let argumentKernelName = MetalKernelNameResolver.argumentTableVariantKernelName(for: kernelName)
+                        if generatedNames.insert(argumentKernelName).inserted {
+                            sources.append(MetalSourceGenerator.generateBatchedGEMV2ArgumentTableVariant(
+                                name: argumentKernelName,
+                                argumentBufferIndex: MetalInferenceCompiler.argumentTableBindingIndex,
                                 bufferPrecision: bufferPrecision,
                                 weightFormat: weightFormat))
-                            let argumentKernelName = MetalKernelNameResolver.argumentTableVariantKernelName(for: kernelName)
-                            if generatedNames.insert(argumentKernelName).inserted {
-                                sources.append(MetalSourceGenerator.generateBatchedGEMV2ArgumentTableVariant(
-                                    name: argumentKernelName,
-                                    argumentBufferIndex: MetalInferenceCompiler.argumentTableBindingIndex,
-                                    bufferPrecision: bufferPrecision,
-                                    weightFormat: weightFormat))
-                            }
-                        } else if count == 3 {
-                            sources.append(MetalSourceGenerator.generateBatchedGEMV3(
-                                name: kernelName,
+                        }
+                    } else if count == 3 {
+                        sources.append(MetalSourceGenerator.generateBatchedGEMV3(
+                            name: kernelName,
+                            bufferPrecision: bufferPrecision,
+                            weightFormat: weightFormat))
+                        let argumentKernelName = MetalKernelNameResolver.argumentTableVariantKernelName(for: kernelName)
+                        if generatedNames.insert(argumentKernelName).inserted {
+                            sources.append(MetalSourceGenerator.generateBatchedGEMV3ArgumentTableVariant(
+                                name: argumentKernelName,
+                                argumentBufferIndex: MetalInferenceCompiler.argumentTableBindingIndex,
                                 bufferPrecision: bufferPrecision,
                                 weightFormat: weightFormat))
-                            let argumentKernelName = MetalKernelNameResolver.argumentTableVariantKernelName(for: kernelName)
-                            if generatedNames.insert(argumentKernelName).inserted {
-                                sources.append(MetalSourceGenerator.generateBatchedGEMV3ArgumentTableVariant(
-                                    name: argumentKernelName,
-                                    argumentBufferIndex: MetalInferenceCompiler.argumentTableBindingIndex,
-                                    bufferPrecision: bufferPrecision,
-                                    weightFormat: weightFormat))
-                            }
-                        } else {
-                            sources.append(MetalSourceGenerator.generateBatchedGEMV4(
-                                name: kernelName,
+                        }
+                    } else {
+                        sources.append(MetalSourceGenerator.generateBatchedGEMV4(
+                            name: kernelName,
+                            bufferPrecision: bufferPrecision,
+                            weightFormat: weightFormat))
+                        let argumentKernelName = MetalKernelNameResolver.argumentTableVariantKernelName(for: kernelName)
+                        if generatedNames.insert(argumentKernelName).inserted {
+                            sources.append(MetalSourceGenerator.generateBatchedGEMV4ArgumentTableVariant(
+                                name: argumentKernelName,
+                                argumentBufferIndex: MetalInferenceCompiler.argumentTableBindingIndex,
                                 bufferPrecision: bufferPrecision,
                                 weightFormat: weightFormat))
-                            let argumentKernelName = MetalKernelNameResolver.argumentTableVariantKernelName(for: kernelName)
-                            if generatedNames.insert(argumentKernelName).inserted {
-                                sources.append(MetalSourceGenerator.generateBatchedGEMV4ArgumentTableVariant(
-                                    name: argumentKernelName,
-                                    argumentBufferIndex: MetalInferenceCompiler.argumentTableBindingIndex,
-                                    bufferPrecision: bufferPrecision,
-                                    weightFormat: weightFormat))
-                            }
                         }
                     }
-                } else {
+                }
+                if bufferPrecision == .float32 {
                     let gemmName = weightFormat == .bfloat16 ? "gemm_bf16_f32s" : "gemm_f32s"
                     mppGEMMNames.insert(gemmName)
                     mppGEMMWeightFormat = weightFormat
@@ -599,29 +638,28 @@ struct MetalKernelSourceCatalog {
                 }
 
             case .batchedFragment(let batch):
-                if bufferPrecision != .float32 {
-                    let kernelContext = KernelContext(
-                        bufferPrecision: bufferPrecision,
-                        weightFormat: modelWeightFormat)
-                    let kernelName = kernelNameResolver.kernelName(for: entry, kernelContext: kernelContext)
-                    if generatedNames.insert(kernelName).inserted {
-                        let weightFormat = weightFormatResolver.resolve(role: "q_layernorm", entry: entry)
-                        if batch.fragments.count == 2, case .perHead = batch.dispatchDimension {
-                            sources.append(MetalSourceGenerator.generateBatchedPerHead2(
-                                name: kernelName,
+                let kernelContext = KernelContext(
+                    bufferPrecision: bufferPrecision,
+                    weightFormat: modelWeightFormat)
+                let kernelName = kernelNameResolver.kernelName(for: entry, kernelContext: kernelContext)
+                if generatedNames.insert(kernelName).inserted {
+                    let weightFormat = weightFormatResolver.resolve(role: "q_layernorm", entry: entry)
+                    if batch.fragments.count == 2, case .perHead = batch.dispatchDimension {
+                        sources.append(MetalSourceGenerator.generateBatchedPerHead2(
+                            name: kernelName,
+                            bufferPrecision: bufferPrecision,
+                            weightFormat: weightFormat))
+                        let argumentKernelName = MetalKernelNameResolver.argumentTableVariantKernelName(for: kernelName)
+                        if generatedNames.insert(argumentKernelName).inserted {
+                            sources.append(MetalSourceGenerator.generateBatchedPerHead2ArgumentTableVariant(
+                                name: argumentKernelName,
+                                argumentBufferIndex: MetalInferenceCompiler.argumentTableBindingIndex,
                                 bufferPrecision: bufferPrecision,
                                 weightFormat: weightFormat))
-                            let argumentKernelName = MetalKernelNameResolver.argumentTableVariantKernelName(for: kernelName)
-                            if generatedNames.insert(argumentKernelName).inserted {
-                                sources.append(MetalSourceGenerator.generateBatchedPerHead2ArgumentTableVariant(
-                                    name: argumentKernelName,
-                                    argumentBufferIndex: MetalInferenceCompiler.argumentTableBindingIndex,
-                                    bufferPrecision: bufferPrecision,
-                                    weightFormat: weightFormat))
-                            }
                         }
                     }
-                } else {
+                }
+                if bufferPrecision == .float32 {
                     let weightFormat = weightFormatResolver.resolve(role: "q_layernorm", entry: entry)
                     let normName = "qk_rms_norm_seq_f32"
                     if generatedNames.insert(normName).inserted {
@@ -632,6 +670,12 @@ struct MetalKernelSourceCatalog {
                     }
                 }
             }
+        }
+
+        let kvTransferName = "kv_cache_transfer"
+        if generatedNames.insert(kvTransferName).inserted {
+            needsFlashAttnHelper = true
+            sources.append(MetalSourceGenerator.generateKVCacheTransfer(name: kvTransferName))
         }
 
         if needsFlashAttnHelper {

@@ -91,7 +91,7 @@ struct STAFConversionPlanner: Sendable {
         switch info.dtype {
         case .float16: return .fp16RowMajor
         case .bfloat16: return .bf16RowMajor
-        case .float32: return .fp16RowMajor
+        case .float32: return .fp32RowMajor
         default: return .passthrough
         }
     }

@@ -24,7 +24,10 @@ public struct SSMRecurrenceFragment: PrimitiveMetalKernelFragment {
 
     public var isFusable: Bool { false }
     public func kernelName(context: KernelContext) -> String {
-        context.bufferPrecision == .float32 ? "ssm_recurrence_f32" : "ssm_recurrence"
+        Self.kernelName(
+            bufferPrecision: context.bufferPrecision,
+            weightFormat: context.weightFormat
+        )
     }
     public var dispatchDimension: MetalDispatchDimension {
         .reduction(dimension: convDimension)
@@ -50,6 +53,28 @@ public struct SSMRecurrenceFragment: PrimitiveMetalKernelFragment {
     /// Matches the normPartials array size in the generated kernel source.
     /// At dispatch time, actual threads = min(this, pipeline.maxTotalThreadsPerThreadgroup).
     public static let maxThreadgroupSize = 1024
+
+    static func kernelName(
+        bufferPrecision: BufferPrecision,
+        weightFormat: WeightFormat
+    ) -> String {
+        let bf16 = weightFormat == .bfloat16
+        if bufferPrecision == .float32 {
+            return bf16 ? "ssm_recurrence_bf16_f32" : "ssm_recurrence_f32"
+        }
+        return bf16 ? "ssm_recurrence_bf16" : "ssm_recurrence"
+    }
+
+    static func sequenceKernelName(
+        bufferPrecision: BufferPrecision,
+        weightFormat: WeightFormat
+    ) -> String {
+        let bf16 = weightFormat == .bfloat16
+        if bufferPrecision == .float32 {
+            return bf16 ? "ssm_recurrence_seq_bf16_f32" : "ssm_recurrence_seq_f32"
+        }
+        return bf16 ? "ssm_recurrence_seq_bf16" : "ssm_recurrence_seq"
+    }
 
     public func kernelSource(name: String, bufferPrecision: BufferPrecision, weightFormat: WeightFormat) -> String {
         MetalSourceGenerator.generateSSMRecurrence(
@@ -77,10 +102,11 @@ public struct SSMRecurrenceFragment: PrimitiveMetalKernelFragment {
         }
 
         let recurrentLayerOffset = context.recurrentLayerIndex * context.bufferSet.recurrentStateBytesPerLayer
+        let convStateElementSize = MemoryLayout<Float16>.size
         let convLayerOffset = context.convLayerIndex
             * context.bufferSet.convStateKernelSize
             * context.bufferSet.convStateDimension
-            * context.elementSize
+            * convStateElementSize
 
         return FragmentBindings(
             buffers: [
@@ -131,9 +157,10 @@ public struct SSMRecurrenceFragment: PrimitiveMetalKernelFragment {
             * context.buffers.convStateKernelSize
             * context.buffers.convStateDimension
             * MemoryLayout<Float16>.size
-        let kernelName = context.kernelContext.bufferPrecision == .float32
-            ? "ssm_recurrence_seq_f32"
-            : "ssm_recurrence_seq"
+        let kernelName = Self.sequenceKernelName(
+            bufferPrecision: context.kernelContext.bufferPrecision,
+            weightFormat: context.kernelContext.weightFormat
+        )
         let pipeline = try context.getPipeline(kernelName)
         let threads = min(Self.maxThreadgroupSize, pipeline.maxTotalThreadsPerThreadgroup)
 

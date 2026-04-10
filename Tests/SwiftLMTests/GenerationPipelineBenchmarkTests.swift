@@ -36,11 +36,12 @@ struct GenerationPipelineBenchmarkTests {
                 generateCount: generateCount)
         }
 
-        let generateResult = try await measureMedianAsync(name: "ModelContainer.generate", iterations: 5, warmup: 1) {
+        let generateResult = try await measureMedianAsync(name: "ModelContainer.generate(greedy)", iterations: 5, warmup: 1) {
             try await runContainerGenerate(
                 container: resources.container,
                 promptTokens: promptTokens,
-                generateCount: generateCount)
+                parameters: GenerateParameters(maxTokens: generateCount, temperature: 0)
+            )
         }
 
         print("")
@@ -199,7 +200,7 @@ struct GenerationPipelineBenchmarkTests {
                 try await runContainerGenerate(
                     container: resources.container,
                     promptTokens: promptTokens,
-                    generateCount: generateCount
+                    parameters: GenerateParameters(maxTokens: generateCount, temperature: 0)
                 )
             }
 
@@ -244,7 +245,8 @@ struct GenerationPipelineBenchmarkTests {
                         container: resources.container,
                         promptTokens: promptTokens,
                         generateCount: generateCount,
-                        chunkTokenCount: chunkSize
+                        chunkTokenCount: chunkSize,
+                        temperature: 0
                     )
                 }
             }()
@@ -278,7 +280,8 @@ struct GenerationPipelineBenchmarkTests {
                 container: resources.container,
                 promptTokens: promptTokens,
                 generateCount: generateCount,
-                chunkTokenCount: 8
+                chunkTokenCount: 8,
+                temperature: 0
             )
         }
 
@@ -287,7 +290,8 @@ struct GenerationPipelineBenchmarkTests {
                 container: resources.container,
                 promptState: promptState,
                 generateCount: generateCount,
-                chunkTokenCount: 8
+                chunkTokenCount: 8,
+                temperature: 0
             )
         }
 
@@ -373,7 +377,8 @@ struct GenerationPipelineBenchmarkTests {
         let container = ModelContainer(
             inferenceModel: containerModel,
             tokenizer: tokenizer,
-            configuration: configuration
+            configuration: configuration,
+            vocabularySize: config.vocabSize
         )
 
         return BenchmarkResources(
@@ -440,21 +445,15 @@ struct GenerationPipelineBenchmarkTests {
 
         _ = tokenizer.decode(tokens: [Int(firstToken)])
         var generated = 1
-
-        if generated < generateCount {
-            _ = model.decode(tokenID: firstToken)
-        }
+        var nextToken = firstToken
 
         while generated < generateCount {
-            let token = model.flush()
+            let token = model.decode(tokenID: nextToken)
             guard token >= 0 else { throw BenchmarkError.invalidToken }
-
-            if generated + 1 < generateCount {
-                _ = model.decode(tokenID: token)
-            }
 
             _ = tokenizer.decode(tokens: [Int(token)])
             generated += 1
+            nextToken = token
         }
 
         return generated
@@ -463,12 +462,12 @@ struct GenerationPipelineBenchmarkTests {
     private func runContainerGenerate(
         container: ModelContainer,
         promptTokens: [Int],
-        generateCount: Int
+        parameters: GenerateParameters
     ) async throws -> Int {
         container.resetCaches()
         let stream = try container.generate(
             prompt: ExecutablePrompt(tokenIDs: promptTokens),
-            parameters: GenerateParameters(maxTokens: generateCount)
+            parameters: parameters
         )
 
         var generated = 0
@@ -483,11 +482,11 @@ struct GenerationPipelineBenchmarkTests {
     private func runContainerGenerate(
         container: ModelContainer,
         promptState: PromptState,
-        generateCount: Int
+        parameters: GenerateParameters
     ) async throws -> Int {
         let stream = try container.generate(
             from: promptState,
-            parameters: GenerateParameters(maxTokens: generateCount)
+            parameters: parameters
         )
 
         var generated = 0
@@ -503,7 +502,8 @@ struct GenerationPipelineBenchmarkTests {
         container: ModelContainer,
         promptTokens: [Int],
         generateCount: Int,
-        chunkTokenCount: Int
+        chunkTokenCount: Int,
+        temperature: Float
     ) async throws -> StreamResult {
         container.resetCaches()
         let start = CFAbsoluteTimeGetCurrent()
@@ -511,7 +511,8 @@ struct GenerationPipelineBenchmarkTests {
             prompt: ExecutablePrompt(tokenIDs: promptTokens),
             parameters: GenerateParameters(
                 maxTokens: generateCount,
-                streamChunkTokenCount: chunkTokenCount
+                streamChunkTokenCount: chunkTokenCount,
+                temperature: temperature
             )
         )
 
@@ -544,14 +545,16 @@ struct GenerationPipelineBenchmarkTests {
         container: ModelContainer,
         promptState: PromptState,
         generateCount: Int,
-        chunkTokenCount: Int
+        chunkTokenCount: Int,
+        temperature: Float
     ) async throws -> StreamResult {
         let start = CFAbsoluteTimeGetCurrent()
         let stream = try container.generate(
             from: promptState,
             parameters: GenerateParameters(
                 maxTokens: generateCount,
-                streamChunkTokenCount: chunkTokenCount
+                streamChunkTokenCount: chunkTokenCount,
+                temperature: temperature
             )
         )
 

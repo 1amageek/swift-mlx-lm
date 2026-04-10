@@ -20,9 +20,10 @@
 /// - `kernelName(context:)`: context-aware kernel name resolution
 /// - `kernelBody()`: composable MSL computation body for kernel composition
 ///
-/// The optimizer batches fragments based on properties alone — no type checks.
-/// Within a composite fragment, consecutive in-place fragments with the same
-/// dispatchDimension type are independent and batchable.
+/// Only fragments that explicitly opt in participate in decode-time in-place
+/// batching. This keeps the optimizer generic while avoiding unsound routing
+/// for fragments whose scratch layout cannot be reconstructed from dispatch
+/// dimension alone.
 public protocol PrimitiveMetalKernelFragment: MetalKernelFragment where Fragment == Never {
     /// GPU dispatch pattern (determines grid/threadgroup sizing).
     var dispatchDimension: MetalDispatchDimension { get }
@@ -30,6 +31,12 @@ public protocol PrimitiveMetalKernelFragment: MetalKernelFragment where Fragment
     var weightSlots: [MetalWeightSlot] { get }
     /// Persistent cache slots (KV cache, conv state).
     var cacheSlots: [MetalCacheSlot] { get }
+
+    /// Optional override for the KV cache layer index this fragment reads.
+    ///
+    /// Used by Gemma 4 shared-KV attention, which reads another layer's cache
+    /// without allocating or advancing a new KV slot.
+    var kvCacheIndexOverride: Int? { get }
 
     /// Whether this fragment modifies its primary data buffer in-place.
     ///
@@ -41,6 +48,19 @@ public protocol PrimitiveMetalKernelFragment: MetalKernelFragment where Fragment
     /// Epsilon value for normalization-type fragments.
     /// nil for fragments that don't perform normalization.
     var normEpsilon: Float? { get }
+
+    /// Additive bias applied to normalization weights.
+    ///
+    /// Non-zero values indicate a family-specific affine convention such as
+    /// Qwen 3.5's `1 + weight`, which current fused norm kernels do not model.
+    var normWeightBias: Float? { get }
+
+    /// Whether the decode optimizer may merge consecutive in-place instances
+    /// of this fragment family into a batched dispatch.
+    ///
+    /// Opt-in is required because the batched route builder must preserve each
+    /// fragment's concrete buffer bindings, not just its dispatch dimension.
+    var supportsInPlaceBatching: Bool { get }
 
     /// Kernel name for this fragment, resolved using the kernel context.
     ///
@@ -97,8 +117,11 @@ extension PrimitiveMetalKernelFragment {
     public func fragment(context: KernelContext) -> Never { fatalError() }
     public var weightSlots: [MetalWeightSlot] { [] }
     public var cacheSlots: [MetalCacheSlot] { [] }
+    public var kvCacheIndexOverride: Int? { nil }
     public var isInPlace: Bool { false }
     public var normEpsilon: Float? { nil }
+    public var normWeightBias: Float? { nil }
+    public var supportsInPlaceBatching: Bool { false }
     public func decodeBindings(context: BufferBindingContext) -> FragmentBindings {
         fatalError("Fragment \(type(of: self)) must implement decodeBindings(context:)")
     }

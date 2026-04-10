@@ -25,17 +25,16 @@ struct MetalPipelineCompiler {
         argumentEncoders: [String: MTLArgumentEncoder],
         usesMPP: Bool
     ) {
+        let mppDisabled = ProcessInfo.processInfo.environment["SWIFTLM_DISABLE_MPP"] == "1"
         let baseLibrary = try makeLibrary(source: generated.baseSource, options: baseCompileOptions())
         emitKernelDiagnosticsIfRequested(
             generated: generated,
             library: baseLibrary
         )
-        var pipelineCache = try makeBasePipelineCache(
-            from: baseLibrary,
-            mppKernelNames: generated.mppKernelNames)
+        var pipelineCache = try makeBasePipelineCache(from: baseLibrary)
         var argumentEncoderCache = makeArgumentEncoderCache(from: baseLibrary)
 
-        guard !generated.mppSources.isEmpty else {
+        guard !mppDisabled, !generated.mppSources.isEmpty else {
             return (pipelineCache, argumentEncoderCache, false)
         }
 
@@ -91,16 +90,10 @@ struct MetalPipelineCompiler {
     }
 
     private func makeBasePipelineCache(
-        from library: MTLLibrary,
-        mppKernelNames: Set<String>
+        from library: MTLLibrary
     ) throws -> [String: MTLComputePipelineState] {
         var pipelineCache: [String: MTLComputePipelineState] = [:]
         for name in library.functionNames {
-            if mppKernelNames.contains(name),
-               let cachedMPP = SharedPipelineCache.pipeline(named: "mpp::\(name)") {
-                pipelineCache[name] = cachedMPP
-                continue
-            }
             if let cached = SharedPipelineCache.pipeline(named: name) {
                 pipelineCache[name] = cached
                 continue
@@ -110,9 +103,7 @@ struct MetalPipelineCompiler {
             }
             let pipeline = try makePipeline(function: function, label: name)
             pipelineCache[name] = pipeline
-            if !mppKernelNames.contains(name) {
-                SharedPipelineCache.store(pipeline, named: name)
-            }
+            SharedPipelineCache.store(pipeline, named: name)
         }
         return pipelineCache
     }
