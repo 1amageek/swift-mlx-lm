@@ -38,6 +38,7 @@ Important:
 - For real-model / Metal-heavy / large-bundle tests, do not batch multiple expensive cases into one long `xcodebuild test` process when you are debugging correctness. Prefer `build-for-testing` once, then `test-without-building` one test at a time. This avoids cumulative GPU memory pressure, repeated model loads in a single process, and hard-to-diagnose xctest crashes.
 - When validating output quality for a specific model/policy combination, prefer one focused test per invocation over a whole suite. If you need multiple policy comparisons, run them as separate `test-without-building` invocations.
 - For repeated real-model loads inside tests/helpers, explicitly scope temporary objects tightly and prefer `autoreleasepool` on synchronous helper boundaries when possible. Do not keep multiple large `ModelContainer` / tokenizer / bundle instances alive longer than needed.
+- When `xcodebuild` reports `unexpected exit`, `Restarting after unexpected exit`, or flaky suite-level process failure, rerun with [`scripts/xcodebuild-test-timeout.sh`](/Users/1amageek/Desktop/swift-lm/scripts/xcodebuild-test-timeout.sh) or [`scripts/xcodebuild-test-hang-guard.sh`](/Users/1amageek/Desktop/swift-lm/scripts/xcodebuild-test-hang-guard.sh) before changing inference code.
 - Metal-dependent tests and generated libraries are exercised via the package Xcode scheme.
 - Repository targets currently declare Swift tools `6.2` and platforms `.macOS(.v26)`, `.iOS(.v26)`, `.visionOS(.v26)` in [Package.swift](/Users/1amageek/Desktop/swift-lm/Package.swift).
 
@@ -52,6 +53,7 @@ When correctness work touches Metal execution, real bundles, or large references
 3. After each heavy invocation, inspect whether the process completed normally before starting the next one. Do not queue multiple `xcodebuild` test processes in parallel.
 4. If a suite restarts, crashes, or prints `unexpected exit`, stop batching immediately and reduce scope further.
 5. Do not add whole-plan snapshot capture to a heavy real-model test unless the narrow failure cannot be localized any other way.
+6. If a full suite is still unstable, split it into smaller `@Suite` groups by concern such as output, prompt-state, and capability so `-only-testing:<Target>/<Suite>` remains usable with Swift Testing.
 
 Rules:
 

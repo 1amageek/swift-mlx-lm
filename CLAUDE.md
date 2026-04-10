@@ -155,6 +155,13 @@ MetalKernelFragment (protocol)
 4. prefill/decode step builder の buffer routing が一致しているか
 5. optimizer の有無で出力が変わらないか
 
+### Test Execution Stability
+
+- `xcodebuild` の単発失敗だけで実装バグと断定しない。`unexpected exit` や suite restart はテストプロセスの不安定さで起きることがある。
+- 実 bundle を読む suite は `build-for-testing` 後に `test-without-building` で 1 suite ずつ回す。
+- 不安定な suite は [`scripts/xcodebuild-test-timeout.sh`](/Users/1amageek/Desktop/swift-lm/scripts/xcodebuild-test-timeout.sh) または [`scripts/xcodebuild-test-hang-guard.sh`](/Users/1amageek/Desktop/swift-lm/scripts/xcodebuild-test-hang-guard.sh) で再現性を確認する。
+- suite-level filter で切り分けられるように、重い smoke tests は output / prompt-state / capability などの関心ごとごとに分割する。
+
 ### Compiler の IR walk → dispatch plan 生成
 
 #### Phase 1: IR walk (walkRegion)

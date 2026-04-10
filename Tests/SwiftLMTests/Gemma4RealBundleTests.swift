@@ -202,6 +202,38 @@ struct Gemma4RealBundleTests {
         #expect(sawOutput)
     }
 
+    @Test("Real Gemma4 bundle ignores thinking prompt options without regressing chat output", .timeLimit(.minutes(10)))
+    func realBundleChatIgnoresThinkingPromptOptions() async throws {
+        guard let container = try await Gemma4TestSupport.realGemma4Container() else {
+            print("[Skip] No local official Gemma4 E2B snapshot found")
+            return
+        }
+
+        container.resetCaches()
+        let prepared = try await container.prepare(input: ModelInput(
+            chat: [
+                .user([.text(RealOutputAssertionSupport.strictCapitalPrompt)])
+            ],
+            promptOptions: PromptPreparationOptions(
+                thinkingEnabled: true,
+                templateVariables: ["enable_thinking": .boolean(true)]
+            )
+        ))
+        print("[Gemma4 thinking-option rendered text]")
+        print(prepared.renderedText)
+        let prompt = try container.makeExecutablePrompt(from: prepared)
+        let comparison = try RealOutputAssertionSupport.assertGreedyDirectMatchesPromptState(
+            container: container,
+            prompt: prompt,
+            label: "Gemma4 chat thinking-option greedy"
+        )
+        RealOutputAssertionSupport.assertStartsWithTokyo(
+            comparison.directText,
+            label: "Gemma4 chat thinking-option greedy"
+        )
+        #expect(!comparison.directText.contains("<think>"))
+    }
+
 #if ENABLE_METAL_PROBES
     private func printActualLayerOutputs(
         container: ModelContainer,
