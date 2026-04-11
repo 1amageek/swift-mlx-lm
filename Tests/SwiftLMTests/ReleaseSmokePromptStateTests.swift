@@ -9,13 +9,14 @@ struct ReleaseSmokePromptStateTests {
 
         let loader = ModelBundleLoader()
         let container = try await loader.load(directory: localModelDirectory)
-        let input = try await container.prepare( ModelInput(prompt: "Hello"))
-        let executable = try container.makeExecutablePrompt(from: input)
-        let promptState = try container.makePromptSnapshot(from: executable)
+        let context = try container.makeContext()
+        let input = try await context.prepare(ModelInput(prompt: "Hello"))
+        let executable = try context.makeExecutablePrompt(from: input)
+        let promptState = try context.makePromptSnapshot(from: executable)
 
         var chunks: [String] = []
         var completion: CompletionInfo?
-        for await generation in try container.generate(
+        for await generation in try context.generate(
             from: promptState,
             parameters: GenerationParameters(maxTokens: 4, streamChunkTokenCount: 1)
         ) {
@@ -38,12 +39,13 @@ struct ReleaseSmokePromptStateTests {
 
         let loader = ModelBundleLoader()
         let container = try await loader.load(directory: localModelDirectory)
-        let prepared = try await container.prepare( ModelInput(prompt: RealOutputAssertionSupport.strictCapitalPrompt)
+        let context = try container.makeContext()
+        let prepared = try await context.prepare(ModelInput(prompt: RealOutputAssertionSupport.strictCapitalPrompt)
         )
-        let executable = try container.makeExecutablePrompt(from: prepared)
+        let executable = try context.makeExecutablePrompt(from: prepared)
 
         try RealOutputAssertionSupport.assertPromptStateSamplingMatchesDirect(
-            container: container,
+            container: context,
             prompt: executable,
             label: "LFM sampling"
         )

@@ -50,12 +50,13 @@ let container = try await ModelBundleLoader().load(directory: directory)
 ## Generate from Text
 
 ```swift
-let input = try await container.prepare(
+let context = try container.makeContext()
+let input = try await context.prepare(
     ModelInput(prompt: "Write a haiku about Metal shaders.")
 )
-let executable = try container.makeExecutablePrompt(from: input)
+let executable = try context.makeExecutablePrompt(from: input)
 
-let stream = try container.generate(
+let stream = try context.generate(
     from: executable,
     parameters: GenerationParameters(
         maxTokens: 128,
@@ -75,7 +76,9 @@ for await event in stream {
 }
 ```
 
-`InferenceSession/generate(from:parameters:)` returns an `AsyncStream` of ``GenerationEvent`` values. `InferenceSession/generate(_:parameters:)` is the async convenience API that prepares and executes in one step. The public generation entry points throw when the prompt cannot be executed.
+``LanguageModelContainer`` is the immutable loaded bundle and factory for execution state. ``LanguageModelContext`` owns mutable decode state such as KV position, prompt snapshots, and generation progress.
+
+``LanguageModelContext/generate(from:parameters:)`` returns an `AsyncStream` of ``GenerationEvent`` values. ``LanguageModelContainer/generate(_:parameters:)`` and ``LanguageModelContainer/generate(from:parameters:)`` are one-shot convenience APIs that create a fresh context internally. The public generation entry points throw when the prompt cannot be executed.
 
 `ModelInput` is the primary prompt type. It now supports Qwen3-VL style image-bearing and video-bearing chat prompts during preparation and execution when the loaded bundle includes compatible vision weights.
 

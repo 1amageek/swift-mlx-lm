@@ -8,11 +8,11 @@ import Tokenizers
 @testable import ModelDeclarations
 
 enum Gemma4TestSupport {
-    static func syntheticGemma4Container() async throws -> InferenceSession? {
+    static func syntheticGemma4Container() async throws -> LanguageModelContext? {
         try await Gemma4SyntheticContainerCache.shared.container()
     }
 
-    static func realGemma4Container() async throws -> InferenceSession? {
+    static func realGemma4Container() async throws -> LanguageModelContext? {
         try await Gemma4RealBundleCache.shared.container()
     }
 
@@ -369,7 +369,7 @@ enum Gemma4TestSupport {
 private actor Gemma4SyntheticContainerCache {
     static let shared = Gemma4SyntheticContainerCache()
 
-    func container() async throws -> InferenceSession? {
+    func container() async throws -> LanguageModelContext? {
         guard let device = MTLCreateSystemDefaultDevice() else {
             return nil
         }
@@ -402,7 +402,7 @@ private actor Gemma4SyntheticContainerCache {
         compiledModel = compiledModel.withPrefillPlan(prefillPlan)
         let inferenceModel = try MetalInferenceModel(plan: compiledModel, device: device)
         let hiddenSize = config.hiddenSize
-        let container = InferenceSession(
+        let container = LanguageModelContext(
             inferenceModel: inferenceModel,
             tokenizer: Gemma4TestTokenizer(),
             configuration: Gemma4TestSupport.modelConfiguration(hiddenSize: hiddenSize),
@@ -415,24 +415,26 @@ private actor Gemma4SyntheticContainerCache {
 
 private actor Gemma4RealBundleCache {
     static let shared = Gemma4RealBundleCache()
-    private var cachedContainer: InferenceSession?
+    private var cachedContainer: LanguageModelContext?
 
-    func container() async throws -> InferenceSession? {
+    func container() async throws -> LanguageModelContext? {
         if let cachedContainer {
             cachedContainer.resetState()
             return cachedContainer
         }
         if let repo = Gemma4TestSupport.optionalRealGemma4RepoID() {
-            let container = try await ModelBundleLoader().load(repo: repo)
-            cachedContainer = container
-            return container
+            let loaded = try await ModelBundleLoader().load(repo: repo)
+            let context = try loaded.makeContext()
+            cachedContainer = context
+            return context
         }
         guard let directory = try Gemma4TestSupport.optionalRealGemma4Directory() else {
             return nil
         }
-        let container = try await ModelBundleLoader().load(directory: directory)
-        cachedContainer = container
-        return container
+        let loaded = try await ModelBundleLoader().load(directory: directory)
+        let context = try loaded.makeContext()
+        cachedContainer = context
+        return context
     }
 }
 

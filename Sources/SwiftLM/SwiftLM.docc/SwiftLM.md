@@ -9,7 +9,8 @@ Use `SwiftLM` when you want to load a HuggingFace model bundle, compile it for M
 The public entry points are:
 
 - ``ModelBundleLoader`` to load and compile a model
-- ``InferenceSession`` to prepare prompts and stream generations
+- ``LanguageModelContainer`` as the immutable loaded bundle and context factory
+- ``LanguageModelContext`` as the mutable generation context
 - ``ModelInput`` and ``InputMessage`` for text, chat, and Qwen-style multimodal prompt preparation
 - ``PreparedPrompt`` and ``ExecutablePrompt`` for the explicit prepare/execute boundary
 - ``GenerationParameters`` to control decoding behavior
@@ -26,7 +27,8 @@ The public entry points are:
 ### Loading and GenerationEvent
 
 - ``ModelBundleLoader``
-- ``InferenceSession``
+- ``LanguageModelContainer``
+- ``LanguageModelContext``
 - ``ModelInput``
 - ``PreparedPrompt``
 - ``ExecutablePrompt``
@@ -42,4 +44,4 @@ The public entry points are:
 
 - ``ModelConfiguration``
 - ``ModelBundleLoaderError``
-- ``InferenceSessionError``
+- ``LanguageModelContextError``

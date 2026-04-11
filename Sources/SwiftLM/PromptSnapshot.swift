@@ -2,12 +2,12 @@ import MetalCompiler
 
 /// A reusable snapshot of decode state for a prepared prompt prefix.
 ///
-/// Build a prompt snapshot with ``InferenceSession/makePromptSnapshot(from:)`` or
-/// ``InferenceSession/makePromptSnapshot(from:)-(ModelInput)`` and reuse it with
-/// ``InferenceSession/generate(from:parameters:)``.
+/// Build a prompt snapshot with ``LanguageModelContext/makePromptSnapshot(from:)`` or
+/// ``LanguageModelContext/makePromptSnapshot(from:)-(ModelInput)`` and reuse it with
+/// ``LanguageModelContext/generate(from:parameters:)``.
 ///
-/// `PromptSnapshot` is session-affine runtime state. Reuse it only with the same
-/// `InferenceSession` instance and the same loaded model bundle that produced it.
+/// `PromptSnapshot` is context-affine runtime state. Reuse it only with the same
+/// `LanguageModelContext` instance and the same loaded model bundle that produced it.
 public struct PromptSnapshot: @unchecked Sendable {
     let metalState: MetalPromptState
     let ropePositionOffset: Int
@@ -31,8 +31,8 @@ public struct PromptSnapshot: @unchecked Sendable {
     }
 }
 
-/// Errors produced by ``InferenceSession``.
-public enum InferenceSessionError: Error {
+/// Errors produced by ``LanguageModelContext``.
+public enum LanguageModelContextError: Error {
     /// Prefill did not produce a valid first token.
     case invalidPrefillResult
     /// The input asks for a modality the loaded model does not declare.

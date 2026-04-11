@@ -200,11 +200,11 @@ enum QwenVisionTestSupport {
 #endif
     }
 
-    static func syntheticMultimodalContainer() async throws -> InferenceSession? {
+    static func syntheticMultimodalContainer() async throws -> LanguageModelContext? {
         try await QwenVisionSyntheticContainerCache.shared.container()
     }
 
-    static func realQwen3VLContainer() async throws -> InferenceSession? {
+    static func realQwen3VLContainer() async throws -> LanguageModelContext? {
         try await QwenVisionRealBundleCache.shared.container()
     }
 
@@ -427,7 +427,7 @@ struct QwenVisionParityFixture: Decodable {
 private actor QwenVisionSyntheticContainerCache {
     static let shared = QwenVisionSyntheticContainerCache()
 
-    func container() async throws -> InferenceSession? {
+    func container() async throws -> LanguageModelContext? {
         guard let device = MTLCreateSystemDefaultDevice() else {
             return nil
         }
@@ -494,7 +494,7 @@ private actor QwenVisionSyntheticContainerCache {
         let runtime = try QwenVisionTestSupport.syntheticVisionRuntime(
             outHiddenSize: config.hiddenSize
         )
-        let container = InferenceSession(
+        let container = LanguageModelContext(
             inferenceModel: inferenceModel,
             tokenizer: QwenVisionTestTokenizer(),
             configuration: configuration,
@@ -507,24 +507,26 @@ private actor QwenVisionSyntheticContainerCache {
 
 private actor QwenVisionRealBundleCache {
     static let shared = QwenVisionRealBundleCache()
-    private var cachedContainer: InferenceSession?
+    private var cachedContainer: LanguageModelContext?
 
-    func container() async throws -> InferenceSession? {
+    func container() async throws -> LanguageModelContext? {
         if let cachedContainer {
             cachedContainer.resetState()
             return cachedContainer
         }
         if let repo = QwenVisionTestSupport.optionalRealQwen35RepoID() {
-            let container = try await ModelBundleLoader().load(repo: repo)
-            cachedContainer = container
-            return container
+            let loaded = try await ModelBundleLoader().load(repo: repo)
+            let context = try loaded.makeContext()
+            cachedContainer = context
+            return context
         }
         guard let directory = try QwenVisionTestSupport.optionalRealQwen3VLDirectory() else {
             return nil
         }
-        let container = try await ModelBundleLoader().load(directory: directory)
-        cachedContainer = container
-        return container
+        let loaded = try await ModelBundleLoader().load(directory: directory)
+        let context = try loaded.makeContext()
+        cachedContainer = context
+        return context
     }
 }
 

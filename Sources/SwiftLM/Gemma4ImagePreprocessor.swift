@@ -78,7 +78,7 @@ struct Gemma4ImagePreprocessor {
 
         guard let source,
               let cgImage = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
-            throw InferenceSessionError.unsupportedInputForModel(
+            throw LanguageModelContextError.unsupportedInputForModel(
                 "Could not decode image data for Gemma4 preprocessing."
             )
         }
@@ -106,7 +106,7 @@ struct Gemma4ImagePreprocessor {
             space: colorSpace,
             bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue | CGBitmapInfo.byteOrder32Big.rawValue
         ) else {
-            throw InferenceSessionError.unsupportedInputForModel(
+            throw LanguageModelContextError.unsupportedInputForModel(
                 "Could not create image resize context for Gemma4 preprocessing."
             )
         }
@@ -179,7 +179,7 @@ struct Gemma4ImagePreprocessor {
         var targetWidth = Int(floor(idealWidth / Double(sideMultiple))) * sideMultiple
 
         if targetHeight == 0 && targetWidth == 0 {
-            throw InferenceSessionError.multimodalInputNotSupported(
+            throw LanguageModelContextError.multimodalInputNotSupported(
                 "Gemma4 image resize collapsed to zero dimensions."
             )
         }

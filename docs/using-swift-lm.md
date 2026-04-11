@@ -93,11 +93,12 @@ Unsupported or incomplete families currently fail during loading or graph constr
 ```swift
 import SwiftLM
 
-let prepared = try await container.prepare(input: ModelInput(prompt: "Write a haiku about Metal shaders."))
-let executable = try container.makeExecutablePrompt(from: prepared)
-let stream = try container.generate(
-    prompt: executable,
-    parameters: GenerateParameters(
+let context = try container.makeContext()
+let prepared = try await context.prepare(ModelInput(prompt: "Write a haiku about Metal shaders."))
+let executable = try context.makeExecutablePrompt(from: prepared)
+let stream = try context.generate(
+    from: executable,
+    parameters: GenerationParameters(
         maxTokens: 128,
         streamChunkTokenCount: 8,
         temperature: 0.6,
@@ -106,39 +107,37 @@ let stream = try container.generate(
 )
 
 for await event in stream {
-    if let chunk = event.chunk {
+    if let chunk = event.text {
         print(chunk, terminator: "")
     }
-    if let info = event.info {
+    if let info = event.completion {
         print("\n\nGenerated \(info.tokenCount) tokens at \(info.tokensPerSecond) tok/s")
     }
 }
 ```
 
-`generate(prompt:)` returns `AsyncStream<Generation>`. The stream yields:
+`LanguageModelContainer` is the immutable loaded bundle and factory for execution state. `LanguageModelContext` is the mutable runtime state for one conversation or generation flow.
 
-- `.chunk(String)` for decoded text
-- `.info(CompletionInfo)` once at the end
-
-Use `PreparedInput` as the result of prompt preparation and `ExecutablePrompt` as the runtime execution shape. `generate(input: ModelInput, parameters:)` is the async convenience entry point; `generate(prompt: ExecutablePrompt, parameters:)` is the low-level execution API.
+Use `PreparedPrompt` as the result of prompt preparation and `ExecutablePrompt` as the runtime execution shape. `LanguageModelContainer.generate(_:parameters:)` is the async one-shot convenience entry point; `LanguageModelContext.generate(from:parameters:)` is the low-level execution API when you want explicit context ownership.
 
 ## Generate from Chat Messages
 
 ```swift
-let prepared = try await container.prepare(input: ModelInput(chat: [
+let context = try container.makeContext()
+let prepared = try await context.prepare(ModelInput(chat: [
     .system("You are a concise assistant."),
     .user("Summarize the benefits of zero-copy model loading.")
 ]))
-let executable = try container.makeExecutablePrompt(from: prepared)
+let executable = try context.makeExecutablePrompt(from: prepared)
 
-for await event in try container.generate(prompt: executable) {
-    if let chunk = event.chunk {
+for await event in try context.generate(from: executable) {
+    if let chunk = event.text {
         print(chunk, terminator: "")
     }
 }
 ```
 
-When `chat_template.jinja` or `tokenizer_config.json["chat_template"]` is available, `prepare(input:)` renders the model's template. Otherwise, `swift-lm` falls back to a simple role-prefixed transcript.
+When `chat_template.jinja` or `tokenizer_config.json["chat_template"]` is available, `prepare(_:)` renders the model's template. Otherwise, `swift-lm` falls back to a simple role-prefixed transcript.
 
 ## Prepare a Qwen3-VL Style Visual Prompt
 
@@ -152,62 +151,64 @@ let input = ModelInput(chat: [
     ])
 ])
 
-let prepared = try await container.prepare(input: input)
+let context = try container.makeContext()
+let prepared = try await context.prepare(input)
 
 if let multimodal = prepared.multimodalMetadata {
     print("image items =", multimodal.images.count)
     print("mm token types =", Array(multimodal.mmTokenTypeIDs.prefix(8)))
 }
 
-let executable = try container.makeExecutablePrompt(from: prepared)
-for await event in try container.generate(prompt: executable) {
-    if let chunk = event.chunk {
+let executable = try context.makeExecutablePrompt(from: prepared)
+for await event in try context.generate(from: executable) {
+    if let chunk = event.text {
         print(chunk, terminator: "")
     }
 }
 ```
 
-For Qwen3-VL bundles, `prepare(input:)` expands the image and video placeholder counts from the bundle's `preprocessor_config.json` so the token stream matches the processor contract. `makeExecutablePrompt(from:)` builds the executable visual payload, and generation uses the bundled Qwen vision encoder plus the text backbone decode path.
+For Qwen3-VL bundles, `prepare(_:)` expands the image and video placeholder counts from the bundle's `preprocessor_config.json` so the token stream matches the processor contract. `makeExecutablePrompt(from:)` builds the executable visual payload, and generation uses the bundled Qwen vision encoder plus the text backbone decode path.
 
 ## Reuse a Prompt Prefix
 
-If many requests share the same prompt prefix, build a `PromptState` once and reuse it.
+If many requests share the same prompt prefix, build a `PromptSnapshot` once and reuse it.
 
 ```swift
-let promptState = try await container.makePromptState(input: ModelInput(chat: [
+let context = try container.makeContext()
+let promptSnapshot = try await context.makePromptSnapshot(from: ModelInput(chat: [
     .system("You are a helpful code review assistant."),
     .user("Review this patch carefully.")
 ]))
 
-for await event in try container.generate(
-    from: promptState,
-    parameters: GenerateParameters(maxTokens: 64)
+for await event in try context.generate(
+    from: promptSnapshot,
+    parameters: GenerationParameters(maxTokens: 64)
 ) {
-    if let chunk = event.chunk {
+    if let chunk = event.text {
         print(chunk, terminator: "")
     }
 }
 ```
 
-`PromptState` stores the post-prefill decode state and the first predicted token, so later calls can skip prompt prefill.
+`PromptSnapshot` stores the post-prefill decode state and the first predicted token, so later calls can skip prompt prefill.
 
 ## Tokenizer and Cache Helpers
 
-Use the container helpers when you need lower-level control:
+Use the container helpers when you need stateless tokenizer access, and the context when you need mutable cache control:
 
 ```swift
 let tokens = container.encode("Hello")
-let text = container.decode(tokens: tokens)
-container.resetCaches()
+let text = container.decode(tokens)
+context.resetState()
 ```
 
 - `encode(_:)` converts text to token IDs
-- `decode(tokens:)` converts token IDs back to text
-- `resetCaches()` clears KV/cache state between unrelated conversations
+- `decode(_:)` converts token IDs back to text
+- `resetState()` clears KV/cache state between unrelated conversations
 
 ## Generation Parameters
 
-`GenerateParameters` currently exposes:
+`GenerationParameters` currently exposes:
 
 - `maxTokens`
 - `streamChunkTokenCount`
@@ -225,10 +226,10 @@ For predictable behavior, set `maxTokens` explicitly. If `maxTokens` is `nil`, t
 - `ModelConfiguration.executionCapabilities` tells you what the current runtime can actually execute or prepare
 - `ModelConfiguration.vision` exposes image/video placeholder token IDs, processor names, and Qwen-style patch sizing metadata when the bundle provides them
 - Image content can be expressed through `ModelInput`, and Qwen3-VL style prompt preparation now expands the correct placeholder count before tokenization
-- `makeExecutablePrompt(from:)` converts prepared input into an executable prompt, while `makePromptState(input: ModelInput)` and `generate(input: ModelInput, parameters:)` are async convenience APIs for the same Qwen3-VL image/video path
+- `makeExecutablePrompt(from:)` converts prepared input into an executable prompt, while `makePromptSnapshot(from:)` on `LanguageModelContext` captures reusable decode state for the same context
 - Other multimodal model families still throw `multimodalInputNotSupported` until a matching processor + vision runtime is implemented
 - Tool calling and structured function-calling APIs are not part of the current public API
-- Generation is stream-based; collect `.chunk` values yourself if you need a single final string
+- Generation is stream-based; collect `GenerationEvent.text` values yourself if you need a single final string
 
 ## Troubleshooting
 

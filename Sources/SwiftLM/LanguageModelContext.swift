@@ -6,22 +6,24 @@ import MetalCompiler
 import Tokenizers
 import Jinja
 
-/// Thread-safe container for a compiled inference model.
+/// Mutable execution context for a loaded language model.
 ///
-/// Wraps MetalInferenceModel + Tokenizer. Provides the public API
-/// consumed by AnyFoundationModels and Jardis.
+/// A context owns decode-time mutable state such as KV cache position,
+/// prompt snapshot restore, and generation progress. Create contexts from
+/// ``LanguageModelContainer`` when you need isolated inference state.
 ///
 /// ```swift
-/// let session = try await ModelBundleLoader().load(repo: "mlx-community/Qwen2.5-0.5B-Instruct")
-/// let stream = try session.generate(
-///     from: ExecutablePrompt(tokenIDs: session.encode("Hello")),
+/// let container = try await ModelBundleLoader().load(repo: "mlx-community/Qwen2.5-0.5B-Instruct")
+/// let context = try container.makeContext()
+/// let stream = try context.generate(
+///     from: ExecutablePrompt(tokenIDs: context.encode("Hello")),
 ///     parameters: GenerationParameters(maxTokens: 100)
 /// )
 /// for await generation in stream {
 ///     if let text = generation.text { print(text, terminator: "") }
 /// }
 /// ```
-public final class InferenceSession: @unchecked Sendable {
+public final class LanguageModelContext: @unchecked Sendable {
     private static let promptStateSamplingTailLimit = 256
 
     private var inferenceModel: MetalInferenceModel
@@ -89,7 +91,7 @@ public final class InferenceSession: @unchecked Sendable {
         modelConfiguration
     }
 
-    /// Internal tokenizer used by this session.
+    /// Internal tokenizer used by this context.
     var tokenizer: any Tokenizer {
         modelTokenizer
     }
@@ -123,7 +125,7 @@ public final class InferenceSession: @unchecked Sendable {
                 let processor = QwenVisionPromptProcessor(configuration: configuration)
                 multimodal?.mmTokenTypeIDs = processor.multimodalTokenTypes(for: tokens)
             } else {
-                throw InferenceSessionError.multimodalInputNotSupported(
+                throw LanguageModelContextError.multimodalInputNotSupported(
                     "No vision runtime available for multimodal token type assignment."
                 )
             }
@@ -147,12 +149,12 @@ public final class InferenceSession: @unchecked Sendable {
         let containsImages = messages.contains(where: \.containsImageContent)
         let containsVideos = messages.contains(where: \.containsVideoContent)
         if containsImages && !configuration.inputCapabilities.supportsImages {
-            throw InferenceSessionError.unsupportedInputForModel(
+            throw LanguageModelContextError.unsupportedInputForModel(
                 "This model bundle does not declare image input support."
             )
         }
         if containsVideos && !configuration.inputCapabilities.supportsVideo {
-            throw InferenceSessionError.unsupportedInputForModel(
+            throw LanguageModelContextError.unsupportedInputForModel(
                 "This model bundle does not declare video input support."
             )
         }
@@ -264,12 +266,12 @@ public final class InferenceSession: @unchecked Sendable {
     ) throws -> [String: PromptTemplateValue] {
         if let explicitThinking = promptOptions.templateVariables["enable_thinking"] {
             guard case .boolean(let explicitValue) = explicitThinking else {
-                throw InferenceSessionError.invalidPromptTemplateVariable(
+                throw LanguageModelContextError.invalidPromptTemplateVariable(
                     "Template variable 'enable_thinking' must be a boolean."
                 )
             }
             guard explicitValue == promptOptions.isThinkingEnabled else {
-                throw InferenceSessionError.conflictingPromptThinkingConfiguration(
+                throw LanguageModelContextError.conflictingPromptThinkingConfiguration(
                     "PromptPreparationOptions.isThinkingEnabled conflicts with templateVariables[\"enable_thinking\"]."
                 )
             }
@@ -303,7 +305,7 @@ public final class InferenceSession: @unchecked Sendable {
             let processor = QwenVisionPromptProcessor(configuration: configuration)
             return try await processor.prepare(renderedText: rendered, messages: messages)
         }
-        throw InferenceSessionError.multimodalInputNotSupported(
+        throw LanguageModelContextError.multimodalInputNotSupported(
             "No vision runtime available for multimodal prompt preparation."
         )
     }
@@ -459,7 +461,7 @@ public final class InferenceSession: @unchecked Sendable {
                     ropePositionOffset: ropePositionOffset
                 )
             } catch {
-                print("[InferenceSession] Failed to decode: \(error)")
+                print("[LanguageModelContext] Failed to decode: \(error)")
                 break
             }
 
@@ -517,7 +519,7 @@ public final class InferenceSession: @unchecked Sendable {
         let totalTime = CFAbsoluteTimeGetCurrent() - requestStartTime
         let tokensPerSecond = totalTime > 0 ? Double(visibleTokenCount) / totalTime : 0
         let preparationTokPerSec = preparationTime > 0 ? Double(promptTokenCount) / preparationTime : 0
-        print("[InferenceSession] \(visibleTokenCount) tokens (\(String(format: "%.0f", preparationTokPerSec)) prefill, \(String(format: "%.1f", tokensPerSecond)) decode tok/s) [\(String(format: "%.1f", totalTime))s]")
+        print("[LanguageModelContext] \(visibleTokenCount) tokens (\(String(format: "%.0f", preparationTokPerSec)) prefill, \(String(format: "%.1f", tokensPerSecond)) decode tok/s) [\(String(format: "%.1f", totalTime))s]")
         continuation.yield(.completed(CompletionInfo(
             tokenCount: visibleTokenCount,
             tokensPerSecond: tokensPerSecond,
@@ -566,7 +568,7 @@ public final class InferenceSession: @unchecked Sendable {
                 firstToken = inferenceModel.prefill(tokens: prompt.tokenIDs.map(Int32.init))
             }
             guard firstToken >= 0 else {
-                throw InferenceSessionError.invalidPrefillResult
+                throw LanguageModelContextError.invalidPrefillResult
             }
             return (firstToken: firstToken, ropePositionOffset: 0)
         }
@@ -574,14 +576,14 @@ public final class InferenceSession: @unchecked Sendable {
             let promptTokens = prompt.tokenIDs.map(Int32.init)
             let firstToken = inferenceModel.prefill(tokens: promptTokens)
             guard firstToken >= 0 else {
-                throw InferenceSessionError.invalidPrefillResult
+                throw LanguageModelContextError.invalidPrefillResult
             }
             return (firstToken: firstToken, ropePositionOffset: 0)
         }
 
         let layout = visualContext.layout
         guard layout.tokenTypeIDs.count == prompt.tokenIDs.count else {
-            throw InferenceSessionError.multimodalInputNotSupported(
+            throw LanguageModelContextError.multimodalInputNotSupported(
                 "Executable multimodal prompt layout does not match token count."
             )
         }
@@ -601,7 +603,7 @@ public final class InferenceSession: @unchecked Sendable {
                 let localTokenCount = endIndex - tokenIndex
                 let endImageIndex = imageTokenIndex + localTokenCount
                 guard endImageIndex <= visualContext.imageTokenEmbeddings.count else {
-                    throw InferenceSessionError.multimodalInputNotSupported(
+                    throw LanguageModelContextError.multimodalInputNotSupported(
                         "Vision encoder output is shorter than the image placeholder sequence."
                     )
                 }
@@ -614,7 +616,7 @@ public final class InferenceSession: @unchecked Sendable {
                 var deepstackFeaturesByLayer: [Int: [[Float]]] = [:]
                 for (layerIndex, features) in visualContext.imageDeepstackFeaturesByLayer {
                     guard endImageIndex <= features.count else {
-                        throw InferenceSessionError.multimodalInputNotSupported(
+                        throw LanguageModelContextError.multimodalInputNotSupported(
                             "Deepstack visual feature count mismatch at layer \(layerIndex)."
                         )
                     }
@@ -630,7 +632,7 @@ public final class InferenceSession: @unchecked Sendable {
                 let localTokenCount = endIndex - tokenIndex
                 let endVideoIndex = videoTokenIndex + localTokenCount
                 guard endVideoIndex <= visualContext.videoTokenEmbeddings.count else {
-                    throw InferenceSessionError.multimodalInputNotSupported(
+                    throw LanguageModelContextError.multimodalInputNotSupported(
                         "Vision encoder output is shorter than the video placeholder sequence."
                     )
                 }
@@ -643,7 +645,7 @@ public final class InferenceSession: @unchecked Sendable {
                 var deepstackFeaturesByLayer: [Int: [[Float]]] = [:]
                 for (layerIndex, features) in visualContext.videoDeepstackFeaturesByLayer {
                     guard endVideoIndex <= features.count else {
-                        throw InferenceSessionError.multimodalInputNotSupported(
+                        throw LanguageModelContextError.multimodalInputNotSupported(
                             "Deepstack video feature count mismatch at layer \(layerIndex)."
                         )
                     }
@@ -656,14 +658,14 @@ public final class InferenceSession: @unchecked Sendable {
                 )
                 videoTokenIndex = endVideoIndex
             default:
-                throw InferenceSessionError.multimodalInputNotSupported(
+                throw LanguageModelContextError.multimodalInputNotSupported(
                     "Unsupported multimodal token type ID: \(tokenType)"
                 )
             }
         }
 
         guard firstToken >= 0 else {
-            throw InferenceSessionError.invalidPrefillResult
+            throw LanguageModelContextError.invalidPrefillResult
         }
         return (
             firstToken: firstToken,
@@ -675,7 +677,7 @@ public final class InferenceSession: @unchecked Sendable {
     public func makeExecutablePrompt(from prepared: PreparedPrompt) throws -> ExecutablePrompt {
         if let gemma4Runtime {
             if let multimodal = prepared.multimodalMetadata, !multimodal.videos.isEmpty {
-                throw InferenceSessionError.multimodalInputNotSupported(
+                throw LanguageModelContextError.multimodalInputNotSupported(
                     "Gemma4 video execution is not implemented yet."
                 )
             }
@@ -689,17 +691,17 @@ public final class InferenceSession: @unchecked Sendable {
             return ExecutablePrompt(tokenIDs: prepared.tokenIDs, attentionMask: prepared.attentionMask)
         }
         if !multimodal.videos.isEmpty && !configuration.executionCapabilities.supportsVideoExecution {
-            throw InferenceSessionError.multimodalInputNotSupported(
+            throw LanguageModelContextError.multimodalInputNotSupported(
                 "This runtime can prepare Qwen3.5/Qwen3-VL prompts, but video execution is unavailable for the loaded bundle."
             )
         }
         guard multimodal.images.isEmpty || configuration.executionCapabilities.supportsImageExecution else {
-            throw InferenceSessionError.multimodalInputNotSupported(
+            throw LanguageModelContextError.multimodalInputNotSupported(
                 "This runtime can prepare Qwen3.5/Qwen3-VL prompts, but image execution is unavailable for the loaded bundle."
             )
         }
         guard let visionRuntime else {
-            throw InferenceSessionError.multimodalInputNotSupported(
+            throw LanguageModelContextError.multimodalInputNotSupported(
                 "The loaded bundle does not have an active Qwen vision runtime."
             )
         }
@@ -790,7 +792,7 @@ public final class InferenceSession: @unchecked Sendable {
         do {
             try self.inferenceModel.restore(promptState: promptSnapshot.metalState)
         } catch {
-            throw InferenceSessionError.promptSnapshotRestoreFailed(String(describing: error))
+            throw LanguageModelContextError.promptSnapshotRestoreFailed(String(describing: error))
         }
         let restoreTime = CFAbsoluteTimeGetCurrent() - restoreStart
         var initialSamplingState = GenerationSamplingState(
@@ -1028,7 +1030,7 @@ public final class InferenceSession: @unchecked Sendable {
         differingCount: Int
     ) {
         if prompt.visualContext != nil || prompt.gemma4PromptContext != nil {
-            throw InferenceSessionError.multimodalInputNotSupported(
+            throw LanguageModelContextError.multimodalInputNotSupported(
                 "Continuation logit comparison currently supports text-only prompts."
             )
         }
@@ -1111,22 +1113,31 @@ public final class InferenceSession: @unchecked Sendable {
         }
     }
 
-    internal func debugClone(
+    internal func cloneContext(
         compiledModel: MetalCompiledModel
-    ) throws -> InferenceSession {
+    ) throws -> LanguageModelContext {
+        let isolatedCompiledModel = try compiledModel.makeRuntimeIsolatedCopy(device: inferenceModel.device)
         let clonedInferenceModel = try MetalInferenceModel(
-            compiledModel: compiledModel,
+            compiledModel: isolatedCompiledModel,
             device: inferenceModel.device
         )
-        return InferenceSession(
+        return LanguageModelContext(
             inferenceModel: clonedInferenceModel,
             tokenizer: modelTokenizer,
             configuration: modelConfiguration,
+            chatTemplate: chatTemplate,
+            chatTemplateSource: chatTemplateSource,
             vocabularySize: vocabularySize,
             finalLogitSoftcapping: finalLogitSoftcapping,
             visionRuntime: visionRuntime,
             gemma4Runtime: gemma4Runtime
         )
+    }
+
+    internal func debugClone(
+        compiledModel: MetalCompiledModel
+    ) throws -> LanguageModelContext {
+        try cloneContext(compiledModel: compiledModel)
     }
 
     internal var debugCompiledModel: MetalCompiledModel {
@@ -1788,7 +1799,7 @@ public final class InferenceSession: @unchecked Sendable {
         visibilityOptions: MTL4VisibilityOptions = []
     ) throws -> [String: [Float]] {
         guard prompt.visualContext == nil, prompt.gemma4PromptContext == nil else {
-            throw InferenceSessionError.multimodalInputNotSupported(
+            throw LanguageModelContextError.multimodalInputNotSupported(
                 "Decode binding probes currently support text-only prompts."
             )
         }
@@ -2022,7 +2033,7 @@ public final class InferenceSession: @unchecked Sendable {
 
         if ProcessInfo.processInfo.environment["SWIFTLM_TRACE_SAMPLING"] == "1" {
             print(
-                "[InferenceSession] sampling trace: fallback=\(fallbackToken) temp=\(parameters.temperature) topP=\(parameters.topP) "
+                "[LanguageModelContext] sampling trace: fallback=\(fallbackToken) temp=\(parameters.temperature) topP=\(parameters.topP) "
                     + "needsRepair=\(needsGreedyRepair) hostPost=\(requiresHostLogitPostprocessing) host=\(shouldSampleOnHost)"
             )
         }

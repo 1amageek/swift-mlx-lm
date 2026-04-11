@@ -1,7 +1,7 @@
 /// Runtime-executable prompt shape.
 ///
 /// `ExecutablePrompt` is the validated execution contract consumed by
-/// `InferenceSession` and the Metal runtime. Text tokens remain the semantic
+/// `LanguageModelContext` and the Metal runtime. Text tokens remain the semantic
 /// source of truth, while multimodal execution details live in `VisualContext`.
 public struct ExecutablePrompt: Sendable {
     public var tokenIDs: [Int]

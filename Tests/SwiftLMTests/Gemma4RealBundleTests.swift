@@ -234,7 +234,7 @@ struct Gemma4RealBundleTests {
 
 #if ENABLE_METAL_PROBES
     private func printActualLayerOutputs(
-        container: InferenceSession,
+        container: LanguageModelContext,
         prompt: ExecutablePrompt,
         selectedLayers: Set<Int>
     ) throws {

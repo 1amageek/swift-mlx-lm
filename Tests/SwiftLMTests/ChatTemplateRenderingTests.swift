@@ -121,7 +121,7 @@ struct ChatTemplateRenderingTests {
                 )
             )
             Issue.record("Expected conflicting thinking controls to fail")
-        } catch let error as InferenceSessionError {
+        } catch let error as LanguageModelContextError {
             guard case .conflictingPromptThinkingConfiguration = error else {
                 Issue.record("Unexpected error: \(error)")
                 return

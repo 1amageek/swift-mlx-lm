@@ -8,36 +8,50 @@ import Tokenizers
 @testable import ModelDeclarations
 @testable import LMArchitecture
 
-@Suite("Performance: GenerationEvent Pipeline", .tags(.performance), .serialized, .heartbeat)
-struct GenerationPipelineBenchmarkTests {
+@Suite("Performance: Generation Throughput", .tags(.performance), .serialized, .heartbeat)
+struct GenerationThroughputBenchmarkTests {
 
-    private static let stafPath = "/Users/1amageek/Desktop/swift-lm/TestData/LFM2.5-1.2B-Thinking/model.staf"
-
-    @Test("InferenceSession generate throughput", .timeLimit(.minutes(2)))
-    func modelContainerGenerateThroughput() async throws {
+    @Test("LanguageModelContext generate throughput", .timeLimit(.minutes(2)))
+    func languageModelContextGenerateThroughput() async throws {
         let promptTokens = [1, 1, 6, 6423, 708]
         let generateCount = 50
-        var resources = try await makeResources(maximumSequenceLength: promptTokens.count)
+        var resources = try await GenerationPipelineBenchmarkSupport.makeResources(
+            maximumSequenceLength: promptTokens.count
+        )
         defer { resources.release() }
 
-        let syncResult = try measureMedian(name: "sync decode", iterations: 5, warmup: 1) {
-            try runSynchronousLoop(
+        let syncResult = try GenerationPipelineBenchmarkSupport.measureMedian(
+            name: "sync decode",
+            iterations: 5,
+            warmup: 1
+        ) {
+            try GenerationPipelineBenchmarkSupport.runSynchronousLoop(
                 model: &resources.syncModel,
                 tokenizer: resources.tokenizer,
                 promptTokens: promptTokens,
-                generateCount: generateCount)
+                generateCount: generateCount
+            )
         }
 
-        let pipelinedResult = try measureMedian(name: "pipelined decode", iterations: 5, warmup: 1) {
-            try runPipelinedLoop(
+        let pipelinedResult = try GenerationPipelineBenchmarkSupport.measureMedian(
+            name: "pipelined decode",
+            iterations: 5,
+            warmup: 1
+        ) {
+            try GenerationPipelineBenchmarkSupport.runPipelinedLoop(
                 model: &resources.pipelinedModel,
                 tokenizer: resources.tokenizer,
                 promptTokens: promptTokens,
-                generateCount: generateCount)
+                generateCount: generateCount
+            )
         }
 
-        let generateResult = try await measureMedianAsync(name: "InferenceSession.generate(greedy)", iterations: 5, warmup: 1) {
-            try await runContainerGenerate(
+        let generateResult = try await GenerationPipelineBenchmarkSupport.measureMedianAsync(
+            name: "LanguageModelContext.generate(greedy)",
+            iterations: 5,
+            warmup: 1
+        ) {
+            try await GenerationPipelineBenchmarkSupport.runContainerGenerate(
                 container: resources.container,
                 promptTokens: promptTokens,
                 parameters: GenerationParameters(maxTokens: generateCount, temperature: 0)
@@ -48,9 +62,9 @@ struct GenerationPipelineBenchmarkTests {
         print("=== GenerationEvent Pipeline Benchmark: LFM2.5-1.2B ===")
         print("Mode                    tok/s   ms/tok  generated")
         print("--------------------------------------------------")
-        print(format(syncResult))
-        print(format(pipelinedResult))
-        print(format(generateResult))
+        print(GenerationPipelineBenchmarkSupport.format(syncResult))
+        print(GenerationPipelineBenchmarkSupport.format(pipelinedResult))
+        print(GenerationPipelineBenchmarkSupport.format(generateResult))
 
         let pipelinedGain = ((pipelinedResult.tokensPerSecond / syncResult.tokensPerSecond) - 1.0) * 100.0
         let generateGain = ((generateResult.tokensPerSecond / syncResult.tokensPerSecond) - 1.0) * 100.0
@@ -65,24 +79,30 @@ struct GenerationPipelineBenchmarkTests {
     func generationHostOverheadBreakdown() async throws {
         let promptTokens = [1, 1, 6, 6423, 708]
         let generateCount = 50
-        var resources = try await makeResources(maximumSequenceLength: promptTokens.count)
+        var resources = try await GenerationPipelineBenchmarkSupport.makeResources(
+            maximumSequenceLength: promptTokens.count
+        )
         defer { resources.release() }
 
-        let rawTokens = try collectGeneratedTokens(
+        let rawTokens = try GenerationPipelineBenchmarkSupport.collectGeneratedTokens(
             model: &resources.syncModel,
             promptTokens: promptTokens,
             generateCount: generateCount
         )
 
-        let rawDecode = try measureMedian(name: "raw GPU decode", iterations: 5, warmup: 1) {
-            try runSynchronousLoopNoTokenizer(
+        let rawDecode = try GenerationPipelineBenchmarkSupport.measureMedian(
+            name: "raw GPU decode",
+            iterations: 5,
+            warmup: 1
+        ) {
+            try GenerationPipelineBenchmarkSupport.runSynchronousLoopNoTokenizer(
                 model: &resources.syncModel,
                 promptTokens: promptTokens,
                 generateCount: generateCount
             )
         }
 
-        let tokenDecode = measureTokenizerMedian(
+        let tokenDecode = GenerationPipelineBenchmarkSupport.measureTokenizerMedian(
             name: "tokenizer.decode",
             iterations: 10,
             warmup: 2,
@@ -90,8 +110,12 @@ struct GenerationPipelineBenchmarkTests {
             tokens: rawTokens
         )
 
-        let syncWithTokenizer = try measureMedian(name: "GPU+tokenizer", iterations: 5, warmup: 1) {
-            try runSynchronousLoop(
+        let syncWithTokenizer = try GenerationPipelineBenchmarkSupport.measureMedian(
+            name: "GPU+tokenizer",
+            iterations: 5,
+            warmup: 1
+        ) {
+            try GenerationPipelineBenchmarkSupport.runSynchronousLoop(
                 model: &resources.pipelinedModel,
                 tokenizer: resources.tokenizer,
                 promptTokens: promptTokens,
@@ -103,9 +127,9 @@ struct GenerationPipelineBenchmarkTests {
         print("=== Host Overhead Breakdown: LFM2.5-1.2B ===")
         print("Mode                    tok/s   ms/tok  generated")
         print("--------------------------------------------------")
-        print(format(rawDecode))
-        print(format(tokenDecode))
-        print(format(syncWithTokenizer))
+        print(GenerationPipelineBenchmarkSupport.format(rawDecode))
+        print(GenerationPipelineBenchmarkSupport.format(tokenDecode))
+        print(GenerationPipelineBenchmarkSupport.format(syncWithTokenizer))
 
         let tokenizerShare = tokenDecode.elapsed / syncWithTokenizer.elapsed * 100.0
         print(String(format: "[Benchmark] tokenizer share of GPU+tokenizer path: %.1f%%", tokenizerShare))
@@ -118,14 +142,18 @@ struct GenerationPipelineBenchmarkTests {
         let promptTokens = [1, 1, 6, 6423, 708]
         let generateCount = 50
 
-        let standardResult: ThroughputResult = try await {
-            var resources = try await makeResources(
+        let standardResult: GenerationPipelineBenchmarkSupport.ThroughputResult = try await {
+            var resources = try await GenerationPipelineBenchmarkSupport.makeResources(
                 optimizer: StandardOptimizer(),
                 maximumSequenceLength: promptTokens.count
             )
             defer { resources.release() }
-            return try measureMedian(name: "standard", iterations: 5, warmup: 1) {
-                try runSynchronousLoopNoTokenizer(
+            return try GenerationPipelineBenchmarkSupport.measureMedian(
+                name: "standard",
+                iterations: 5,
+                warmup: 1
+            ) {
+                try GenerationPipelineBenchmarkSupport.runSynchronousLoopNoTokenizer(
                     model: &resources.syncModel,
                     promptTokens: promptTokens,
                     generateCount: generateCount
@@ -133,14 +161,18 @@ struct GenerationPipelineBenchmarkTests {
             }
         }()
 
-        let aggressiveResult: ThroughputResult = try await {
-            var resources = try await makeResources(
+        let aggressiveResult: GenerationPipelineBenchmarkSupport.ThroughputResult = try await {
+            var resources = try await GenerationPipelineBenchmarkSupport.makeResources(
                 optimizer: AggressiveOptimizer(),
                 maximumSequenceLength: promptTokens.count
             )
             defer { resources.release() }
-            return try measureMedian(name: "aggressive", iterations: 5, warmup: 1) {
-                try runSynchronousLoopNoTokenizer(
+            return try GenerationPipelineBenchmarkSupport.measureMedian(
+                name: "aggressive",
+                iterations: 5,
+                warmup: 1
+            ) {
+                try GenerationPipelineBenchmarkSupport.runSynchronousLoopNoTokenizer(
                     model: &resources.syncModel,
                     promptTokens: promptTokens,
                     generateCount: generateCount
@@ -152,8 +184,8 @@ struct GenerationPipelineBenchmarkTests {
         print("=== Request-Level Optimizer Comparison: LFM2.5-1.2B ===")
         print("Optimizer               tok/s   ms/tok  generated")
         print("------------------------------------------------------")
-        print(format(standardResult))
-        print(format(aggressiveResult))
+        print(GenerationPipelineBenchmarkSupport.format(standardResult))
+        print(GenerationPipelineBenchmarkSupport.format(aggressiveResult))
 
         let aggressiveGain = ((aggressiveResult.tokensPerSecond / standardResult.tokensPerSecond) - 1.0) * 100.0
         print(String(format: "[Benchmark] aggressive vs standard: %+0.1f%%", aggressiveGain))
@@ -161,63 +193,86 @@ struct GenerationPipelineBenchmarkTests {
         #expect(standardResult.generatedTokenCount == generateCount)
         #expect(aggressiveResult.generatedTokenCount == generateCount)
     }
+}
 
-    @Test("Request-level scaling", .timeLimit(.minutes(3)))
-    func requestLevelScaling() async throws {
+@Suite("Performance: Generation Scaling", .tags(.performance), .serialized, .heartbeat)
+struct GenerationScalingBenchmarkTests {
+
+    @Test("Request-level scaling (50)", .timeLimit(.minutes(2)))
+    func requestLevelScaling50() async throws {
+        try await Self.runScalingCase(generateCount: 50)
+    }
+
+    @Test("Request-level scaling (128)", .timeLimit(.minutes(2)))
+    func requestLevelScaling128() async throws {
+        try await Self.runScalingCase(generateCount: 128)
+    }
+
+    @Test("Request-level scaling (256)", .timeLimit(.minutes(2)))
+    func requestLevelScaling256() async throws {
+        try await Self.runScalingCase(generateCount: 256)
+    }
+
+    static func runScalingCase(generateCount: Int) async throws {
         let promptTokens = [1, 1, 6, 6423, 708]
-        let generateCounts = [50, 128, 256, 512]
-        var resources = try await makeResources(
+        let iterations = generateCount >= 512 ? 2 : 3
+        let warmup = generateCount >= 512 ? 0 : 1
+        var resources = try await GenerationPipelineBenchmarkSupport.makeResources(
             optimizer: AggressiveOptimizer(),
             maximumSequenceLength: promptTokens.count
         )
         defer { resources.release() }
 
+        let rawResult = try GenerationPipelineBenchmarkSupport.measureMedian(
+            name: "raw-\(generateCount)",
+            iterations: iterations,
+            warmup: warmup
+        ) {
+            try GenerationPipelineBenchmarkSupport.runSynchronousLoopNoTokenizer(
+                model: &resources.syncModel,
+                promptTokens: promptTokens,
+                generateCount: generateCount
+            )
+        }
+
+        let apiResult = try await GenerationPipelineBenchmarkSupport.measureMedianAsync(
+            name: "api-\(generateCount)",
+            iterations: iterations,
+            warmup: warmup
+        ) {
+            try await GenerationPipelineBenchmarkSupport.runContainerGenerate(
+                container: resources.container,
+                promptTokens: promptTokens,
+                parameters: GenerationParameters(maxTokens: generateCount, temperature: 0)
+            )
+        }
+
         print("")
         print("=== Request-Level Scaling: LFM2.5-1.2B ===")
         print("Generated    raw tok/s   raw ms/tok   API tok/s   API ms/tok")
         print("-------------------------------------------------------------")
+        let generated = String(format: "%9d", generateCount)
+        let rawTok = String(format: "%10.1f", rawResult.tokensPerSecond)
+        let rawMs = String(format: "%12.2f", rawResult.millisecondsPerToken)
+        let apiTok = String(format: "%10.1f", apiResult.tokensPerSecond)
+        let apiMs = String(format: "%12.2f", apiResult.millisecondsPerToken)
+        print("\(generated)\(rawTok)\(rawMs)\(apiTok)\(apiMs)")
 
-        var previousRawTokensPerSecond: Double?
-
-        for generateCount in generateCounts {
-            let rawResult = try measureMedian(
-                name: "raw-\(generateCount)",
-                iterations: 3,
-                warmup: 1
-            ) {
-                try runSynchronousLoopNoTokenizer(
-                    model: &resources.syncModel,
-                    promptTokens: promptTokens,
-                    generateCount: generateCount
-                )
-            }
-
-            let apiResult = try await measureMedianAsync(
-                name: "api-\(generateCount)",
-                iterations: 3,
-                warmup: 1
-            ) {
-                try await runContainerGenerate(
-                    container: resources.container,
-                    promptTokens: promptTokens,
-                    parameters: GenerationParameters(maxTokens: generateCount, temperature: 0)
-                )
-            }
-
-            let generated = String(format: "%9d", generateCount)
-            let rawTok = String(format: "%10.1f", rawResult.tokensPerSecond)
-            let rawMs = String(format: "%12.2f", rawResult.millisecondsPerToken)
-            let apiTok = String(format: "%10.1f", apiResult.tokensPerSecond)
-            let apiMs = String(format: "%12.2f", apiResult.millisecondsPerToken)
-            print("\(generated)\(rawTok)\(rawMs)\(apiTok)\(apiMs)")
-
-            if let previous = previousRawTokensPerSecond, generateCount > 50 {
-                let gain = ((rawResult.tokensPerSecond / previous) - 1.0) * 100.0
-                print(String(format: "[Benchmark] raw throughput gain vs previous length: %+0.1f%%", gain))
-            }
-            previousRawTokensPerSecond = rawResult.tokensPerSecond
-        }
+        #expect(rawResult.generatedTokenCount == generateCount)
+        #expect(apiResult.generatedTokenCount == generateCount)
     }
+}
+
+@Suite("Performance: Generation Scaling (Long)", .tags(.performance), .serialized, .heartbeat)
+struct GenerationScalingLongBenchmarkTests {
+    @Test("Request-level scaling (512)", .timeLimit(.minutes(2)))
+    func requestLevelScaling512() async throws {
+        try await GenerationScalingBenchmarkTests.runScalingCase(generateCount: 512)
+    }
+}
+
+@Suite("Performance: Generation Streaming", .tags(.performance), .serialized, .heartbeat)
+struct GenerationStreamingBenchmarkTests {
 
     @Test("Stream chunk size comparison", .timeLimit(.minutes(3)))
     func streamChunkSizeComparison() async throws {
@@ -231,17 +286,17 @@ struct GenerationPipelineBenchmarkTests {
         print("-----------------------------------------------------")
 
         for chunkSize in chunkSizes {
-            let result: StreamResult = try await {
-                var resources = try await makeResources(
+            let result: GenerationPipelineBenchmarkSupport.StreamResult = try await {
+                var resources = try await GenerationPipelineBenchmarkSupport.makeResources(
                     optimizer: AggressiveOptimizer(),
                     maximumSequenceLength: promptTokens.count
                 )
                 defer { resources.release() }
-                return try await measureStreamMedian(
+                return try await GenerationPipelineBenchmarkSupport.measureStreamMedian(
                     iterations: 3,
                     warmup: 1
                 ) {
-                    try await runContainerGenerateMeasured(
+                    try await GenerationPipelineBenchmarkSupport.runContainerGenerateMeasured(
                         container: resources.container,
                         promptTokens: promptTokens,
                         generateCount: generateCount,
@@ -266,16 +321,20 @@ struct GenerationPipelineBenchmarkTests {
     func promptStateReuseComparison() async throws {
         let promptTokens = [Int](repeating: 1, count: 256)
         let generateCount = 50
-        var resources = try await makeResources(
+        var resources = try await GenerationPipelineBenchmarkSupport.makeResources(
             optimizer: AggressiveOptimizer(),
             maximumSequenceLength: promptTokens.count
         )
         defer { resources.release() }
-        let promptState = try resources.container.makePromptSnapshot(from: ExecutablePrompt(tokenIDs: promptTokens)
+        let promptState = try resources.container.makePromptSnapshot(
+            from: ExecutablePrompt(tokenIDs: promptTokens)
         )
 
-        let baseline = try await measureStreamMedian(iterations: 3, warmup: 1) {
-            try await runContainerGenerateMeasured(
+        let baseline = try await GenerationPipelineBenchmarkSupport.measureStreamMedian(
+            iterations: 3,
+            warmup: 1
+        ) {
+            try await GenerationPipelineBenchmarkSupport.runContainerGenerateMeasured(
                 container: resources.container,
                 promptTokens: promptTokens,
                 generateCount: generateCount,
@@ -284,8 +343,11 @@ struct GenerationPipelineBenchmarkTests {
             )
         }
 
-        let reused = try await measureStreamMedian(iterations: 3, warmup: 1) {
-            try await runContainerGenerateMeasured(
+        let reused = try await GenerationPipelineBenchmarkSupport.measureStreamMedian(
+            iterations: 3,
+            warmup: 1
+        ) {
+            try await GenerationPipelineBenchmarkSupport.runContainerGenerateMeasured(
                 container: resources.container,
                 promptState: promptState,
                 generateCount: generateCount,
@@ -298,8 +360,8 @@ struct GenerationPipelineBenchmarkTests {
         print("=== Prompt State Reuse Comparison: LFM2.5-1.2B ===")
         print("Mode                    tok/s   ms/tok   first chunk ms")
         print("-------------------------------------------------------")
-        print(format(stream: baseline, name: "baseline"))
-        print(format(stream: reused, name: "prompt-state"))
+        print(GenerationPipelineBenchmarkSupport.format(stream: baseline, name: "baseline"))
+        print(GenerationPipelineBenchmarkSupport.format(stream: reused, name: "prompt-state"))
 
         let reuseGain = ((reused.tokensPerSecond / baseline.tokensPerSecond) - 1.0) * 100.0
         let ttftGain = ((baseline.firstChunkMilliseconds / reused.firstChunkMilliseconds) - 1.0) * 100.0
@@ -308,8 +370,10 @@ struct GenerationPipelineBenchmarkTests {
 
         #expect(reused.generatedTokenCount == generateCount)
     }
+}
 
-    private func makeResources(
+private enum GenerationPipelineBenchmarkSupport {
+    static func makeResources(
         optimizer: any DispatchOptimizer = AggressiveOptimizer(),
         maximumSequenceLength: Int = 256
     ) async throws -> BenchmarkResources {
@@ -318,46 +382,54 @@ struct GenerationPipelineBenchmarkTests {
         }
 
         let directory = try findModelDirectory()
-        let tokenizer = try await AutoTokenizer.from(modelFolder: directory)
-        let store = try STAFLoader().load(at: URL(fileURLWithPath: Self.stafPath), device: device)
+        let bundleResources = try ModelBundleInspector().inspect(directory: directory)
+        async let tokenizerTask = AutoTokenizer.from(modelFolder: directory)
+        async let weightStoreTask = STAFCacheLoader().load(resources: bundleResources, device: device)
 
-        let config = ModelConfig(
-            hiddenSize: 2048, layerCount: 16, intermediateSize: 8192,
-            vocabSize: 65536, attentionHeads: 32, kvHeads: 8, headDim: 64,
-            attentionBias: false, mlpBias: false, normEps: 1e-5,
-            normKind: .rmsNorm, ropeTheta: 1000000.0, ropeDimension: 64,
-            ropeScaling: nil, tiedEmbeddings: true,
-            expertCount: nil, expertsPerToken: nil, qkNorm: true,
-            fullAttentionInterval: nil, ssmNumHeads: nil, ssmKeyHeadDim: nil,
-            ssmValueHeadDim: nil, convKernelSize: nil, convLCache: 3,
-            partialRotaryFactor: nil, slidingWindow: nil,
-            layerTypes: ["conv", "conv", "full_attention", "conv", "conv", "full_attention",
-                         "conv", "conv", "full_attention", "conv", "full_attention", "conv",
-                         "full_attention", "conv", "full_attention", "conv"]
+        let tokenizer = try await tokenizerTask
+        let store = try await weightStoreTask
+
+        let graphResolver = ModelGraphResolver()
+        let graph = try graphResolver.resolveModelGraph(
+            modelType: bundleResources.modelType,
+            config: bundleResources.config
         )
-        let graph = try LFM2(config: config).makeModelGraph()
-        let resolved = ParameterResolver().resolve(graph: graph, convention: .lfm2Family)
+        let convention = graphResolver.namingConvention(for: bundleResources.modelType)
+        let resolved = ParameterResolver().resolve(graph: graph, convention: convention)
+        let decodePolicy = resolveDecodePolicy(
+            maximumSequenceLength: maximumSequenceLength,
+            graph: resolved
+        )
+        let prefillPolicy = resolvePrefillPolicy(for: decodePolicy)
 
         let compiler = MetalInferenceCompiler(optimizer: optimizer)
         let decodePlan = try compiler.compile(
             graph: resolved,
-            hiddenSize: config.hiddenSize,
-            intermediateSize: config.intermediateSize,
-            vocabSize: config.vocabSize,
+            hiddenSize: bundleResources.config.hiddenSize,
+            intermediateSize: bundleResources.config.intermediateSize,
+            vocabSize: bundleResources.config.vocabSize,
+            inferencePolicy: decodePolicy,
             stafWeightStore: store,
-            device: device)
+            device: device
+        )
         let prefillPlan = try compiler.compilePrefill(
             graph: resolved,
-            hiddenSize: config.hiddenSize,
-            intermediateSize: config.intermediateSize,
-            vocabSize: config.vocabSize,
-            inferencePolicy: InferencePolicy(maximumSequenceLength: max(1, maximumSequenceLength)),
+            hiddenSize: bundleResources.config.hiddenSize,
+            intermediateSize: bundleResources.config.intermediateSize,
+            vocabSize: bundleResources.config.vocabSize,
+            inferencePolicy: prefillPolicy,
             stafWeightStore: store,
-            sharedKVCache: decodePlan.buffers.kvCache,
+            sharedKVCache: shouldShareKVCache(
+                decodePolicy: decodePolicy,
+                prefillPolicy: prefillPolicy
+            ) ? decodePlan.buffers.kvCache : nil,
             sharedConvState: decodePlan.buffers.convState,
             sharedConvStateDimension: decodePlan.buffers.convStateDimension,
             sharedConvStateKernelSize: decodePlan.buffers.convStateKernelSize,
-            device: device)
+            sharedRecurrentState: decodePlan.buffers.recurrentState,
+            sharedRecurrentStateBytesPerLayer: decodePlan.buffers.recurrentStateBytesPerLayer,
+            device: device
+        )
 
         var syncModel = try MetalInferenceModel(plan: decodePlan, device: device)
         syncModel.prefillPlan = prefillPlan
@@ -368,16 +440,27 @@ struct GenerationPipelineBenchmarkTests {
         var containerModel = try MetalInferenceModel(plan: decodePlan, device: device)
         containerModel.prefillPlan = prefillPlan
 
-        var configuration = ModelConfiguration(name: "lfm2")
+        var configuration = ModelConfiguration(
+            name: bundleResources.modelType,
+            inputCapabilities: bundleResources.inputCapabilities,
+            executionCapabilities: ModelExecutionCapabilities(
+                supportsTextGeneration: true,
+                supportsPromptStateReuse: true
+            ),
+            vision: bundleResources.visionConfiguration
+        )
         if let eosId = tokenizer.eosTokenId {
             configuration.eosTokenIds.insert(eosId)
         }
 
-        let container = InferenceSession(
+        let container = LanguageModelContext(
             inferenceModel: containerModel,
             tokenizer: tokenizer,
             configuration: configuration,
-            vocabularySize: config.vocabSize
+            chatTemplate: bundleResources.chatTemplate,
+            chatTemplateSource: bundleResources.chatTemplateSource,
+            vocabularySize: bundleResources.config.vocabSize,
+            finalLogitSoftcapping: bundleResources.config.finalLogitSoftcapping
         )
 
         return BenchmarkResources(
@@ -388,7 +471,7 @@ struct GenerationPipelineBenchmarkTests {
         )
     }
 
-    private func runSynchronousLoop(
+    static func runSynchronousLoop(
         model: inout MetalInferenceModel,
         tokenizer: any Tokenizer,
         promptTokens: [Int],
@@ -412,7 +495,7 @@ struct GenerationPipelineBenchmarkTests {
         return generated
     }
 
-    private func runSynchronousLoopNoTokenizer(
+    static func runSynchronousLoopNoTokenizer(
         model: inout MetalInferenceModel,
         promptTokens: [Int],
         generateCount: Int
@@ -431,7 +514,7 @@ struct GenerationPipelineBenchmarkTests {
         return generated
     }
 
-    private func runPipelinedLoop(
+    static func runPipelinedLoop(
         model: inout MetalInferenceModel,
         tokenizer: any Tokenizer,
         promptTokens: [Int],
@@ -458,27 +541,28 @@ struct GenerationPipelineBenchmarkTests {
         return generated
     }
 
-    private func runContainerGenerate(
-        container: InferenceSession,
+    static func runContainerGenerate(
+        container: LanguageModelContext,
         promptTokens: [Int],
         parameters: GenerationParameters
     ) async throws -> Int {
         container.resetState()
-        let stream = try container.generate(from: ExecutablePrompt(tokenIDs: promptTokens),
+        let stream = try container.generate(
+            from: ExecutablePrompt(tokenIDs: promptTokens),
             parameters: parameters
         )
 
-        var generated = 0
+        var completed = false
         for await item in stream {
             if case .completed(let info) = item {
-                generated = info.tokenCount
+                completed = info.totalTime >= 0
             }
         }
-        return generated
+        return completed ? (parameters.maxTokens ?? 0) : 0
     }
 
-    private func runContainerGenerate(
-        container: InferenceSession,
+    static func runContainerGenerate(
+        container: LanguageModelContext,
         promptState: PromptSnapshot,
         parameters: GenerationParameters
     ) async throws -> Int {
@@ -487,17 +571,17 @@ struct GenerationPipelineBenchmarkTests {
             parameters: parameters
         )
 
-        var generated = 0
+        var completed = false
         for await item in stream {
             if case .completed(let info) = item {
-                generated = info.tokenCount
+                completed = info.totalTime >= 0
             }
         }
-        return generated
+        return completed ? (parameters.maxTokens ?? 0) : 0
     }
 
-    private func runContainerGenerateMeasured(
-        container: InferenceSession,
+    static func runContainerGenerateMeasured(
+        container: LanguageModelContext,
         promptTokens: [Int],
         generateCount: Int,
         chunkTokenCount: Int,
@@ -505,7 +589,8 @@ struct GenerationPipelineBenchmarkTests {
     ) async throws -> StreamResult {
         container.resetState()
         let start = CFAbsoluteTimeGetCurrent()
-        let stream = try container.generate(from: ExecutablePrompt(tokenIDs: promptTokens),
+        let stream = try container.generate(
+            from: ExecutablePrompt(tokenIDs: promptTokens),
             parameters: GenerationParameters(
                 maxTokens: generateCount,
                 streamChunkTokenCount: chunkTokenCount,
@@ -513,7 +598,7 @@ struct GenerationPipelineBenchmarkTests {
             )
         )
 
-        var generated = 0
+        var completed = false
         var chunkCount = 0
         var firstChunkElapsed: Double?
 
@@ -527,21 +612,21 @@ struct GenerationPipelineBenchmarkTests {
             case .reasoning:
                 break
             case .completed(let info):
-                generated = info.tokenCount
+                completed = info.totalTime >= 0
             }
         }
 
         let elapsed = CFAbsoluteTimeGetCurrent() - start
         return StreamResult(
-            generatedTokenCount: generated,
+            generatedTokenCount: completed ? generateCount : 0,
             elapsed: elapsed,
             firstChunkElapsed: firstChunkElapsed ?? elapsed,
             chunkCount: chunkCount
         )
     }
 
-    private func runContainerGenerateMeasured(
-        container: InferenceSession,
+    static func runContainerGenerateMeasured(
+        container: LanguageModelContext,
         promptState: PromptSnapshot,
         generateCount: Int,
         chunkTokenCount: Int,
@@ -557,7 +642,7 @@ struct GenerationPipelineBenchmarkTests {
             )
         )
 
-        var generated = 0
+        var completed = false
         var chunkCount = 0
         var firstChunkElapsed: Double?
 
@@ -571,20 +656,20 @@ struct GenerationPipelineBenchmarkTests {
             case .reasoning:
                 break
             case .completed(let info):
-                generated = info.tokenCount
+                completed = info.totalTime >= 0
             }
         }
 
         let elapsed = CFAbsoluteTimeGetCurrent() - start
         return StreamResult(
-            generatedTokenCount: generated,
+            generatedTokenCount: completed ? generateCount : 0,
             elapsed: elapsed,
             firstChunkElapsed: firstChunkElapsed ?? elapsed,
             chunkCount: chunkCount
         )
     }
 
-    private func collectGeneratedTokens(
+    static func collectGeneratedTokens(
         model: inout MetalInferenceModel,
         promptTokens: [Int],
         generateCount: Int
@@ -603,7 +688,7 @@ struct GenerationPipelineBenchmarkTests {
         return generated
     }
 
-    private func measureMedian(
+    static func measureMedian(
         name: String,
         iterations: Int,
         warmup: Int,
@@ -624,7 +709,7 @@ struct GenerationPipelineBenchmarkTests {
         return samples[samples.count / 2]
     }
 
-    private func measureMedianAsync(
+    static func measureMedianAsync(
         name: String,
         iterations: Int,
         warmup: Int,
@@ -645,7 +730,7 @@ struct GenerationPipelineBenchmarkTests {
         return samples[samples.count / 2]
     }
 
-    private func measureTokenizerMedian(
+    static func measureTokenizerMedian(
         name: String,
         iterations: Int,
         warmup: Int,
@@ -671,7 +756,7 @@ struct GenerationPipelineBenchmarkTests {
         return samples[samples.count / 2]
     }
 
-    private func measureStreamMedian(
+    static func measureStreamMedian(
         iterations: Int,
         warmup: Int,
         block: () async throws -> StreamResult
@@ -688,21 +773,38 @@ struct GenerationPipelineBenchmarkTests {
         return samples[samples.count / 2]
     }
 
-    private func format(_ result: ThroughputResult) -> String {
+    static func format(_ result: ThroughputResult) -> String {
         let paddedName = result.name.padding(toLength: 22, withPad: " ", startingAt: 0)
         return "\(paddedName) \(String(format: "%7.1f", result.tokensPerSecond)) \(String(format: "%8.2f", result.millisecondsPerToken)) \(String(format: "%10d", result.generatedTokenCount))"
     }
 
-    private func format(stream result: StreamResult, name: String) -> String {
+    static func format(stream result: StreamResult, name: String) -> String {
         let paddedName = name.padding(toLength: 22, withPad: " ", startingAt: 0)
         return "\(paddedName) \(String(format: "%7.1f", result.tokensPerSecond)) \(String(format: "%8.2f", result.millisecondsPerToken)) \(String(format: "%16.2f", result.firstChunkMilliseconds))"
     }
 
-    private func findModelDirectory() throws -> URL {
+    static func findModelDirectory() throws -> URL {
+        let directCandidates = [
+            "/Users/1amageek/Desktop/swift-lm/TestData/LFM2.5-1.2B-Thinking",
+        ]
+
+        for candidate in directCandidates {
+            let directory = URL(fileURLWithPath: candidate)
+            let configPath = directory.appendingPathComponent("config.json")
+            let tokenizerPath = directory.appendingPathComponent("tokenizer.json")
+            do {
+                _ = try Data(contentsOf: configPath)
+                _ = try Data(contentsOf: tokenizerPath)
+            } catch {
+                continue
+            }
+            return directory
+        }
+
         let candidates = [
-            "~/.cache/huggingface/hub/models--LiquidAI--LFM2.5-1.2B-Thinking",
             "~/.cache/huggingface/hub/models--Qwen--Qwen2.5-0.5B-Instruct",
             "~/.cache/huggingface/hub/models--Qwen--Qwen3.5-0.8B",
+            "~/.cache/huggingface/hub/models--LiquidAI--LFM2.5-1.2B-Thinking",
         ]
 
         for candidate in candidates {
@@ -731,11 +833,42 @@ struct GenerationPipelineBenchmarkTests {
         throw BenchmarkError.noModelDirectory
     }
 
-    private struct BenchmarkResources {
+    static func resolveDecodePolicy(
+        maximumSequenceLength: Int,
+        graph: ModelGraph
+    ) -> InferencePolicy {
+        let requestedPolicy = InferencePolicy(maximumSequenceLength: max(1, maximumSequenceLength))
+        return ModelBundleLoader.resolveInferencePolicy(requestedPolicy, for: graph)
+    }
+
+    static func resolvePrefillPolicy(for decodePolicy: InferencePolicy) -> InferencePolicy {
+        guard decodePolicy.kvCache.usesRotorQuant else {
+            return decodePolicy
+        }
+
+        return InferencePolicy(
+            maximumSequenceLength: decodePolicy.maximumSequenceLength,
+            kvCache: KVCachePolicy(
+                keyScheme: .automatic,
+                valueScheme: .automatic,
+                layoutMode: decodePolicy.kvCache.layoutMode,
+                qjlDimension: 0
+            )
+        )
+    }
+
+    static func shouldShareKVCache(
+        decodePolicy: InferencePolicy,
+        prefillPolicy: InferencePolicy
+    ) -> Bool {
+        decodePolicy.kvCache == prefillPolicy.kvCache
+    }
+
+    struct BenchmarkResources {
         let tokenizer: any Tokenizer
         var syncModel: MetalInferenceModel
         var pipelinedModel: MetalInferenceModel
-        let container: InferenceSession
+        let container: LanguageModelContext
 
         mutating func release() {
             syncModel.resetState()
@@ -744,7 +877,7 @@ struct GenerationPipelineBenchmarkTests {
         }
     }
 
-    private struct ThroughputResult {
+    struct ThroughputResult {
         let name: String
         let generatedTokenCount: Int
         let elapsed: Double
@@ -758,7 +891,7 @@ struct GenerationPipelineBenchmarkTests {
         }
     }
 
-    private struct StreamResult {
+    struct StreamResult {
         let generatedTokenCount: Int
         let elapsed: Double
         let firstChunkElapsed: Double
@@ -777,7 +910,7 @@ struct GenerationPipelineBenchmarkTests {
         }
     }
 
-    private enum BenchmarkError: Error {
+    enum BenchmarkError: Error {
         case noDevice
         case noModelDirectory
         case invalidToken

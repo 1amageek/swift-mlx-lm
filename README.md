@@ -9,32 +9,33 @@ A Swift package for LLM inference on Apple Silicon. Models are loaded directly f
 ```swift
 import SwiftLM
 
-let session = try await ModelBundleLoader().load(repo: "LiquidAI/LFM2.5-1.2B-Instruct")
+let container = try await ModelBundleLoader().load(repo: "LiquidAI/LFM2.5-1.2B-Instruct")
+let context = try container.makeContext()
 
-let prepared = try await session.prepare(ModelInput(prompt: "Hello"))
-let executable = try session.makeExecutablePrompt(from: prepared)
+let prepared = try await context.prepare(ModelInput(prompt: "Hello"))
+let executable = try context.makeExecutablePrompt(from: prepared)
 
-for await generation in try session.generate(from: executable) {
+for await generation in try context.generate(from: executable) {
     if let text = generation.text { print(text, terminator: "") }
 }
 
-if session.configuration.inputCapabilities.supportsImages {
+if container.configuration.inputCapabilities.supportsImages {
     print("This bundle declares image input support.")
 }
 
-if session.configuration.executionCapabilities.supportsImagePromptPreparation {
+if container.configuration.executionCapabilities.supportsImagePromptPreparation {
     print("The current runtime can prepare Qwen-style image prompts.")
 }
 
-if session.configuration.executionCapabilities.supportsVideoPromptPreparation {
+if container.configuration.executionCapabilities.supportsVideoPromptPreparation {
     print("The current runtime can prepare Qwen-style video prompts.")
 }
 
-if let vision = session.configuration.vision {
+if let vision = container.configuration.vision {
     print("image_token_id =", vision.imageTokenID as Any)
 }
 
-if session.configuration.executionCapabilities.supportsImagePromptPreparation {
+if container.configuration.executionCapabilities.supportsImagePromptPreparation {
     let visualInput = ModelInput(chat: [
         .user([
             .text("Describe this image."),
@@ -42,10 +43,10 @@ if session.configuration.executionCapabilities.supportsImagePromptPreparation {
         ])
     ])
 
-    let prepared = try await session.prepare(visualInput)
-    let executable = try session.makeExecutablePrompt(from: prepared)
+    let prepared = try await context.prepare(visualInput)
+    let executable = try context.makeExecutablePrompt(from: prepared)
 
-    for await generation in try session.generate(from: executable) {
+    for await generation in try context.generate(from: executable) {
         if let chunk = generation.text { print(chunk, terminator: "") }
     }
 }
@@ -162,7 +163,8 @@ LMIR (IR — no dependencies)
     │
     └── SwiftLM (consumer API)
         ├── ModelBundleLoader (HF download → STAF → compile)
-        ├── InferenceSession (generate, encode, decode)
+        ├── LanguageModelContainer (loaded bundle, prompt preparation, context factory)
+        ├── LanguageModelContext (mutable generation state, prompt snapshots, decode)
         └── ModelInput, InputMessage, InputImage, GenerationParameters
 ```
 
@@ -253,7 +255,7 @@ This is the intended mental model for contributors:
 - `LMIR` holds the normalized backend-independent graph
 - `MetalCompiler` decides how that graph turns into kernels, pipelines, buffers, and dispatch steps
 
-For Qwen3-VL style bundles, `SwiftLM` also reads the official vision markers from `config.json` and `preprocessor_config.json`. `InferenceSession.prepare()` expands image and video placeholders into the token layout expected by the official Qwen processor, and `makeExecutablePrompt(from:)` / `generate(from:)` execute the resulting visual prompt when the loaded bundle provides a compatible Qwen vision encoder.
+For Qwen3-VL style bundles, `SwiftLM` also reads the official vision markers from `config.json` and `preprocessor_config.json`. `LanguageModelContext.prepare()` expands image and video placeholders into the token layout expected by the official Qwen processor, and `makeExecutablePrompt(from:)` / `generate(from:)` execute the resulting visual prompt when the loaded bundle provides a compatible Qwen vision encoder.
 
 If you want to inspect the real declarations, start with `Sources/Models/Transformer.swift` and `Sources/Models/LFM2.swift`.
 

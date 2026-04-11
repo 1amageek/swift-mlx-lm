@@ -35,6 +35,14 @@ Important:
 
 - Prefer `xcodebuild test` over `swift test` for this repository.
 - For the Qwen3.5+ multimodal suites, prefer [`scripts/run-qwen35-vision-tests.sh`](/Users/1amageek/Desktop/swift-lm/scripts/run-qwen35-vision-tests.sh) over a single large `xcodebuild test` invocation. It uses `build-for-testing` once and then runs `test-without-building` suite-by-suite to reduce peak memory pressure.
+- For generation benchmarks, prefer [`scripts/run-generation-pipeline-benchmarks.sh`](/Users/1amageek/Desktop/swift-lm/scripts/run-generation-pipeline-benchmarks.sh) over running the full benchmark file in one `xcodebuild test` process. It builds once and then runs the split benchmark suites sequentially.
+- Generation benchmark suites are intentionally split by cost:
+  - `SwiftLMTests/GenerationThroughputBenchmarkTests`
+  - `SwiftLMTests/GenerationScalingBenchmarkTests` for `50/128/256`
+  - `SwiftLMTests/GenerationScalingLongBenchmarkTests` for `512`
+  - `SwiftLMTests/GenerationStreamingBenchmarkTests`
+- Keep `512`-token scaling isolated in its own suite. Combining it with shorter scaling cases can exceed the 120-second outer timeout even when individual cases are healthy.
+- For very long generation-length benchmarks such as `512`, reduce benchmark repetitions before raising the outer timeout. Prefer fewer iterations over a larger timeout so failures still surface quickly.
 - For real-model / Metal-heavy / large-bundle tests, do not batch multiple expensive cases into one long `xcodebuild test` process when you are debugging correctness. Prefer `build-for-testing` once, then `test-without-building` one test at a time. This avoids cumulative GPU memory pressure, repeated model loads in a single process, and hard-to-diagnose xctest crashes.
 - When validating output quality for a specific model/policy combination, prefer one focused test per invocation over a whole suite. If you need multiple policy comparisons, run them as separate `test-without-building` invocations.
 - For repeated real-model loads inside tests/helpers, explicitly scope temporary objects tightly and prefer `autoreleasepool` on synchronous helper boundaries when possible. Do not keep multiple large `InferenceSession` / tokenizer / bundle instances alive longer than needed.

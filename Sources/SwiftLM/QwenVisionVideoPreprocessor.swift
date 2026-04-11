@@ -130,14 +130,14 @@ struct QwenVisionVideoPreprocessor {
     ) async throws -> DecodedVideo {
         do {
             guard let track = try await asset.loadTracks(withMediaType: .video).first else {
-                throw InferenceSessionError.unsupportedInputForModel(
+                throw LanguageModelContextError.unsupportedInputForModel(
                     "Could not find a video track for Qwen vision preprocessing."
                 )
             }
             let duration = try await asset.load(.duration)
             let durationSeconds = CMTimeGetSeconds(duration)
             guard durationSeconds.isFinite, durationSeconds > 0 else {
-                throw InferenceSessionError.unsupportedInputForModel(
+                throw LanguageModelContextError.unsupportedInputForModel(
                     "Video duration is invalid for Qwen vision preprocessing."
                 )
             }
@@ -172,7 +172,7 @@ struct QwenVisionVideoPreprocessor {
                 frames.append(image)
             }
             guard let firstFrame = frames.first else {
-                throw InferenceSessionError.unsupportedInputForModel(
+                throw LanguageModelContextError.unsupportedInputForModel(
                     "Could not decode video frames for Qwen vision preprocessing."
                 )
             }
@@ -184,10 +184,10 @@ struct QwenVisionVideoPreprocessor {
                 width: firstFrame.width,
                 height: firstFrame.height
             )
-        } catch let error as InferenceSessionError {
+        } catch let error as LanguageModelContextError {
             throw error
         } catch {
-            throw InferenceSessionError.unsupportedInputForModel(
+            throw LanguageModelContextError.unsupportedInputForModel(
                 "Could not decode video frames for Qwen vision preprocessing: \(error.localizedDescription)"
             )
         }
@@ -252,7 +252,7 @@ struct QwenVisionVideoPreprocessor {
             space: colorSpace,
             bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue | CGBitmapInfo.byteOrder32Big.rawValue
         ) else {
-            throw InferenceSessionError.unsupportedInputForModel(
+            throw LanguageModelContextError.unsupportedInputForModel(
                 "Could not create video resize context for Qwen vision preprocessing."
             )
         }

@@ -15,10 +15,11 @@ private enum RotorQuantRealBundleTestSupport {
             return
         }
 
-        let container = try await ModelBundleLoader().load(
+        let loaded = try await ModelBundleLoader().load(
             directory: directory,
             inferencePolicy: inferencePolicy
         )
+        let container = try loaded.makeContext()
 
         container.resetState()
         let prepared = try await container.prepare( ModelInput(prompt: promptText)

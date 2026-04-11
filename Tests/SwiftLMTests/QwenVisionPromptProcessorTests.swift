@@ -172,7 +172,7 @@ struct QwenVisionPromptProcessorTests {
             )
         )
 
-        #expect(throws: InferenceSessionError.self) {
+        #expect(throws: LanguageModelContextError.self) {
             _ = try preprocessor.prepare(InputImage(data: Data("not an image".utf8), mimeType: "image/png"))
         }
     }
@@ -245,7 +245,7 @@ struct QwenVisionPromptProcessorTests {
             )
         )
 
-        await #expect(throws: InferenceSessionError.self) {
+        await #expect(throws: LanguageModelContextError.self) {
             _ = try await preprocessor.prepare(
                 InputVideo(data: Data("not a video".utf8), mimeType: "video/mp4")
             )
@@ -282,7 +282,7 @@ struct QwenVisionPromptProcessorTests {
                 ]
             )
             Issue.record("Expected extra image placeholders to be rejected")
-        } catch is InferenceSessionError {
+        } catch is LanguageModelContextError {
             // Expected.
         }
     }
@@ -318,7 +318,7 @@ struct QwenVisionPromptProcessorTests {
                 ]
             )
             Issue.record("Expected missing image placeholders to be rejected")
-        } catch is InferenceSessionError {
+        } catch is LanguageModelContextError {
             // Expected.
         }
     }
@@ -338,7 +338,7 @@ struct QwenVisionPromptProcessorTests {
         let processor = QwenVisionPromptProcessor(configuration: configuration)
         let videoData = try await TestVideoFixtures.makeMP4Data()
 
-        await #expect(throws: InferenceSessionError.self) {
+        await #expect(throws: LanguageModelContextError.self) {
             _ = try await processor.prepare(
                 renderedText: "<|vision_start|><|video_pad|><|vision_end|><|vision_start|><|video_pad|><|vision_end|>",
                 messages: [
@@ -365,7 +365,7 @@ struct QwenVisionPromptProcessorTests {
         let processor = QwenVisionPromptProcessor(configuration: configuration)
         let videoData = try await TestVideoFixtures.makeMP4Data()
 
-        await #expect(throws: InferenceSessionError.self) {
+        await #expect(throws: LanguageModelContextError.self) {
             _ = try await processor.prepare(
                 renderedText: "Describe the video.",
                 messages: [

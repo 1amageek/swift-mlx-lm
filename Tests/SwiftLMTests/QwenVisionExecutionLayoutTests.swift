@@ -47,7 +47,7 @@ struct QwenVisionExecutionLayoutTests {
             )
         )
 
-        #expect(throws: InferenceSessionError.self) {
+        #expect(throws: LanguageModelContextError.self) {
             _ = try QwenVisionExecutionLayoutBuilder().makeLayout(for: prepared)
         }
     }

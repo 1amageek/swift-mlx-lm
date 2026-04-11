@@ -15,7 +15,8 @@ struct LFMOutputDiagnosticsTests {
             return
         }
 
-        let container = try await ModelBundleLoader().load(directory: localModelDirectory)
+        let loaded = try await ModelBundleLoader().load(directory: localModelDirectory)
+        let container = try loaded.makeContext()
         container.resetState()
         let prepared = try await container.prepare( ModelInput(prompt: RealOutputAssertionSupport.strictCapitalPrompt)
         )

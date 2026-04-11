@@ -17,7 +17,7 @@ struct QwenVisionPromptProcessor {
             return try await prepareMultimodalPrompt(renderedText: renderedText, messages: messages)
         }
         guard canProcessImages else {
-            throw InferenceSessionError.multimodalInputNotSupported(
+            throw LanguageModelContextError.multimodalInputNotSupported(
                 "This model declares image input support, but SwiftLM only knows how to expand Qwen3.5/Qwen3-VL style image placeholders today."
             )
         }
@@ -31,19 +31,19 @@ struct QwenVisionPromptProcessor {
         let images = messages.flatMap(\.images)
         let videos = messages.flatMap(\.videos)
         guard images.isEmpty || canProcessImages else {
-            throw InferenceSessionError.multimodalInputNotSupported(
+            throw LanguageModelContextError.multimodalInputNotSupported(
                 "This model declares image input support, but SwiftLM only knows how to expand Qwen3.5/Qwen3-VL style image placeholders today."
             )
         }
         guard videos.isEmpty || canProcessVideos else {
-            throw InferenceSessionError.multimodalInputNotSupported(
+            throw LanguageModelContextError.multimodalInputNotSupported(
                 "This model declares video input support, but SwiftLM only knows how to expand Qwen3.5/Qwen3-VL style video placeholders today."
             )
         }
 
         let imagePlaceholderCount = renderedText.components(separatedBy: imageToken).count - 1
         if imagePlaceholderCount != images.count {
-            throw InferenceSessionError.multimodalInputNotSupported(
+            throw LanguageModelContextError.multimodalInputNotSupported(
                 imagePlaceholderCount < images.count
                     ? "The rendered chat template does not contain enough Qwen image placeholders for the supplied images."
                     : "The rendered chat template contains more Qwen image placeholders than supplied images."
@@ -51,7 +51,7 @@ struct QwenVisionPromptProcessor {
         }
         let videoPlaceholderCount = renderedText.components(separatedBy: videoToken).count - 1
         if videoPlaceholderCount != videos.count {
-            throw InferenceSessionError.multimodalInputNotSupported(
+            throw LanguageModelContextError.multimodalInputNotSupported(
                 videoPlaceholderCount < videos.count
                     ? "The rendered chat template does not contain enough Qwen video placeholders for the supplied videos."
                     : "The rendered chat template contains more Qwen video placeholders than supplied videos."
@@ -74,7 +74,7 @@ struct QwenVisionPromptProcessor {
                         count: preparedImage.placeholderTokenCount
                     )
                     guard let range = expandedText.range(of: imageToken) else {
-                        throw InferenceSessionError.multimodalInputNotSupported(
+                        throw LanguageModelContextError.multimodalInputNotSupported(
                             "The rendered chat template does not contain enough Qwen image placeholders for the supplied images."
                         )
                     }
@@ -90,7 +90,7 @@ struct QwenVisionPromptProcessor {
                     } else if let plainRange = expandedText.range(of: videoToken) {
                         expandedText.replaceSubrange(plainRange, with: replacement)
                     } else {
-                        throw InferenceSessionError.multimodalInputNotSupported(
+                        throw LanguageModelContextError.multimodalInputNotSupported(
                             "The rendered chat template does not contain enough Qwen video placeholders for the supplied videos."
                         )
                     }

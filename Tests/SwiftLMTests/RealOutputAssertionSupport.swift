@@ -27,7 +27,7 @@ enum RealOutputAssertionSupport {
 
     @discardableResult
     static func assertGreedyDirectMatchesPromptState(
-        container: InferenceSession,
+        container: LanguageModelContext,
         prompt: ExecutablePrompt,
         label: String,
         parameters: GenerationParameters = greedyParameters()
@@ -78,7 +78,7 @@ enum RealOutputAssertionSupport {
     }
 
     static func assertPromptStateSamplingMatchesDirect(
-        container: InferenceSession,
+        container: LanguageModelContext,
         prompt: ExecutablePrompt,
         label: String,
         parameters: GenerationParameters = samplingParameters()

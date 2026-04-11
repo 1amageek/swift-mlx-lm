@@ -82,7 +82,7 @@ struct QwenVisionImagePreprocessor {
 
         guard let source,
               let cgImage = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
-            throw InferenceSessionError.unsupportedInputForModel(
+            throw LanguageModelContextError.unsupportedInputForModel(
                 "Could not decode image data for Qwen vision preprocessing."
             )
         }
@@ -110,7 +110,7 @@ struct QwenVisionImagePreprocessor {
             space: colorSpace,
             bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue | CGBitmapInfo.byteOrder32Big.rawValue
         ) else {
-            throw InferenceSessionError.unsupportedInputForModel(
+            throw LanguageModelContextError.unsupportedInputForModel(
                 "Could not create image resize context for Qwen vision preprocessing."
             )
         }

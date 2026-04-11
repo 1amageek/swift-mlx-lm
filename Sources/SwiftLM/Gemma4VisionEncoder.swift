@@ -68,13 +68,13 @@ final class Gemma4VisionEncoder {
 
     private func encode(image: PreparedPrompt.Multimodal.Image) throws -> [[Float]] {
         guard image.gridTHW.count == 3, image.gridTHW[0] == 1 else {
-            throw InferenceSessionError.multimodalInputNotSupported(
+            throw LanguageModelContextError.multimodalInputNotSupported(
                 "Gemma4 image execution expects a single-frame image grid."
             )
         }
         let patchCount = image.gridTHW[1] * image.gridTHW[2]
         guard image.pixelValuesShape.count == 2, image.pixelValuesShape[0] == patchCount else {
-            throw InferenceSessionError.multimodalInputNotSupported(
+            throw LanguageModelContextError.multimodalInputNotSupported(
                 "Gemma4 image patch metadata does not match the prepared pixel values."
             )
         }

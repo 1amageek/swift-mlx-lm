@@ -10,7 +10,8 @@ struct QwenVisionRealBundleTextTests {
             print("[Skip] No local Qwen3.5 snapshot found")
             return
         }
-        let container = try await ModelBundleLoader().load(directory: directory)
+        let loaded = try await ModelBundleLoader().load(directory: directory)
+        let container = try loaded.makeContext()
 
         container.resetState()
         let prepared = try await container.prepare( ModelInput(prompt: RealOutputAssertionSupport.strictCapitalPrompt)
@@ -35,7 +36,8 @@ struct QwenVisionRealBundleTextTests {
             print("[Skip] No local Qwen3.5 snapshot found")
             return
         }
-        let container = try await ModelBundleLoader().load(directory: directory)
+        let loaded = try await ModelBundleLoader().load(directory: directory)
+        let container = try loaded.makeContext()
 
         let parameters = GenerationParameters(
             maxTokens: 64,

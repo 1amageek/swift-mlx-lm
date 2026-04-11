@@ -20,7 +20,7 @@ struct ReleaseSmokeCapabilityTests {
                     ])
                 ]))
                 Issue.record("Expected text-only bundle to reject image-bearing input")
-            } catch InferenceSessionError.unsupportedInputForModel {
+            } catch LanguageModelContextError.unsupportedInputForModel {
                 return
             }
             return
@@ -44,13 +44,13 @@ struct ReleaseSmokeCapabilityTests {
                 ])
             ]))
             Issue.record("Expected multimodal generate( ModelInput) to throw")
-        } catch InferenceSessionError.multimodalInputNotSupported {
+        } catch LanguageModelContextError.multimodalInputNotSupported {
         }
 
         do {
             _ = try container.makeExecutablePrompt(from: prepared)
             Issue.record("Expected multimodal prepared input to remain non-executable")
-        } catch InferenceSessionError.multimodalInputNotSupported {
+        } catch LanguageModelContextError.multimodalInputNotSupported {
         }
     }
 }

@@ -25,7 +25,7 @@ public struct ModelBundleLoader: Sendable {
         repo: String,
         inferencePolicy: InferencePolicy = .default,
         progress: Progress? = nil
-    ) async throws -> InferenceSession {
+    ) async throws -> LanguageModelContainer {
         let hubApi = HubApi()
         let repoId = Hub.Repo(id: repo)
         let directory = try await hubApi.snapshot(from: repoId, matching: [
@@ -43,7 +43,7 @@ public struct ModelBundleLoader: Sendable {
     public func load(
         directory: URL,
         inferencePolicy: InferencePolicy = .default
-    ) async throws -> InferenceSession {
+    ) async throws -> LanguageModelContainer {
         guard let device = MTLCreateSystemDefaultDevice() else {
             throw ModelBundleLoaderError.noMetalDevice
         }
@@ -118,7 +118,7 @@ public struct ModelBundleLoader: Sendable {
         let compileTime = CFAbsoluteTimeGetCurrent() - compileStart
         print("[ModelBundleLoader] compiled: \(compiledModel.fusedEntryCount) dispatches, prefill \(prefillPlan.stepCount) steps [\(String(format: "%.3f", compileTime))s]")
 
-        // 5. Assemble InferenceSession
+        // 5. Assemble LanguageModelContainer
         let inferenceModel = try MetalInferenceModel(plan: compiledModel, device: device)
 
         var modelConfig = ModelConfiguration(
@@ -173,7 +173,7 @@ public struct ModelBundleLoader: Sendable {
         let totalTime = CFAbsoluteTimeGetCurrent() - startTime
         print("[ModelBundleLoader] ready: \(modelConfig.name) [\(String(format: "%.3f", totalTime))s]")
 
-        return InferenceSession(
+        let prototypeContext = LanguageModelContext(
             inferenceModel: inferenceModel,
             tokenizer: tokenizer,
             configuration: modelConfig,
@@ -184,6 +184,7 @@ public struct ModelBundleLoader: Sendable {
             visionRuntime: visionRuntime,
             gemma4Runtime: gemma4Runtime
         )
+        return LanguageModelContainer(prototypeContext: prototypeContext)
     }
 
     static func resolveInferencePolicy(

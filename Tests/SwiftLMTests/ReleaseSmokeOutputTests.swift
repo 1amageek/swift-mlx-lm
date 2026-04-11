@@ -9,11 +9,12 @@ struct ReleaseSmokeOutputTests {
 
         let loader = ModelBundleLoader()
         let container = try await loader.load(directory: localModelDirectory)
-        let prepared = try await container.prepare( ModelInput(prompt: RealOutputAssertionSupport.strictCapitalPrompt)
+        let context = try container.makeContext()
+        let prepared = try await context.prepare(ModelInput(prompt: RealOutputAssertionSupport.strictCapitalPrompt)
         )
-        let executable = try container.makeExecutablePrompt(from: prepared)
+        let executable = try context.makeExecutablePrompt(from: prepared)
         let comparison = try RealOutputAssertionSupport.assertGreedyDirectMatchesPromptState(
-            container: container,
+            container: context,
             prompt: executable,
             label: "LFM text greedy"
         )
@@ -29,13 +30,14 @@ struct ReleaseSmokeOutputTests {
 
         let loader = ModelBundleLoader()
         let container = try await loader.load(directory: localModelDirectory)
-        let prepared = try await container.prepare( ModelInput(chat: [
+        let context = try container.makeContext()
+        let prepared = try await context.prepare(ModelInput(chat: [
                 .user([.text(RealOutputAssertionSupport.strictCapitalPrompt)])
             ])
         )
-        let executable = try container.makeExecutablePrompt(from: prepared)
+        let executable = try context.makeExecutablePrompt(from: prepared)
         let comparison = try RealOutputAssertionSupport.assertGreedyDirectMatchesPromptState(
-            container: container,
+            container: context,
             prompt: executable,
             label: "LFM chat greedy"
         )

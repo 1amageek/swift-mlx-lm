@@ -21,7 +21,7 @@ struct InputImagePixelSizeReader {
               let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
               let width = properties[kCGImagePropertyPixelWidth] as? Int,
               let height = properties[kCGImagePropertyPixelHeight] as? Int else {
-            throw InferenceSessionError.unsupportedInputForModel(
+            throw LanguageModelContextError.unsupportedInputForModel(
                 "Could not read image dimensions from the provided input."
             )
         }

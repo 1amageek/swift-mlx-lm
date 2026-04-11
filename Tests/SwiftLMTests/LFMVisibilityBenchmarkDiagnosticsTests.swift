@@ -15,7 +15,8 @@ struct LFMVisibilityBenchmarkDiagnosticsTests {
             return
         }
 
-        let container = try await ModelBundleLoader().load(directory: localModelDirectory)
+        let loaded = try await ModelBundleLoader().load(directory: localModelDirectory)
+        let container = try loaded.makeContext()
         let prompt = ExecutablePrompt(tokenIDs: [1, 1, 6, 6423, 708])
         let parameters = GenerationParameters(maxTokens: 50, streamChunkTokenCount: 8, temperature: 0)
 
@@ -60,7 +61,8 @@ struct LFMVisibilityBenchmarkDiagnosticsTests {
             return
         }
 
-        let container = try await ModelBundleLoader().load(directory: localModelDirectory)
+        let loaded = try await ModelBundleLoader().load(directory: localModelDirectory)
+        let container = try loaded.makeContext()
         let prepared = try await container.prepare( ModelInput(prompt: "Hello"))
         let prompt = try container.makeExecutablePrompt(from: prepared)
         let parameters = GenerationParameters(maxTokens: 4, streamChunkTokenCount: 1, temperature: 0)
@@ -105,7 +107,8 @@ struct LFMVisibilityBenchmarkDiagnosticsTests {
             return
         }
 
-        let container = try await ModelBundleLoader().load(directory: localModelDirectory)
+        let loaded = try await ModelBundleLoader().load(directory: localModelDirectory)
+        let container = try loaded.makeContext()
         let parameters = GenerationParameters(
             maxTokens: 64,
             streamChunkTokenCount: 1,
@@ -161,7 +164,8 @@ struct LFMVisibilityBenchmarkDiagnosticsTests {
             return
         }
 
-        let container = try await ModelBundleLoader().load(directory: localModelDirectory)
+        let loaded = try await ModelBundleLoader().load(directory: localModelDirectory)
+        let container = try loaded.makeContext()
         let parameters = GenerationParameters(
             maxTokens: 64,
             streamChunkTokenCount: 1,

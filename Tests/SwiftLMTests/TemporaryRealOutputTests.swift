@@ -226,7 +226,7 @@ struct TemporaryRealOutputTests {
 
     private func printPromptStateDiagnostics(
         label: String,
-        container: InferenceSession,
+        container: LanguageModelContext,
         prompt: ExecutablePrompt
     ) throws {
         container.resetState()
@@ -418,7 +418,7 @@ struct TemporaryRealOutputTests {
 
 #if ENABLE_METAL_PROBES
     private func printQwenContinuationAttentionProbeDiagnostics(
-        container: InferenceSession,
+        container: LanguageModelContext,
         prompt: ExecutablePrompt,
         appendedTokenID: Int32
     ) throws {
@@ -644,7 +644,7 @@ struct TemporaryRealOutputTests {
 #endif
 
     private func printQwenEmbeddingDiagnostics(
-        container: InferenceSession,
+        container: LanguageModelContext,
         prompt: ExecutablePrompt
     ) throws {
         guard let directory = try QwenVisionTestSupport.optionalRealQwen3VLDirectory() else {
@@ -772,7 +772,7 @@ struct TemporaryRealOutputTests {
     }
 
     private func printGemmaEmbeddingDiagnostics(
-        container: InferenceSession,
+        container: LanguageModelContext,
         prompt: ExecutablePrompt
     ) throws {
         let diagnostics = try container.debugPrefillOutputHeadDiagnostics(prompt: prompt, topK: 10)
@@ -857,7 +857,7 @@ struct TemporaryRealOutputTests {
     }
 
     private func printGemmaResidualDiagnostics(
-        container: InferenceSession,
+        container: LanguageModelContext,
         prompt: ExecutablePrompt
     ) throws {
         let summaries = container.debugPrefillStepSummaries()
@@ -906,7 +906,7 @@ struct TemporaryRealOutputTests {
     }
 
     private func printGemmaRepeatedResidualDiagnostics(
-        container: InferenceSession,
+        container: LanguageModelContext,
         prompt: ExecutablePrompt
     ) throws {
         let summaries = container.debugPrefillStepSummaries()
@@ -945,7 +945,7 @@ struct TemporaryRealOutputTests {
 
 #if ENABLE_METAL_PROBES
     private func printGemmaAttentionProbeDiagnostics(
-        container: InferenceSession,
+        container: LanguageModelContext,
         prompt: ExecutablePrompt
     ) throws {
         let summaries = container.debugPrefillStepSummaries()

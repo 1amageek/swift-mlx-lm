@@ -5,15 +5,16 @@
 Use ``ModelInput`` with ``InputMessage`` values to generate from a conversation:
 
 ```swift
-let prepared = try await container.prepare(
+let context = try container.makeContext()
+let prepared = try await context.prepare(
     ModelInput(chat: [
         .system("You are a concise assistant."),
         .user("Summarize the benefits of zero-copy model loading.")
     ])
 )
-let executable = try container.makeExecutablePrompt(from: prepared)
+let executable = try context.makeExecutablePrompt(from: prepared)
 
-for await event in try container.generate(from: executable) {
+for await event in try context.generate(from: executable) {
     if let chunk = event.text {
         print(chunk, terminator: "")
     }
@@ -29,14 +30,15 @@ For Qwen3-VL style bundles, image-bearing and video-bearing chat messages are no
 If many requests share the same prefix, build a ``PromptSnapshot`` once and restore it later:
 
 ```swift
-let promptSnapshot = try await container.makePromptSnapshot(
+let context = try container.makeContext()
+let promptSnapshot = try await context.makePromptSnapshot(
     from: ModelInput(chat: [
         .system("You are a helpful code review assistant."),
         .user("Review this patch carefully.")
     ])
 )
 
-for await event in try container.generate(
+for await event in try context.generate(
     from: promptSnapshot,
     parameters: GenerationParameters(maxTokens: 64)
 ) {
@@ -50,12 +52,12 @@ for await event in try container.generate(
 
 ## Cache and Tokenizer Helpers
 
-`InferenceSession` also exposes lower-level helpers:
+``LanguageModelContainer`` exposes stateless tokenizer helpers, and ``LanguageModelContext`` exposes mutable cache control:
 
 ```swift
 let tokens = container.encode("Hello")
 let text = container.decode(tokens)
-container.resetState()
+context.resetState()
 ```
 
 Use `resetState()` between unrelated conversations to clear KV and decode state.
