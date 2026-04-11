@@ -13,20 +13,20 @@ struct ReleaseSmokeCapabilityTests {
 
         if !supportsImages {
             do {
-                _ = try await container.prepare(input: ModelInput(chat: [
+                _ = try await container.prepare( ModelInput(chat: [
                     .user([
                         .text("Describe this image."),
                         .image(InputImage(data: try TestImageFixtures.makeOnePixelPNGData(), mimeType: "image/png")),
                     ])
                 ]))
                 Issue.record("Expected text-only bundle to reject image-bearing input")
-            } catch ModelContainerError.unsupportedInputForModel {
+            } catch InferenceSessionError.unsupportedInputForModel {
                 return
             }
             return
         }
 
-        let prepared = try await container.prepare(input: ModelInput(chat: [
+        let prepared = try await container.prepare( ModelInput(chat: [
             .user([
                 .text("Describe this image."),
                 .image(InputImage(data: try TestImageFixtures.makeOnePixelPNGData(), mimeType: "image/png")),
@@ -37,20 +37,20 @@ struct ReleaseSmokeCapabilityTests {
         #expect(!container.configuration.executionCapabilities.supportsImageExecution)
 
         do {
-            _ = try await container.generate(input: ModelInput(chat: [
+            _ = try await container.generate( ModelInput(chat: [
                 .user([
                     .text("Describe this image."),
                     .image(InputImage(data: try TestImageFixtures.makeOnePixelPNGData(), mimeType: "image/png")),
                 ])
             ]))
-            Issue.record("Expected multimodal generate(input: ModelInput) to throw")
-        } catch ModelContainerError.multimodalInputNotSupported {
+            Issue.record("Expected multimodal generate( ModelInput) to throw")
+        } catch InferenceSessionError.multimodalInputNotSupported {
         }
 
         do {
             _ = try container.makeExecutablePrompt(from: prepared)
             Issue.record("Expected multimodal prepared input to remain non-executable")
-        } catch ModelContainerError.multimodalInputNotSupported {
+        } catch InferenceSessionError.multimodalInputNotSupported {
         }
     }
 }

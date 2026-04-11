@@ -14,12 +14,11 @@ struct QwenVisionRealBundleVideoTests {
             print("[Skip] Loaded local Qwen vision bundle does not execute video prompts")
             return
         }
-        container.resetCaches()
+        container.resetState()
 
         let videoData = try await TestVideoFixtures.makeMP4Data()
         let prepareStart = CFAbsoluteTimeGetCurrent()
-        let prepared = try await container.prepare(
-            input: ModelInput(chat: [
+        let prepared = try await container.prepare( ModelInput(chat: [
                 .user([
                     .text("Describe"),
                     .video(InputVideo(data: videoData, mimeType: "video/mp4")),
@@ -33,9 +32,8 @@ struct QwenVisionRealBundleVideoTests {
         let videoTokenCount = executable.visualContext?.layout.mmTokenTypeIDs.filter { $0 == 2 }.count ?? 0
         print("[RealQwenVision] video prompt prepare=\(String(format: "%.3f", prepareTime))s executable=\(String(format: "%.3f", executableTime))s tokens=\(prepared.tokenIDs.count) videoTokens=\(videoTokenCount)")
         let generationStart = CFAbsoluteTimeGetCurrent()
-        let stream = try container.generate(
-            prompt: executable,
-            parameters: GenerateParameters(maxTokens: 1, streamChunkTokenCount: 1)
+        let stream = try container.generate(from: executable,
+            parameters: GenerationParameters(maxTokens: 1, streamChunkTokenCount: 1)
         )
         let result = await QwenVisionTestSupport.collectGeneration(from: stream)
         let generationTime = CFAbsoluteTimeGetCurrent() - generationStart

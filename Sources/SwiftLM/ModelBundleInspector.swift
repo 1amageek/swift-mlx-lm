@@ -102,9 +102,10 @@ struct ModelBundleInspector {
         }
         let bosToken = (json["bos_token"] as? String) ?? "<bos>"
 
-        // Gemma 4 instruction bundles use `<|turn>{role}\n...` formatting.
-        // Some local bundles omit `chat_template.jinja`, so synthesize the
-        // upstream structure instead of falling back to raw prompt completion.
+        // Gemma 4 instruction bundles use turn-delimited prompts with optional
+        // thinking control. Some local bundles omit `chat_template.jinja`, so
+        // synthesize the upstream shape instead of falling back to a raw
+        // role-prefixed transcript.
         return """
         {%- macro render_content(content) -%}
             {%- if content is string -%}
@@ -123,12 +124,43 @@ struct ModelBundleInspector {
                 {{- '' -}}
             {%- endif -%}
         {%- endmacro -%}
+        {%- macro strip_thinking(text) -%}
+            {%- set ns = namespace(result='') -%}
+            {%- for part in text.split('<channel|>') -%}
+                {%- if '<|channel>' in part -%}
+                    {%- set ns.result = ns.result + part.split('<|channel>')[0] -%}
+                {%- else -%}
+                    {%- set ns.result = ns.result + part -%}
+                {%- endif -%}
+            {%- endfor -%}
+            {{- ns.result | trim -}}
+        {%- endmacro -%}
+        {%- set loop_messages = messages -%}
         {{- '\(bosToken)' -}}
-        {%- for message in messages -%}
+        {%- if (enable_thinking is defined and enable_thinking) or messages[0]['role'] in ['system', 'developer'] -%}
+            {{- '<|turn>system\n' -}}
+            {%- if enable_thinking is defined and enable_thinking -%}
+                {{- '<|think|>\n' -}}
+            {%- endif -%}
+            {%- if messages[0]['role'] in ['system', 'developer'] -%}
+                {{- render_content(messages[0]['content']) | trim -}}
+                {%- set loop_messages = messages[1:] -%}
+            {%- endif -%}
+            {{- '<turn|>\n' -}}
+        {%- endif -%}
+        {%- for message in loop_messages -%}
             {%- set role = 'model' if message.role == 'assistant' else message.role -%}
             {{- '<|turn>' + role + '\n' -}}
-            {{- render_content(message.content)|trim -}}
-            {{- '\n' -}}
+            {%- set thinking_text = message.get('reasoning') or message.get('reasoning_content') -%}
+            {%- if role == 'model' and thinking_text -%}
+                {{- '<|channel>thought\n' + thinking_text + '\n<channel|>' -}}
+            {%- endif -%}
+            {%- if role == 'model' and message['content'] is string -%}
+                {{- strip_thinking(message['content']) -}}
+            {%- else -%}
+                {{- render_content(message.content)|trim -}}
+            {%- endif -%}
+            {{- '<turn|>\n' -}}
         {%- endfor -%}
         {%- if add_generation_prompt -%}
             {{- '<|turn>model\n' -}}

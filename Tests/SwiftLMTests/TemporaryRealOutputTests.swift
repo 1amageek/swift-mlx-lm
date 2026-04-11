@@ -20,9 +20,8 @@ struct TemporaryRealOutputTests {
             print("[Skip] No local Gemma4 snapshot")
             return
         }
-        container.resetCaches()
-        let prepared = try await container.prepare(
-            input: ModelInput(prompt: promptText)
+        container.resetState()
+        let prepared = try await container.prepare( ModelInput(prompt: promptText)
         )
         print("[Gemma4 prepared]")
         print(prepared.renderedText)
@@ -32,8 +31,8 @@ struct TemporaryRealOutputTests {
             let layerLabel = summary.layerIndex.map(String.init) ?? "-"
             print("  step=\(summary.index) layer=\(layerLabel) kernel=\(summary.kernelName)")
         }
-        container.resetCaches()
-        let promptState = try container.makePromptState(prompt: prompt)
+        container.resetState()
+        let promptState = try container.makePromptSnapshot(from: prompt)
         let firstToken = Int(promptState.metalState.firstToken)
         let decoded = container.tokenizer.decode(tokens: [firstToken], skipSpecialTokens: false)
         print("[Gemma4 first token] \(firstToken) -> \(String(reflecting: decoded))")
@@ -54,7 +53,7 @@ struct TemporaryRealOutputTests {
         }
         let repeatedPrefill = try container.debugRepeatedPrefillSampledFirstTokens(
             prompt: prompt,
-            parameters: GenerateParameters(
+            parameters: GenerationParameters(
                 maxTokens: 1,
                 streamChunkTokenCount: 1,
                 temperature: 0
@@ -107,9 +106,8 @@ struct TemporaryRealOutputTests {
             print("[Skip] No local Qwen3.5 snapshot")
             return
         }
-        container.resetCaches()
-        let textPrepared = try await container.prepare(
-            input: ModelInput(prompt: promptText)
+        container.resetState()
+        let textPrepared = try await container.prepare( ModelInput(prompt: promptText)
         )
         print("[Qwen text prepared]")
         print(textPrepared.renderedText)
@@ -119,9 +117,8 @@ struct TemporaryRealOutputTests {
             container: container,
             prompt: try container.makeExecutablePrompt(from: textPrepared)
         )
-        let textStream = try container.generate(
-            prompt: try container.makeExecutablePrompt(from: textPrepared),
-            parameters: GenerateParameters(
+        let textStream = try container.generate(from: try container.makeExecutablePrompt(from: textPrepared),
+            parameters: GenerationParameters(
                 maxTokens: 12,
                 streamChunkTokenCount: 8,
                 temperature: 0.7,
@@ -137,7 +134,7 @@ struct TemporaryRealOutputTests {
         print(textResult.chunks.joined())
         let textTokenIDs = try container.debugGeneratedTokenIDs(
             prompt: try container.makeExecutablePrompt(from: textPrepared),
-            parameters: GenerateParameters(
+            parameters: GenerationParameters(
                 maxTokens: 12,
                 streamChunkTokenCount: 8,
                 temperature: 0.7,
@@ -153,9 +150,8 @@ struct TemporaryRealOutputTests {
             prompt: try container.makeExecutablePrompt(from: textPrepared)
         )
 
-        container.resetCaches()
-        let chatPrepared = try await container.prepare(
-            input: ModelInput(chat: [
+        container.resetState()
+        let chatPrepared = try await container.prepare( ModelInput(chat: [
                 .user([.text(promptText)])
             ])
         )
@@ -167,9 +163,8 @@ struct TemporaryRealOutputTests {
             container: container,
             prompt: try container.makeExecutablePrompt(from: chatPrepared)
         )
-        let chatStream = try container.generate(
-            prompt: try container.makeExecutablePrompt(from: chatPrepared),
-            parameters: GenerateParameters(
+        let chatStream = try container.generate(from: try container.makeExecutablePrompt(from: chatPrepared),
+            parameters: GenerationParameters(
                 maxTokens: 12,
                 streamChunkTokenCount: 8,
                 temperature: 0.7,
@@ -185,7 +180,7 @@ struct TemporaryRealOutputTests {
         print(chatResult.chunks.joined())
         let chatTokenIDs = try container.debugGeneratedTokenIDs(
             prompt: try container.makeExecutablePrompt(from: chatPrepared),
-            parameters: GenerateParameters(
+            parameters: GenerationParameters(
                 maxTokens: 12,
                 streamChunkTokenCount: 8,
                 temperature: 0.7,
@@ -197,7 +192,7 @@ struct TemporaryRealOutputTests {
         print("[Qwen chat token ids]")
         print(chatTokenIDs)
 
-        container.resetCaches()
+        container.resetState()
         let rawPrompt = ExecutablePrompt(tokenIDs: container.encode(promptText))
         print("[Qwen raw prompt tokens] \(rawPrompt.tokenIDs.prefix(24))")
         try printPromptStateDiagnostics(
@@ -205,9 +200,8 @@ struct TemporaryRealOutputTests {
             container: container,
             prompt: rawPrompt
         )
-        let rawStream = try container.generate(
-            prompt: rawPrompt,
-            parameters: GenerateParameters(
+        let rawStream = try container.generate(from: rawPrompt,
+            parameters: GenerationParameters(
                 maxTokens: 12,
                 streamChunkTokenCount: 8,
                 temperature: 0
@@ -220,7 +214,7 @@ struct TemporaryRealOutputTests {
         print(rawResult.chunks.joined())
         let rawTokenIDs = try container.debugGeneratedTokenIDs(
             prompt: rawPrompt,
-            parameters: GenerateParameters(
+            parameters: GenerationParameters(
                 maxTokens: 12,
                 streamChunkTokenCount: 8,
                 temperature: 0
@@ -232,10 +226,10 @@ struct TemporaryRealOutputTests {
 
     private func printPromptStateDiagnostics(
         label: String,
-        container: ModelContainer,
+        container: InferenceSession,
         prompt: ExecutablePrompt
     ) throws {
-        container.resetCaches()
+        container.resetState()
         let topLogits = try container.debugPrefillTopLogits(prompt: prompt, topK: 10)
         print("[\(label) top logits]")
         for entry in topLogits {
@@ -329,8 +323,8 @@ struct TemporaryRealOutputTests {
             }
         }
 
-        container.resetCaches()
-        let promptState = try container.makePromptState(prompt: prompt)
+        container.resetState()
+        let promptState = try container.makePromptSnapshot(from: prompt)
         let firstToken = Int(promptState.metalState.firstToken)
         let decoded = container.tokenizer.decode(tokens: [firstToken], skipSpecialTokens: false)
         print("[\(label) first token] \(firstToken) -> \(String(reflecting: decoded))")
@@ -424,7 +418,7 @@ struct TemporaryRealOutputTests {
 
 #if ENABLE_METAL_PROBES
     private func printQwenContinuationAttentionProbeDiagnostics(
-        container: ModelContainer,
+        container: InferenceSession,
         prompt: ExecutablePrompt,
         appendedTokenID: Int32
     ) throws {
@@ -650,7 +644,7 @@ struct TemporaryRealOutputTests {
 #endif
 
     private func printQwenEmbeddingDiagnostics(
-        container: ModelContainer,
+        container: InferenceSession,
         prompt: ExecutablePrompt
     ) throws {
         guard let directory = try QwenVisionTestSupport.optionalRealQwen3VLDirectory() else {
@@ -778,7 +772,7 @@ struct TemporaryRealOutputTests {
     }
 
     private func printGemmaEmbeddingDiagnostics(
-        container: ModelContainer,
+        container: InferenceSession,
         prompt: ExecutablePrompt
     ) throws {
         let diagnostics = try container.debugPrefillOutputHeadDiagnostics(prompt: prompt, topK: 10)
@@ -863,7 +857,7 @@ struct TemporaryRealOutputTests {
     }
 
     private func printGemmaResidualDiagnostics(
-        container: ModelContainer,
+        container: InferenceSession,
         prompt: ExecutablePrompt
     ) throws {
         let summaries = container.debugPrefillStepSummaries()
@@ -912,7 +906,7 @@ struct TemporaryRealOutputTests {
     }
 
     private func printGemmaRepeatedResidualDiagnostics(
-        container: ModelContainer,
+        container: InferenceSession,
         prompt: ExecutablePrompt
     ) throws {
         let summaries = container.debugPrefillStepSummaries()
@@ -927,7 +921,7 @@ struct TemporaryRealOutputTests {
             prompt: prompt,
             stepIndices: Set(residualSteps)
         )
-        container.resetCaches()
+        container.resetState()
         let second = try container.debugPrefillLastTokenHiddenSnapshots(
             prompt: prompt,
             stepIndices: Set(residualSteps)
@@ -951,7 +945,7 @@ struct TemporaryRealOutputTests {
 
 #if ENABLE_METAL_PROBES
     private func printGemmaAttentionProbeDiagnostics(
-        container: ModelContainer,
+        container: InferenceSession,
         prompt: ExecutablePrompt
     ) throws {
         let summaries = container.debugPrefillStepSummaries()

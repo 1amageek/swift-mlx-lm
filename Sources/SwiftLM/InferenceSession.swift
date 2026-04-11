@@ -12,16 +12,16 @@ import Jinja
 /// consumed by AnyFoundationModels and Jardis.
 ///
 /// ```swift
-/// let container = try await ModelBundleLoader().load(repo: "mlx-community/Qwen2.5-0.5B-Instruct")
-/// let stream = try container.generate(
-///     prompt: ExecutablePrompt(tokenIDs: tokenizer.encode(text: "Hello")),
-///     parameters: GenerateParameters(maxTokens: 100)
+/// let session = try await ModelBundleLoader().load(repo: "mlx-community/Qwen2.5-0.5B-Instruct")
+/// let stream = try session.generate(
+///     from: ExecutablePrompt(tokenIDs: session.encode("Hello")),
+///     parameters: GenerationParameters(maxTokens: 100)
 /// )
 /// for await generation in stream {
-///     if let text = generation.chunk { print(text, terminator: "") }
+///     if let text = generation.text { print(text, terminator: "") }
 /// }
 /// ```
-public final class ModelContainer: @unchecked Sendable {
+public final class InferenceSession: @unchecked Sendable {
     private static let promptStateSamplingTailLimit = 256
 
     private var inferenceModel: MetalInferenceModel
@@ -36,7 +36,7 @@ public final class ModelContainer: @unchecked Sendable {
     private let visionRuntime: QwenVisionRuntime?
     private let gemma4Runtime: Gemma4Runtime?
 
-    public convenience init(
+    convenience init(
         inferenceModel: MetalInferenceModel,
         tokenizer: any Tokenizer,
         configuration: ModelConfiguration,
@@ -89,8 +89,8 @@ public final class ModelContainer: @unchecked Sendable {
         modelConfiguration
     }
 
-    /// The tokenizer used by this model.
-    public var tokenizer: any Tokenizer {
+    /// Internal tokenizer used by this session.
+    var tokenizer: any Tokenizer {
         modelTokenizer
     }
 
@@ -99,22 +99,22 @@ public final class ModelContainer: @unchecked Sendable {
     /// For chat messages, applies the Jinja chat template from the model bundle
     /// (chat_template.jinja or tokenizer_config.json). Falls back to simple
     /// role-prefixed formatting if no template is available.
-    public func prepare(input: ModelInput) async throws -> PreparedInput {
-        let preparedPrompt: PreparedPrompt
+    public func prepare(_ input: ModelInput) async throws -> PreparedPrompt {
+        let renderedPrompt: RenderedPrompt
         switch input.prompt {
         case .text(let prompt):
             if modelTokenizer.hasChatTemplate || chatTemplate != nil {
-                preparedPrompt = try await applyChatTemplate(messages: [
+                renderedPrompt = try await applyChatTemplate(messages: [
                     .user([.text(prompt)])
                 ], promptOptions: input.promptOptions)
             } else {
-                preparedPrompt = PreparedPrompt(text: prompt, multimodal: nil)
+                renderedPrompt = RenderedPrompt(text: prompt, multimodal: nil)
             }
         case .chat(let messages):
-            preparedPrompt = try await applyChatTemplate(messages: messages, promptOptions: input.promptOptions)
+            renderedPrompt = try await applyChatTemplate(messages: messages, promptOptions: input.promptOptions)
         }
-        let tokens = preparedPrompt.tokenIDs ?? modelTokenizer.encode(text: preparedPrompt.text)
-        var multimodal = preparedPrompt.multimodal
+        let tokens = renderedPrompt.tokenIDs ?? modelTokenizer.encode(text: renderedPrompt.text)
+        var multimodal = renderedPrompt.multimodal
         if multimodal != nil {
             if gemma4Runtime != nil {
                 let processor = Gemma4PromptProcessor(configuration: configuration)
@@ -123,13 +123,13 @@ public final class ModelContainer: @unchecked Sendable {
                 let processor = QwenVisionPromptProcessor(configuration: configuration)
                 multimodal?.mmTokenTypeIDs = processor.multimodalTokenTypes(for: tokens)
             } else {
-                throw ModelContainerError.multimodalInputNotSupported(
+                throw InferenceSessionError.multimodalInputNotSupported(
                     "No vision runtime available for multimodal token type assignment."
                 )
             }
         }
-        return PreparedInput(
-            renderedText: preparedPrompt.text,
+        return PreparedPrompt(
+            renderedText: renderedPrompt.text,
             tokenIDs: tokens,
             multimodalMetadata: multimodal
         )
@@ -139,7 +139,7 @@ public final class ModelContainer: @unchecked Sendable {
     private func applyChatTemplate(
         messages: [InputMessage],
         promptOptions: PromptPreparationOptions
-    ) async throws -> PreparedPrompt {
+    ) async throws -> RenderedPrompt {
         let renderedMessages = renderedMessagesWithThinkingControl(
             from: messages,
             promptOptions: promptOptions
@@ -147,12 +147,12 @@ public final class ModelContainer: @unchecked Sendable {
         let containsImages = messages.contains(where: \.containsImageContent)
         let containsVideos = messages.contains(where: \.containsVideoContent)
         if containsImages && !configuration.inputCapabilities.supportsImages {
-            throw ModelContainerError.unsupportedInputForModel(
+            throw InferenceSessionError.unsupportedInputForModel(
                 "This model bundle does not declare image input support."
             )
         }
         if containsVideos && !configuration.inputCapabilities.supportsVideo {
-            throw ModelContainerError.unsupportedInputForModel(
+            throw InferenceSessionError.unsupportedInputForModel(
                 "This model bundle does not declare video input support."
             )
         }
@@ -165,7 +165,7 @@ public final class ModelContainer: @unchecked Sendable {
                 "bos_token": .string(modelTokenizer.bosToken ?? ""),
                 "eos_token": .string(modelTokenizer.eosToken ?? ""),
             ]
-            for (key, value) in jinjaPromptTemplateContext(promptOptions: promptOptions) {
+            for (key, value) in try jinjaPromptTemplateContext(promptOptions: promptOptions) {
                 context[key] = value
             }
             let rendered = try template.render(context)
@@ -176,7 +176,7 @@ public final class ModelContainer: @unchecked Sendable {
             let renderedTokenIDs = try modelTokenizer.applyChatTemplate(
                 messages: try renderedMessages.map(makeTokenizerMessage),
                 tools: nil,
-                additionalContext: tokenizerPromptTemplateContext(promptOptions: promptOptions)
+                additionalContext: try tokenizerPromptTemplateContext(promptOptions: promptOptions)
             )
             let rendered = modelTokenizer.decode(tokens: renderedTokenIDs, skipSpecialTokens: false)
             let prepared = try await prepareRenderedPrompt(rendered, messages: messages)
@@ -186,7 +186,7 @@ public final class ModelContainer: @unchecked Sendable {
             } else {
                 preparedTokenIDs = nil
             }
-            return PreparedPrompt(
+            return RenderedPrompt(
                 text: prepared.text,
                 tokenIDs: preparedTokenIDs,
                 multimodal: prepared.multimodal
@@ -237,7 +237,7 @@ public final class ModelContainer: @unchecked Sendable {
     }
 
     private func shouldInjectDirectAnswerSystemPrompt(promptOptions: PromptPreparationOptions) -> Bool {
-        guard !promptOptions.thinkingEnabled else { return false }
+        guard !promptOptions.isThinkingEnabled else { return false }
         guard let chatTemplateSource else { return false }
         return chatTemplateSource.contains("keep_past_thinking")
             && !chatTemplateSource.contains("enable_thinking")
@@ -245,15 +245,15 @@ public final class ModelContainer: @unchecked Sendable {
 
     private func jinjaPromptTemplateContext(
         promptOptions: PromptPreparationOptions
-    ) -> [String: Value] {
-        promptTemplateVariables(promptOptions: promptOptions).mapValues(\.jinjaValue)
+    ) throws -> [String: Value] {
+        try promptTemplateVariables(promptOptions: promptOptions).mapValues(\.jinjaValue)
     }
 
     private func tokenizerPromptTemplateContext(
         promptOptions: PromptPreparationOptions
-    ) -> [String: any Sendable] {
+    ) throws -> [String: any Sendable] {
         var context: [String: any Sendable] = ["add_vision_id": false]
-        for (key, value) in promptTemplateVariables(promptOptions: promptOptions) {
+        for (key, value) in try promptTemplateVariables(promptOptions: promptOptions) {
             context[key] = value.tokenizerValue
         }
         return context
@@ -261,27 +261,39 @@ public final class ModelContainer: @unchecked Sendable {
 
     private func promptTemplateVariables(
         promptOptions: PromptPreparationOptions
-    ) -> [String: PromptTemplateValue] {
+    ) throws -> [String: PromptTemplateValue] {
+        if let explicitThinking = promptOptions.templateVariables["enable_thinking"] {
+            guard case .boolean(let explicitValue) = explicitThinking else {
+                throw InferenceSessionError.invalidPromptTemplateVariable(
+                    "Template variable 'enable_thinking' must be a boolean."
+                )
+            }
+            guard explicitValue == promptOptions.isThinkingEnabled else {
+                throw InferenceSessionError.conflictingPromptThinkingConfiguration(
+                    "PromptPreparationOptions.isThinkingEnabled conflicts with templateVariables[\"enable_thinking\"]."
+                )
+            }
+        }
         var options = promptOptions.templateVariables
         if options["enable_thinking"] == nil {
-            options["enable_thinking"] = .boolean(promptOptions.thinkingEnabled)
+            options["enable_thinking"] = .boolean(promptOptions.isThinkingEnabled)
         }
         return options
     }
 
-    private func visibleThinkingPolicy(for parameters: GenerateParameters) -> ThinkingTagPolicy? {
-        if parameters.thinking.emitSeparately {
+    private func visibleThinkingPolicy(for parameters: GenerationParameters) -> ThinkingTagPolicy? {
+        if parameters.reasoning.visibility == .separate {
             return thinkingTagPolicy
         }
-        return parameters.thinking.includeInOutput ? nil : thinkingTagPolicy
+        return parameters.reasoning.visibility == .inline ? nil : thinkingTagPolicy
     }
 
     private func prepareRenderedPrompt(
         _ rendered: String,
         messages: [InputMessage]
-    ) async throws -> PreparedPrompt {
+    ) async throws -> RenderedPrompt {
         guard messages.contains(where: \.containsVisualContent) else {
-            return PreparedPrompt(text: rendered, multimodal: nil)
+            return RenderedPrompt(text: rendered, multimodal: nil)
         }
         if gemma4Runtime != nil {
             let processor = Gemma4PromptProcessor(configuration: configuration)
@@ -291,7 +303,7 @@ public final class ModelContainer: @unchecked Sendable {
             let processor = QwenVisionPromptProcessor(configuration: configuration)
             return try await processor.prepare(renderedText: rendered, messages: messages)
         }
-        throw ModelContainerError.multimodalInputNotSupported(
+        throw InferenceSessionError.multimodalInputNotSupported(
             "No vision runtime available for multimodal prompt preparation."
         )
     }
@@ -380,8 +392,8 @@ public final class ModelContainer: @unchecked Sendable {
         preparationTime: Double,
         requestStartTime: Double,
         ropePositionOffset: Int,
-        parameters: GenerateParameters,
-        continuation: AsyncStream<Generation>.Continuation
+        parameters: GenerationParameters,
+        continuation: AsyncStream<GenerationEvent>.Continuation
     ) {
         var samplingState = initialSamplingState
         var visibleText = ""
@@ -397,7 +409,7 @@ public final class ModelContainer: @unchecked Sendable {
         var fallbackTokenIDs: [Int] = []
         var visibilityState = GenerationVisibilityState(
             policy: visibilityPolicy,
-            emitsReasoning: parameters.thinking.emitSeparately
+            emitsReasoning: parameters.reasoning.visibility == .separate
         )
 
         func emitBufferedChunkIfNeeded(force: Bool = false) {
@@ -411,10 +423,10 @@ public final class ModelContainer: @unchecked Sendable {
             let emitted = visibilityState.append(decodedText: decodedText)
             if !emitted.answer.isEmpty {
                 visibleText += emitted.answer
-                continuation.yield(.chunk(emitted.answer))
+                continuation.yield(.text(emitted.answer))
             }
             if !emitted.reasoning.isEmpty {
-                continuation.yield(.reasoningChunk(emitted.reasoning))
+                continuation.yield(.reasoning(emitted.reasoning))
             }
         }
 
@@ -447,7 +459,7 @@ public final class ModelContainer: @unchecked Sendable {
                     ropePositionOffset: ropePositionOffset
                 )
             } catch {
-                print("[ModelContainer] Failed to decode: \(error)")
+                print("[InferenceSession] Failed to decode: \(error)")
                 break
             }
 
@@ -479,10 +491,10 @@ public final class ModelContainer: @unchecked Sendable {
         let trailingEmitted = visibilityState.finalize()
         if !trailingEmitted.answer.isEmpty {
             visibleText += trailingEmitted.answer
-            continuation.yield(.chunk(trailingEmitted.answer))
+            continuation.yield(.text(trailingEmitted.answer))
         }
         if !trailingEmitted.reasoning.isEmpty {
-            continuation.yield(.reasoningChunk(trailingEmitted.reasoning))
+            continuation.yield(.reasoning(trailingEmitted.reasoning))
         }
 
         if visibleText.isEmpty,
@@ -494,7 +506,7 @@ public final class ModelContainer: @unchecked Sendable {
             )
             if !fallbackText.isEmpty {
                 visibleText = fallbackText
-                continuation.yield(.chunk(fallbackText))
+                continuation.yield(.text(fallbackText))
             }
         }
 
@@ -505,8 +517,8 @@ public final class ModelContainer: @unchecked Sendable {
         let totalTime = CFAbsoluteTimeGetCurrent() - requestStartTime
         let tokensPerSecond = totalTime > 0 ? Double(visibleTokenCount) / totalTime : 0
         let preparationTokPerSec = preparationTime > 0 ? Double(promptTokenCount) / preparationTime : 0
-        print("[ModelContainer] \(visibleTokenCount) tokens (\(String(format: "%.0f", preparationTokPerSec)) prefill, \(String(format: "%.1f", tokensPerSecond)) decode tok/s) [\(String(format: "%.1f", totalTime))s]")
-        continuation.yield(.info(CompletionInfo(
+        print("[InferenceSession] \(visibleTokenCount) tokens (\(String(format: "%.0f", preparationTokPerSec)) prefill, \(String(format: "%.1f", tokensPerSecond)) decode tok/s) [\(String(format: "%.1f", totalTime))s]")
+        continuation.yield(.completed(CompletionInfo(
             tokenCount: visibleTokenCount,
             tokensPerSecond: tokensPerSecond,
             totalTime: totalTime
@@ -537,7 +549,7 @@ public final class ModelContainer: @unchecked Sendable {
     }
 
     private func prefill(prompt: ExecutablePrompt) throws -> (firstToken: Int32, ropePositionOffset: Int) {
-        inferenceModel.resetCaches()
+        inferenceModel.resetState()
         if let gemma4PromptContext = prompt.gemma4PromptContext {
             try inferenceModel.writePrefillPerLayerInputs(gemma4PromptContext.perLayerInputs)
             let firstToken: Int32
@@ -554,7 +566,7 @@ public final class ModelContainer: @unchecked Sendable {
                 firstToken = inferenceModel.prefill(tokens: prompt.tokenIDs.map(Int32.init))
             }
             guard firstToken >= 0 else {
-                throw ModelContainerError.invalidPrefillResult
+                throw InferenceSessionError.invalidPrefillResult
             }
             return (firstToken: firstToken, ropePositionOffset: 0)
         }
@@ -562,14 +574,14 @@ public final class ModelContainer: @unchecked Sendable {
             let promptTokens = prompt.tokenIDs.map(Int32.init)
             let firstToken = inferenceModel.prefill(tokens: promptTokens)
             guard firstToken >= 0 else {
-                throw ModelContainerError.invalidPrefillResult
+                throw InferenceSessionError.invalidPrefillResult
             }
             return (firstToken: firstToken, ropePositionOffset: 0)
         }
 
         let layout = visualContext.layout
         guard layout.tokenTypeIDs.count == prompt.tokenIDs.count else {
-            throw ModelContainerError.multimodalInputNotSupported(
+            throw InferenceSessionError.multimodalInputNotSupported(
                 "Executable multimodal prompt layout does not match token count."
             )
         }
@@ -589,7 +601,7 @@ public final class ModelContainer: @unchecked Sendable {
                 let localTokenCount = endIndex - tokenIndex
                 let endImageIndex = imageTokenIndex + localTokenCount
                 guard endImageIndex <= visualContext.imageTokenEmbeddings.count else {
-                    throw ModelContainerError.multimodalInputNotSupported(
+                    throw InferenceSessionError.multimodalInputNotSupported(
                         "Vision encoder output is shorter than the image placeholder sequence."
                     )
                 }
@@ -602,7 +614,7 @@ public final class ModelContainer: @unchecked Sendable {
                 var deepstackFeaturesByLayer: [Int: [[Float]]] = [:]
                 for (layerIndex, features) in visualContext.imageDeepstackFeaturesByLayer {
                     guard endImageIndex <= features.count else {
-                        throw ModelContainerError.multimodalInputNotSupported(
+                        throw InferenceSessionError.multimodalInputNotSupported(
                             "Deepstack visual feature count mismatch at layer \(layerIndex)."
                         )
                     }
@@ -618,7 +630,7 @@ public final class ModelContainer: @unchecked Sendable {
                 let localTokenCount = endIndex - tokenIndex
                 let endVideoIndex = videoTokenIndex + localTokenCount
                 guard endVideoIndex <= visualContext.videoTokenEmbeddings.count else {
-                    throw ModelContainerError.multimodalInputNotSupported(
+                    throw InferenceSessionError.multimodalInputNotSupported(
                         "Vision encoder output is shorter than the video placeholder sequence."
                     )
                 }
@@ -631,7 +643,7 @@ public final class ModelContainer: @unchecked Sendable {
                 var deepstackFeaturesByLayer: [Int: [[Float]]] = [:]
                 for (layerIndex, features) in visualContext.videoDeepstackFeaturesByLayer {
                     guard endVideoIndex <= features.count else {
-                        throw ModelContainerError.multimodalInputNotSupported(
+                        throw InferenceSessionError.multimodalInputNotSupported(
                             "Deepstack video feature count mismatch at layer \(layerIndex)."
                         )
                     }
@@ -644,14 +656,14 @@ public final class ModelContainer: @unchecked Sendable {
                 )
                 videoTokenIndex = endVideoIndex
             default:
-                throw ModelContainerError.multimodalInputNotSupported(
+                throw InferenceSessionError.multimodalInputNotSupported(
                     "Unsupported multimodal token type ID: \(tokenType)"
                 )
             }
         }
 
         guard firstToken >= 0 else {
-            throw ModelContainerError.invalidPrefillResult
+            throw InferenceSessionError.invalidPrefillResult
         }
         return (
             firstToken: firstToken,
@@ -660,10 +672,10 @@ public final class ModelContainer: @unchecked Sendable {
     }
 
     /// Convert prepared prompt data into runtime-executable prompt state.
-    public func makeExecutablePrompt(from prepared: PreparedInput) throws -> ExecutablePrompt {
+    public func makeExecutablePrompt(from prepared: PreparedPrompt) throws -> ExecutablePrompt {
         if let gemma4Runtime {
             if let multimodal = prepared.multimodalMetadata, !multimodal.videos.isEmpty {
-                throw ModelContainerError.multimodalInputNotSupported(
+                throw InferenceSessionError.multimodalInputNotSupported(
                     "Gemma4 video execution is not implemented yet."
                 )
             }
@@ -677,17 +689,17 @@ public final class ModelContainer: @unchecked Sendable {
             return ExecutablePrompt(tokenIDs: prepared.tokenIDs, attentionMask: prepared.attentionMask)
         }
         if !multimodal.videos.isEmpty && !configuration.executionCapabilities.supportsVideoExecution {
-            throw ModelContainerError.multimodalInputNotSupported(
+            throw InferenceSessionError.multimodalInputNotSupported(
                 "This runtime can prepare Qwen3.5/Qwen3-VL prompts, but video execution is unavailable for the loaded bundle."
             )
         }
         guard multimodal.images.isEmpty || configuration.executionCapabilities.supportsImageExecution else {
-            throw ModelContainerError.multimodalInputNotSupported(
+            throw InferenceSessionError.multimodalInputNotSupported(
                 "This runtime can prepare Qwen3.5/Qwen3-VL prompts, but image execution is unavailable for the loaded bundle."
             )
         }
         guard let visionRuntime else {
-            throw ModelContainerError.multimodalInputNotSupported(
+            throw InferenceSessionError.multimodalInputNotSupported(
                 "The loaded bundle does not have an active Qwen vision runtime."
             )
         }
@@ -698,14 +710,14 @@ public final class ModelContainer: @unchecked Sendable {
         )
     }
 
-    /// Build a reusable prompt state from an executable prompt.
+    /// Build a reusable prompt snapshot from an executable prompt.
     ///
     /// This runs prefill once, snapshots the decode state, and stores the
     /// first predicted token so the same prompt prefix can be reused later.
-    public func makePromptState(prompt: ExecutablePrompt) throws -> PromptState {
+    public func makePromptSnapshot(from prompt: ExecutablePrompt) throws -> PromptSnapshot {
         let prefillResult = try prefill(prompt: prompt)
-        let metalState = try inferenceModel.makePromptState(firstToken: prefillResult.firstToken)
-        return PromptState(
+        let metalState = try inferenceModel.makePromptSnapshot(firstToken: prefillResult.firstToken)
+        return PromptSnapshot(
             metalState: metalState,
             promptTokenCount: prompt.tokenIDs.count,
             ropePositionOffset: prefillResult.ropePositionOffset,
@@ -714,26 +726,25 @@ public final class ModelContainer: @unchecked Sendable {
         )
     }
 
-    /// Build a reusable prompt state from prepared prompt data.
-    public func makePromptState(input: PreparedInput) throws -> PromptState {
-        let prompt = try makeExecutablePrompt(from: input)
-        return try makePromptState(prompt: prompt)
+    /// Build a reusable prompt snapshot from prepared prompt data.
+    public func makePromptSnapshot(from preparedPrompt: PreparedPrompt) throws -> PromptSnapshot {
+        let prompt = try makeExecutablePrompt(from: preparedPrompt)
+        return try makePromptSnapshot(from: prompt)
     }
 
-    /// Build a reusable prompt state from user input.
-    public func makePromptState(input: ModelInput) async throws -> PromptState {
-        let prepared = try await prepare(input: input)
-        return try makePromptState(input: prepared)
+    /// Build a reusable prompt snapshot from user input.
+    public func makePromptSnapshot(from input: ModelInput) async throws -> PromptSnapshot {
+        let preparedPrompt = try await prepare(input)
+        return try makePromptSnapshot(from: preparedPrompt)
     }
 
     /// Generate text from an executable prompt.
     ///
-    /// Returns an AsyncStream of Generation values (text chunks + completion info).
-    /// Each `.chunk` may contain one or more decoded tokens.
+    /// Returns an AsyncStream of GenerationEvent values.
     public func generate(
-        prompt: ExecutablePrompt,
-        parameters: GenerateParameters = GenerateParameters()
-    ) throws -> AsyncStream<Generation> {
+        from prompt: ExecutablePrompt,
+        parameters: GenerationParameters = GenerationParameters()
+    ) throws -> AsyncStream<GenerationEvent> {
         let resolvedParameters = resolvedGenerateParameters(parameters)
         let startTime = CFAbsoluteTimeGetCurrent()
         let prefillStart = CFAbsoluteTimeGetCurrent()
@@ -768,26 +779,26 @@ public final class ModelContainer: @unchecked Sendable {
         }
     }
 
-    /// Generate text by restoring a reusable prompt state instead of re-running prefill.
+    /// Generate text by restoring a reusable prompt snapshot instead of re-running prefill.
     public func generate(
-        from promptState: PromptState,
-        parameters: GenerateParameters = GenerateParameters()
-    ) throws -> AsyncStream<Generation> {
+        from promptSnapshot: PromptSnapshot,
+        parameters: GenerationParameters = GenerationParameters()
+    ) throws -> AsyncStream<GenerationEvent> {
         let resolvedParameters = resolvedGenerateParameters(parameters)
         let startTime = CFAbsoluteTimeGetCurrent()
         let restoreStart = CFAbsoluteTimeGetCurrent()
         do {
-            try self.inferenceModel.restore(promptState: promptState.metalState)
+            try self.inferenceModel.restore(promptState: promptSnapshot.metalState)
         } catch {
-            throw ModelContainerError.promptStateRestoreFailed(String(describing: error))
+            throw InferenceSessionError.promptSnapshotRestoreFailed(String(describing: error))
         }
         let restoreTime = CFAbsoluteTimeGetCurrent() - restoreStart
         var initialSamplingState = GenerationSamplingState(
-            rngState: promptState.samplingSeed,
-            recentTokenIDs: Array(promptState.promptTokenTail.suffix(resolvedParameters.repetitionContextSize))
+            rngState: promptSnapshot.samplingSeed,
+            recentTokenIDs: Array(promptSnapshot.promptTokenTail.suffix(resolvedParameters.repetitionContextSize))
         )
         let firstToken = resolveSampledPromptStateToken(
-            fallbackToken: promptState.metalState.firstToken,
+            fallbackToken: promptSnapshot.metalState.firstToken,
             logitsBuffer: inferenceModel.decodePlan.buffers.logits,
             parameters: resolvedParameters,
             samplingState: &initialSamplingState
@@ -801,10 +812,10 @@ public final class ModelContainer: @unchecked Sendable {
                 self.streamGeneration(
                     firstToken: firstToken,
                     samplingState: streamingSamplingState,
-                    promptTokenCount: promptState.promptTokenCount,
+                    promptTokenCount: promptSnapshot.promptTokenCount,
                     preparationTime: restoreTime,
                     requestStartTime: startTime,
-                    ropePositionOffset: promptState.ropePositionOffset,
+                    ropePositionOffset: promptSnapshot.ropePositionOffset,
                     parameters: resolvedParameters,
                     continuation: continuation
                 )
@@ -814,27 +825,27 @@ public final class ModelContainer: @unchecked Sendable {
 
     /// Prepare, validate, and generate from a public prompt shape in one step.
     public func generate(
-        input: ModelInput,
-        parameters: GenerateParameters = GenerateParameters()
-    ) async throws -> AsyncStream<Generation> {
-        let prepared = try await prepare(input: input)
+        _ input: ModelInput,
+        parameters: GenerationParameters = GenerationParameters()
+    ) async throws -> AsyncStream<GenerationEvent> {
+        let prepared = try await prepare(input)
         let prompt = try makeExecutablePrompt(from: prepared)
-        return try generate(prompt: prompt, parameters: parameters)
+        return try generate(from: prompt, parameters: parameters)
     }
 
     /// Decode token IDs to text.
-    public func decode(tokens: [Int]) -> String {
-        modelTokenizer.decode(tokens: tokens, skipSpecialTokens: true)
+    public func decode(_ tokenIDs: [Int], skipSpecialTokens: Bool = true) -> String {
+        modelTokenizer.decode(tokens: tokenIDs, skipSpecialTokens: skipSpecialTokens)
     }
 
     /// Encode text to token IDs.
-    public func encode(_ text: String) -> [Int] {
-        modelTokenizer.encode(text: text)
+    public func encode(_ text: String, addSpecialTokens: Bool = true) -> [Int] {
+        modelTokenizer.encode(text: text, addSpecialTokens: addSpecialTokens)
     }
 
     /// Reset KV cache (call between independent conversations).
-    public func resetCaches() {
-        inferenceModel.resetCaches()
+    public func resetState() {
+        inferenceModel.resetState()
     }
 
     internal func debugPrefillTopLogits(
@@ -1017,7 +1028,7 @@ public final class ModelContainer: @unchecked Sendable {
         differingCount: Int
     ) {
         if prompt.visualContext != nil || prompt.gemma4PromptContext != nil {
-            throw ModelContainerError.multimodalInputNotSupported(
+            throw InferenceSessionError.multimodalInputNotSupported(
                 "Continuation logit comparison currently supports text-only prompts."
             )
         }
@@ -1035,7 +1046,7 @@ public final class ModelContainer: @unchecked Sendable {
         )
         let prefillTopLogits = rankedLogits(prefillLogits, topK: topK)
 
-        resetCaches()
+        resetState()
         let prefillResult = try prefill(prompt: prompt)
         _ = try executeDecodeStep(
             tokenID: Int32(appendedTokenID),
@@ -1102,12 +1113,12 @@ public final class ModelContainer: @unchecked Sendable {
 
     internal func debugClone(
         compiledModel: MetalCompiledModel
-    ) throws -> ModelContainer {
+    ) throws -> InferenceSession {
         let clonedInferenceModel = try MetalInferenceModel(
             compiledModel: compiledModel,
             device: inferenceModel.device
         )
-        return ModelContainer(
+        return InferenceSession(
             inferenceModel: clonedInferenceModel,
             tokenizer: modelTokenizer,
             configuration: modelConfiguration,
@@ -1132,7 +1143,7 @@ public final class ModelContainer: @unchecked Sendable {
         differingCount: Int
     ) {
         let first = try debugPrefillFinalHidden(prompt: prompt)
-        resetCaches()
+        resetState()
         let second = try debugPrefillFinalHidden(prompt: prompt)
         return (
             firstFingerprint: fingerprint(for: first),
@@ -1219,7 +1230,7 @@ public final class ModelContainer: @unchecked Sendable {
 
     internal func debugGeneratedTokenIDs(
         prompt: ExecutablePrompt,
-        parameters: GenerateParameters
+        parameters: GenerationParameters
     ) throws -> [Int] {
         let resolvedParameters = resolvedGenerateParameters(parameters)
         let prefillResult = try prefill(prompt: prompt)
@@ -1246,8 +1257,8 @@ public final class ModelContainer: @unchecked Sendable {
     }
 
     internal func debugPromptStateGeneratedTokenIDs(
-        promptState: PromptState,
-        parameters: GenerateParameters
+        promptState: PromptSnapshot,
+        parameters: GenerationParameters
     ) throws -> [Int] {
         let resolvedParameters = resolvedGenerateParameters(parameters)
         try inferenceModel.restore(promptState: promptState.metalState)
@@ -1276,7 +1287,7 @@ public final class ModelContainer: @unchecked Sendable {
 
     internal func debugRawGeneratedTokenIDs(
         prompt: ExecutablePrompt,
-        parameters: GenerateParameters
+        parameters: GenerationParameters
     ) throws -> [Int] {
         let resolvedParameters = resolvedGenerateParameters(parameters)
         let prefillResult = try prefill(prompt: prompt)
@@ -1304,7 +1315,7 @@ public final class ModelContainer: @unchecked Sendable {
 
     internal func debugPromptStateGenerationTrace(
         prompt: ExecutablePrompt,
-        parameters: GenerateParameters,
+        parameters: GenerationParameters,
         topK: Int = 10
     ) throws -> (
         directBoundary: DebugGenerationBoundaryState,
@@ -1342,8 +1353,8 @@ public final class ModelContainer: @unchecked Sendable {
             topK: topK
         )
 
-        resetCaches()
-        let promptState = try makePromptState(prompt: prompt)
+        resetState()
+        let promptState = try makePromptSnapshot(from: prompt)
         try inferenceModel.restore(promptState: promptState.metalState)
         var restoredInitialSamplingState = GenerationSamplingState(
             rngState: promptState.samplingSeed,
@@ -1394,8 +1405,8 @@ public final class ModelContainer: @unchecked Sendable {
         let directTopLogits = try debugPrefillTopLogits(prompt: prompt, topK: topK)
         let directTokenOut = debugCurrentDecodeTokenOut()
 
-        resetCaches()
-        let promptState = try makePromptState(prompt: prompt)
+        resetState()
+        let promptState = try makePromptSnapshot(from: prompt)
         try inferenceModel.restore(promptState: promptState.metalState)
 
         return (
@@ -1409,7 +1420,7 @@ public final class ModelContainer: @unchecked Sendable {
 
     internal func debugPromptStateSampledFirstTokens(
         prompt: ExecutablePrompt,
-        parameters: GenerateParameters
+        parameters: GenerationParameters
     ) throws -> (
         direct: Int32,
         restored: Int32,
@@ -1436,8 +1447,8 @@ public final class ModelContainer: @unchecked Sendable {
             samplingState: &directSamplingState
         )
 
-        resetCaches()
-        let promptState = try makePromptState(prompt: prompt)
+        resetState()
+        let promptState = try makePromptSnapshot(from: prompt)
         try inferenceModel.restore(promptState: promptState.metalState)
         var restoredSamplingState = GenerationSamplingState(
             rngState: promptState.samplingSeed,
@@ -1468,7 +1479,7 @@ public final class ModelContainer: @unchecked Sendable {
 
     internal func debugRepeatedPrefillSampledFirstTokens(
         prompt: ExecutablePrompt,
-        parameters: GenerateParameters
+        parameters: GenerationParameters
     ) throws -> (
         first: Int32,
         second: Int32,
@@ -1488,7 +1499,7 @@ public final class ModelContainer: @unchecked Sendable {
             parameters: resolvedParameters
         )
 
-        resetCaches()
+        resetState()
 
         let second = try debugSinglePrefillSampledFirstToken(
             prompt: prompt,
@@ -1777,7 +1788,7 @@ public final class ModelContainer: @unchecked Sendable {
         visibilityOptions: MTL4VisibilityOptions = []
     ) throws -> [String: [Float]] {
         guard prompt.visualContext == nil, prompt.gemma4PromptContext == nil else {
-            throw ModelContainerError.multimodalInputNotSupported(
+            throw InferenceSessionError.multimodalInputNotSupported(
                 "Decode binding probes currently support text-only prompts."
             )
         }
@@ -1863,7 +1874,7 @@ public final class ModelContainer: @unchecked Sendable {
 
     private func makeInitialSamplingState(
         promptTokenIDs: [Int],
-        parameters: GenerateParameters
+        parameters: GenerationParameters
     ) -> GenerationSamplingState {
         GenerationSamplingState(
             rngState: samplingSeed(for: promptTokenIDs),
@@ -1871,7 +1882,7 @@ public final class ModelContainer: @unchecked Sendable {
         )
     }
 
-    private func resolvedGenerateParameters(_ parameters: GenerateParameters) -> GenerateParameters {
+    private func resolvedGenerateParameters(_ parameters: GenerationParameters) -> GenerationParameters {
         var resolved = parameters
         let modelName = modelConfiguration.name.lowercased()
 
@@ -1899,7 +1910,7 @@ public final class ModelContainer: @unchecked Sendable {
 
     private func resolveSampledDecodeToken(
         fallbackToken: Int32,
-        parameters: GenerateParameters,
+        parameters: GenerationParameters,
         samplingState: inout GenerationSamplingState
     ) -> Int32 {
         resolveSampledToken(
@@ -1913,7 +1924,7 @@ public final class ModelContainer: @unchecked Sendable {
 
     private func resolveSampledPrefillToken(
         fallbackToken: Int32,
-        parameters: GenerateParameters,
+        parameters: GenerationParameters,
         samplingState: inout GenerationSamplingState
     ) -> Int32 {
         guard inferenceModel.prefillPlan != nil else {
@@ -1977,7 +1988,7 @@ public final class ModelContainer: @unchecked Sendable {
     private func resolveSampledPromptStateToken(
         fallbackToken: Int32,
         logitsBuffer: MTLBuffer,
-        parameters: GenerateParameters,
+        parameters: GenerationParameters,
         samplingState: inout GenerationSamplingState
     ) -> Int32 {
         resolveSampledToken(
@@ -1993,7 +2004,7 @@ public final class ModelContainer: @unchecked Sendable {
         fallbackToken: Int32,
         logitsBuffer: MTLBuffer,
         precision: BufferPrecision,
-        parameters: GenerateParameters,
+        parameters: GenerationParameters,
         samplingState: inout GenerationSamplingState
     ) -> Int32 {
         if ProcessInfo.processInfo.environment["SWIFTLM_DISABLE_HOST_SAMPLING"] == "1" {
@@ -2011,7 +2022,7 @@ public final class ModelContainer: @unchecked Sendable {
 
         if ProcessInfo.processInfo.environment["SWIFTLM_TRACE_SAMPLING"] == "1" {
             print(
-                "[ModelContainer] sampling trace: fallback=\(fallbackToken) temp=\(parameters.temperature) topP=\(parameters.topP) "
+                "[InferenceSession] sampling trace: fallback=\(fallbackToken) temp=\(parameters.temperature) topP=\(parameters.topP) "
                     + "needsRepair=\(needsGreedyRepair) hostPost=\(requiresHostLogitPostprocessing) host=\(shouldSampleOnHost)"
             )
         }
@@ -2055,7 +2066,7 @@ public final class ModelContainer: @unchecked Sendable {
 
     private func debugSinglePrefillSampledFirstToken(
         prompt: ExecutablePrompt,
-        parameters: GenerateParameters
+        parameters: GenerationParameters
     ) throws -> (
         sampledToken: Int32,
         topLogits: [(tokenID: Int, logit: Float, decoded: String)],
@@ -2086,7 +2097,7 @@ public final class ModelContainer: @unchecked Sendable {
     }
 
     private func debugCurrentSamplingTopLogits(
-        parameters: GenerateParameters,
+        parameters: GenerationParameters,
         recentTokenIDs: [Int],
         topK: Int
     ) -> [(tokenID: Int, logit: Float, decoded: String)] {
@@ -2103,7 +2114,7 @@ public final class ModelContainer: @unchecked Sendable {
 
     private func debugCurrentDecodeBoundaryState(
         firstToken: Int32,
-        parameters: GenerateParameters,
+        parameters: GenerationParameters,
         recentTokenIDs: [Int],
         topK: Int
     ) -> DebugGenerationBoundaryState {
@@ -2135,7 +2146,7 @@ public final class ModelContainer: @unchecked Sendable {
         firstToken: Int32,
         samplingState initialSamplingState: GenerationSamplingState,
         ropePositionOffset: Int,
-        parameters: GenerateParameters,
+        parameters: GenerationParameters,
         topK: Int
     ) throws -> [DebugGenerationStepTrace] {
         var samplingState = initialSamplingState
@@ -2221,7 +2232,7 @@ public final class ModelContainer: @unchecked Sendable {
     private func preparedSamplingLogits(
         logitsBuffer: MTLBuffer,
         precision: BufferPrecision,
-        parameters: GenerateParameters,
+        parameters: GenerationParameters,
         recentTokenIDs: [Int]
     ) -> [Float] {
         let maximumBufferVocabularySize = logitsBuffer.length / precision.byteSize
@@ -2425,7 +2436,7 @@ public final class ModelContainer: @unchecked Sendable {
         firstToken: Int32,
         samplingState initialSamplingState: GenerationSamplingState,
         ropePositionOffset: Int,
-        parameters: GenerateParameters,
+        parameters: GenerationParameters,
         collectionMode: GeneratedTokenCollectionMode
     ) throws -> [Int] {
         var samplingState = initialSamplingState
@@ -2655,9 +2666,10 @@ struct ThinkingTagPolicy {
 }
 
 struct TemplateThinkingTagPolicyExtractor {
-    private static let keywordCandidates = ["think", "reason"]
+    private static let keywordCandidates = ["think", "reason", "thought"]
     private static let openTagPattern = #"<([A-Za-z][A-Za-z0-9:_-]*)>"#
     private static let closeTagPattern = #"</([A-Za-z][A-Za-z0-9:_-]*)>"#
+    private static let channelReasoningPattern = #"<\|channel\>([A-Za-z][A-Za-z0-9_-]*)\\n"#
 
     static func extract(from chatTemplateSource: String?) -> (openTag: String, closeTag: String)? {
         guard let chatTemplateSource, !chatTemplateSource.isEmpty else {
@@ -2665,6 +2677,27 @@ struct TemplateThinkingTagPolicyExtractor {
         }
 
         let nsRange = NSRange(chatTemplateSource.startIndex..<chatTemplateSource.endIndex, in: chatTemplateSource)
+        if let channelRegex = try? NSRegularExpression(pattern: channelReasoningPattern) {
+            let channelMatches = channelRegex.matches(in: chatTemplateSource, options: [], range: nsRange)
+            for match in channelMatches {
+                guard match.numberOfRanges == 2,
+                      let labelRange = Range(match.range(at: 1), in: chatTemplateSource) else {
+                    continue
+                }
+
+                let channelLabel = String(chatTemplateSource[labelRange])
+                let lowered = channelLabel.lowercased()
+                guard keywordCandidates.contains(where: lowered.contains) else {
+                    continue
+                }
+                guard chatTemplateSource.contains("<channel|>") else {
+                    continue
+                }
+
+                return ("<|channel>\(channelLabel)\n", "<channel|>")
+            }
+        }
+
         guard let openRegex = try? NSRegularExpression(pattern: openTagPattern),
               let closeRegex = try? NSRegularExpression(pattern: closeTagPattern) else {
             return nil
@@ -2857,7 +2890,7 @@ private struct GenerationSamplingState {
     }
 }
 
-private extension GenerateParameters {
+private extension GenerationParameters {
     var usesLibraryDefaults: Bool {
         temperature == 0.6
             && topP == 1.0

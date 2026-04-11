@@ -5,16 +5,16 @@ import Testing
 enum RealOutputAssertionSupport {
     static let strictCapitalPrompt = "What is the capital of Japan? Answer with exactly one word."
 
-    static func greedyParameters(maxTokens: Int = 8) -> GenerateParameters {
-        GenerateParameters(
+    static func greedyParameters(maxTokens: Int = 8) -> GenerationParameters {
+        GenerationParameters(
             maxTokens: maxTokens,
             streamChunkTokenCount: 1,
             temperature: 0
         )
     }
 
-    static func samplingParameters(maxTokens: Int = 1) -> GenerateParameters {
-        GenerateParameters(
+    static func samplingParameters(maxTokens: Int = 1) -> GenerationParameters {
+        GenerationParameters(
             maxTokens: maxTokens,
             streamChunkTokenCount: 1,
             temperature: 0.6
@@ -27,26 +27,26 @@ enum RealOutputAssertionSupport {
 
     @discardableResult
     static func assertGreedyDirectMatchesPromptState(
-        container: ModelContainer,
+        container: InferenceSession,
         prompt: ExecutablePrompt,
         label: String,
-        parameters: GenerateParameters = greedyParameters()
+        parameters: GenerationParameters = greedyParameters()
     ) throws -> (directTokenIDs: [Int], restoredTokenIDs: [Int], directText: String, restoredText: String) {
-        container.resetCaches()
+        container.resetState()
         let directTokenIDs = try container.debugGeneratedTokenIDs(
             prompt: prompt,
             parameters: parameters
         )
 
-        container.resetCaches()
-        let promptState = try container.makePromptState(prompt: prompt)
+        container.resetState()
+        let promptState = try container.makePromptSnapshot(from: prompt)
         let restoredTokenIDs = try container.debugPromptStateGeneratedTokenIDs(
             promptState: promptState,
             parameters: parameters
         )
 
-        let directText = normalized(container.decode(tokens: directTokenIDs))
-        let restoredText = normalized(container.decode(tokens: restoredTokenIDs))
+        let directText = normalized(container.decode( directTokenIDs))
+        let restoredText = normalized(container.decode( restoredTokenIDs))
 
         print("[\(label) direct token ids] \(directTokenIDs)")
         print("[\(label) restored token ids] \(restoredTokenIDs)")
@@ -78,12 +78,12 @@ enum RealOutputAssertionSupport {
     }
 
     static func assertPromptStateSamplingMatchesDirect(
-        container: ModelContainer,
+        container: InferenceSession,
         prompt: ExecutablePrompt,
         label: String,
-        parameters: GenerateParameters = samplingParameters()
+        parameters: GenerationParameters = samplingParameters()
     ) throws {
-        container.resetCaches()
+        container.resetState()
         let sampled = try container.debugPromptStateSampledFirstTokens(
             prompt: prompt,
             parameters: parameters

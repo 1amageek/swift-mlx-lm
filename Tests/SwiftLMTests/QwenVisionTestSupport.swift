@@ -200,24 +200,24 @@ enum QwenVisionTestSupport {
 #endif
     }
 
-    static func syntheticMultimodalContainer() async throws -> ModelContainer? {
+    static func syntheticMultimodalContainer() async throws -> InferenceSession? {
         try await QwenVisionSyntheticContainerCache.shared.container()
     }
 
-    static func realQwen3VLContainer() async throws -> ModelContainer? {
+    static func realQwen3VLContainer() async throws -> InferenceSession? {
         try await QwenVisionRealBundleCache.shared.container()
     }
 
     static func collectGeneration(
-        from stream: AsyncStream<Generation>
+        from stream: AsyncStream<GenerationEvent>
     ) async -> (chunks: [String], completion: CompletionInfo?) {
         var chunks: [String] = []
         var completion: CompletionInfo?
         for await generation in stream {
-            if let chunk = generation.chunk {
+            if let chunk = generation.text {
                 chunks.append(chunk)
             }
-            if let info = generation.info {
+            if let info = generation.completion {
                 completion = info
             }
         }
@@ -427,7 +427,7 @@ struct QwenVisionParityFixture: Decodable {
 private actor QwenVisionSyntheticContainerCache {
     static let shared = QwenVisionSyntheticContainerCache()
 
-    func container() async throws -> ModelContainer? {
+    func container() async throws -> InferenceSession? {
         guard let device = MTLCreateSystemDefaultDevice() else {
             return nil
         }
@@ -494,7 +494,7 @@ private actor QwenVisionSyntheticContainerCache {
         let runtime = try QwenVisionTestSupport.syntheticVisionRuntime(
             outHiddenSize: config.hiddenSize
         )
-        let container = ModelContainer(
+        let container = InferenceSession(
             inferenceModel: inferenceModel,
             tokenizer: QwenVisionTestTokenizer(),
             configuration: configuration,
@@ -507,11 +507,11 @@ private actor QwenVisionSyntheticContainerCache {
 
 private actor QwenVisionRealBundleCache {
     static let shared = QwenVisionRealBundleCache()
-    private var cachedContainer: ModelContainer?
+    private var cachedContainer: InferenceSession?
 
-    func container() async throws -> ModelContainer? {
+    func container() async throws -> InferenceSession? {
         if let cachedContainer {
-            cachedContainer.resetCaches()
+            cachedContainer.resetState()
             return cachedContainer
         }
         if let repo = QwenVisionTestSupport.optionalRealQwen35RepoID() {

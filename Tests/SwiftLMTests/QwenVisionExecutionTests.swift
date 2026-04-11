@@ -10,9 +10,9 @@ struct QwenVisionExecutionTests {
             print("[Skip] No local text bundle available for synthetic multimodal runtime tests")
             return
         }
-        container.resetCaches()
+        container.resetState()
 
-        let prepared = try await container.prepare(input: ModelInput(prompt: "Hello multimodal runtime"))
+        let prepared = try await container.prepare( ModelInput(prompt: "Hello multimodal runtime"))
         let executable = try container.makeExecutablePrompt(from: prepared)
 
         #expect(executable.visualContext == nil)
@@ -25,11 +25,10 @@ struct QwenVisionExecutionTests {
             print("[Skip] No local text bundle available for synthetic multimodal runtime tests")
             return
         }
-        container.resetCaches()
+        container.resetState()
 
         let imageData = try TestImageFixtures.makeOnePixelPNGData()
-        let prepared = try await container.prepare(
-            input: ModelInput(chat: [
+        let prepared = try await container.prepare( ModelInput(chat: [
                 .user([
                     .text("Describe"),
                     .image(InputImage(data: imageData, mimeType: "image/png")),
@@ -50,11 +49,10 @@ struct QwenVisionExecutionTests {
             print("[Skip] No local text bundle available for synthetic multimodal runtime tests")
             return
         }
-        container.resetCaches()
+        container.resetState()
 
         let videoData = try await TestVideoFixtures.makeMP4Data()
-        let prepared = try await container.prepare(
-            input: ModelInput(chat: [
+        let prepared = try await container.prepare( ModelInput(chat: [
                 .user([
                     .text("Describe"),
                     .video(InputVideo(data: videoData, mimeType: "video/mp4")),
@@ -75,18 +73,17 @@ struct QwenVisionExecutionTests {
             print("[Skip] No local text bundle available for synthetic multimodal runtime tests")
             return
         }
-        container.resetCaches()
+        container.resetState()
 
         let imageData = try TestImageFixtures.makeOnePixelPNGData()
-        let stream = try await container.generate(
-            input: ModelInput(chat: [
+        let stream = try await container.generate( ModelInput(chat: [
                 .user([
                     .text("Hello"),
                     .image(InputImage(data: imageData, mimeType: "image/png")),
                     .text("world"),
                 ])
             ]),
-            parameters: GenerateParameters(maxTokens: 2, streamChunkTokenCount: 1)
+            parameters: GenerationParameters(maxTokens: 2, streamChunkTokenCount: 1)
         )
         let result = await QwenVisionTestSupport.collectGeneration(from: stream)
 
@@ -100,11 +97,10 @@ struct QwenVisionExecutionTests {
             print("[Skip] No local text bundle available for synthetic multimodal runtime tests")
             return
         }
-        container.resetCaches()
+        container.resetState()
 
         let videoData = try await TestVideoFixtures.makeMP4Data()
-        let promptState = try await container.makePromptState(
-            input: ModelInput(chat: [
+        let promptState = try await container.makePromptSnapshot(from: ModelInput(chat: [
                 .user([
                     .text("Watch"),
                     .video(InputVideo(data: videoData, mimeType: "video/mp4")),
@@ -122,11 +118,10 @@ struct QwenVisionExecutionTests {
             print("[Skip] No local text bundle available for synthetic multimodal runtime tests")
             return
         }
-        container.resetCaches()
+        container.resetState()
 
         let imageData = try TestImageFixtures.makeOnePixelPNGData()
-        let prepared = try await container.prepare(
-            input: ModelInput(chat: [
+        let prepared = try await container.prepare( ModelInput(chat: [
                 .user([
                     .text("Reuse"),
                     .image(InputImage(data: imageData, mimeType: "image/png")),
@@ -135,17 +130,16 @@ struct QwenVisionExecutionTests {
             ])
         )
         let executable = try container.makeExecutablePrompt(from: prepared)
-        let directStream = try container.generate(
-            prompt: executable,
-            parameters: GenerateParameters(maxTokens: 2, streamChunkTokenCount: 1)
+        let directStream = try container.generate(from: executable,
+            parameters: GenerationParameters(maxTokens: 2, streamChunkTokenCount: 1)
         )
         let direct = await QwenVisionTestSupport.collectGeneration(from: directStream)
 
-        container.resetCaches()
-        let promptState = try container.makePromptState(prompt: executable)
+        container.resetState()
+        let promptState = try container.makePromptSnapshot(from: executable)
         let restoredStream = try container.generate(
             from: promptState,
-            parameters: GenerateParameters(maxTokens: 2, streamChunkTokenCount: 1)
+            parameters: GenerationParameters(maxTokens: 2, streamChunkTokenCount: 1)
         )
         let restored = await QwenVisionTestSupport.collectGeneration(from: restoredStream)
 
@@ -159,11 +153,10 @@ struct QwenVisionExecutionTests {
             print("[Skip] No local text bundle available for synthetic multimodal runtime tests")
             return
         }
-        container.resetCaches()
+        container.resetState()
 
         let imageData = try TestImageFixtures.makeOnePixelPNGData()
-        let prepared = try await container.prepare(
-            input: ModelInput(chat: [
+        let prepared = try await container.prepare( ModelInput(chat: [
                 .user([
                     .text("Reuse"),
                     .image(InputImage(data: imageData, mimeType: "image/png")),
@@ -185,11 +178,10 @@ struct QwenVisionExecutionTests {
             print("[Skip] No local text bundle available for synthetic multimodal runtime tests")
             return
         }
-        container.resetCaches()
+        container.resetState()
 
         let imageData = try TestImageFixtures.makeOnePixelPNGData()
-        let prepared = try await container.prepare(
-            input: ModelInput(chat: [
+        let prepared = try await container.prepare( ModelInput(chat: [
                 .user([
                     .text("Reuse"),
                     .image(InputImage(data: imageData, mimeType: "image/png")),
@@ -198,14 +190,14 @@ struct QwenVisionExecutionTests {
             ])
         )
         let executable = try container.makeExecutablePrompt(from: prepared)
-        let parameters = GenerateParameters(maxTokens: 1, streamChunkTokenCount: 1)
+        let parameters = GenerationParameters(maxTokens: 1, streamChunkTokenCount: 1)
 
         let direct = await QwenVisionTestSupport.collectGeneration(
-            from: try container.generate(prompt: executable, parameters: parameters)
+            from: try container.generate(from: executable, parameters: parameters)
         )
 
-        container.resetCaches()
-        let promptState = try container.makePromptState(prompt: executable)
+        container.resetState()
+        let promptState = try container.makePromptSnapshot(from: executable)
         let restored = await QwenVisionTestSupport.collectGeneration(
             from: try container.generate(from: promptState, parameters: parameters)
         )
@@ -219,11 +211,10 @@ struct QwenVisionExecutionTests {
             print("[Skip] No local text bundle available for synthetic multimodal runtime tests")
             return
         }
-        container.resetCaches()
+        container.resetState()
 
         let imageData = try TestImageFixtures.makeOnePixelPNGData()
-        let prepared = try await container.prepare(
-            input: ModelInput(chat: [
+        let prepared = try await container.prepare( ModelInput(chat: [
                 .user([
                     .text("Reuse"),
                     .image(InputImage(data: imageData, mimeType: "image/png")),
@@ -235,13 +226,12 @@ struct QwenVisionExecutionTests {
         let initial = try container.debugPrefillTopLogits(prompt: executable, topK: 5)
 
         _ = await QwenVisionTestSupport.collectGeneration(
-            from: try container.generate(
-                prompt: executable,
-                parameters: GenerateParameters(maxTokens: 1, streamChunkTokenCount: 1)
+            from: try container.generate(from: executable,
+                parameters: GenerationParameters(maxTokens: 1, streamChunkTokenCount: 1)
             )
         )
 
-        container.resetCaches()
+        container.resetState()
         let replayed = try container.debugPrefillTopLogits(prompt: executable, topK: 5)
 
         #expect(initial.map(\.tokenID) == replayed.map(\.tokenID))
@@ -253,11 +243,10 @@ struct QwenVisionExecutionTests {
             print("[Skip] No local text bundle available for synthetic multimodal runtime tests")
             return
         }
-        container.resetCaches()
+        container.resetState()
 
         let imageData = try TestImageFixtures.makeOnePixelPNGData()
-        let prepared = try await container.prepare(
-            input: ModelInput(chat: [
+        let prepared = try await container.prepare( ModelInput(chat: [
                 .user([
                     .text("Reuse"),
                     .image(InputImage(data: imageData, mimeType: "image/png")),
@@ -268,7 +257,7 @@ struct QwenVisionExecutionTests {
         let executable = try container.makeExecutablePrompt(from: prepared)
         let sampled = try container.debugPromptStateSampledFirstTokens(
             prompt: executable,
-            parameters: GenerateParameters(maxTokens: 1, streamChunkTokenCount: 1)
+            parameters: GenerationParameters(maxTokens: 1, streamChunkTokenCount: 1)
         )
 
         #expect(sampled.directRecentTokenIDs == sampled.restoredRecentTokenIDs)
@@ -283,11 +272,10 @@ struct QwenVisionExecutionTests {
             print("[Skip] No local text bundle available for synthetic multimodal runtime tests")
             return
         }
-        container.resetCaches()
+        container.resetState()
 
         let imageData = try TestImageFixtures.makeOnePixelPNGData()
-        let prepared = try await container.prepare(
-            input: ModelInput(chat: [
+        let prepared = try await container.prepare( ModelInput(chat: [
                 .user([
                     .text("Reuse"),
                     .image(InputImage(data: imageData, mimeType: "image/png")),
@@ -298,7 +286,7 @@ struct QwenVisionExecutionTests {
         let executable = try container.makeExecutablePrompt(from: prepared)
         let repeated = try container.debugRepeatedPrefillSampledFirstTokens(
             prompt: executable,
-            parameters: GenerateParameters(maxTokens: 1, streamChunkTokenCount: 1)
+            parameters: GenerationParameters(maxTokens: 1, streamChunkTokenCount: 1)
         )
         print(
             "[Qwen repeated prefill] nanCounts=(\(repeated.firstNaNCount), \(repeated.secondNaNCount)) "
@@ -319,11 +307,10 @@ struct QwenVisionExecutionTests {
             print("[Skip] No local text bundle available for synthetic multimodal runtime tests")
             return
         }
-        container.resetCaches()
+        container.resetState()
 
         let imageData = try TestImageFixtures.makeOnePixelPNGData()
-        let prepared = try await container.prepare(
-            input: ModelInput(chat: [
+        let prepared = try await container.prepare( ModelInput(chat: [
                 .user([
                     .text("Reuse"),
                     .image(InputImage(data: imageData, mimeType: "image/png")),

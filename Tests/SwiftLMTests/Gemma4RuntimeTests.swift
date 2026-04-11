@@ -89,7 +89,7 @@ struct Gemma4RuntimeTests {
             print("[Skip] No Metal device available for Gemma4 runtime tests")
             return
         }
-        let prepared = try await container.prepare(input: ModelInput(prompt: "hello gemma4"))
+        let prepared = try await container.prepare( ModelInput(prompt: "hello gemma4"))
         let executable = try container.makeExecutablePrompt(from: prepared)
 
         #expect(executable.visualContext == nil)
@@ -104,8 +104,7 @@ struct Gemma4RuntimeTests {
         }
 
         let imageData = try TestImageFixtures.makeOnePixelPNGData()
-        let prepared = try await container.prepare(
-            input: ModelInput(chat: [
+        let prepared = try await container.prepare( ModelInput(chat: [
                 .user([
                     .text("Describe"),
                     .image(InputImage(data: imageData, mimeType: "image/png")),
@@ -124,9 +123,8 @@ struct Gemma4RuntimeTests {
             print("[Skip] No Metal device available for Gemma4 runtime tests")
             return
         }
-        let stream = try await container.generate(
-            input: ModelInput(prompt: "hello gemma4"),
-            parameters: GenerateParameters(maxTokens: 2, streamChunkTokenCount: 1)
+        let stream = try await container.generate( ModelInput(prompt: "hello gemma4"),
+            parameters: GenerationParameters(maxTokens: 2, streamChunkTokenCount: 1)
         )
         let result = await QwenVisionTestSupport.collectGeneration(from: stream)
 
@@ -142,15 +140,14 @@ struct Gemma4RuntimeTests {
         }
 
         let imageData = try TestImageFixtures.makeOnePixelPNGData()
-        let stream = try await container.generate(
-            input: ModelInput(chat: [
+        let stream = try await container.generate( ModelInput(chat: [
                 .user([
                     .text("Describe"),
                     .image(InputImage(data: imageData, mimeType: "image/png")),
                     .text("briefly"),
                 ])
             ]),
-            parameters: GenerateParameters(maxTokens: 2, streamChunkTokenCount: 1)
+            parameters: GenerationParameters(maxTokens: 2, streamChunkTokenCount: 1)
         )
         let result = await QwenVisionTestSupport.collectGeneration(from: stream)
 
@@ -166,8 +163,7 @@ struct Gemma4RuntimeTests {
         }
 
         let imageData = try TestImageFixtures.makeOnePixelPNGData()
-        let prepared = try await container.prepare(
-            input: ModelInput(chat: [
+        let prepared = try await container.prepare( ModelInput(chat: [
                 .user([
                     .text("Reuse"),
                     .image(InputImage(data: imageData, mimeType: "image/png")),
@@ -178,9 +174,8 @@ struct Gemma4RuntimeTests {
         let prompt = try container.makeExecutablePrompt(from: prepared)
 
         let direct = await QwenVisionTestSupport.collectGeneration(
-            from: try container.generate(
-                prompt: prompt,
-                parameters: GenerateParameters(
+            from: try container.generate(from: prompt,
+                parameters: GenerationParameters(
                     maxTokens: 2,
                     streamChunkTokenCount: 1,
                     temperature: 0.6,
@@ -189,12 +184,12 @@ struct Gemma4RuntimeTests {
             )
         )
 
-        container.resetCaches()
-        let promptState = try container.makePromptState(prompt: prompt)
+        container.resetState()
+        let promptState = try container.makePromptSnapshot(from: prompt)
         let restored = await QwenVisionTestSupport.collectGeneration(
             from: try container.generate(
                 from: promptState,
-                parameters: GenerateParameters(
+                parameters: GenerationParameters(
                     maxTokens: 2,
                     streamChunkTokenCount: 1,
                     temperature: 0.6,
@@ -214,7 +209,7 @@ struct Gemma4RuntimeTests {
             return
         }
 
-        let prepared = try await container.prepare(input: ModelInput(prompt: "hello gemma4"))
+        let prepared = try await container.prepare( ModelInput(prompt: "hello gemma4"))
         let prompt = try container.makeExecutablePrompt(from: prepared)
         let diagnostics = try container.debugPrefillOutputHeadDiagnostics(prompt: prompt, topK: 5)
 

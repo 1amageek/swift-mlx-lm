@@ -220,7 +220,7 @@ struct RotorQuantBenchmarkTests {
             BenchmarkSupport.settleGPU()
 
             for _ in 0..<iterations {
-                m.resetCaches()
+                m.resetState()
                 var currentToken = m.prefill(tokens: promptTokens)
                 for _ in 0..<3 { currentToken = m.decodeSync(tokenID: currentToken) }
 
@@ -284,7 +284,7 @@ struct RotorQuantBenchmarkTests {
             for length in prefillLengths {
                 var results: [Double] = []
                 for _ in 0..<iterations {
-                    m.resetCaches()
+                    m.resetState()
                     let tokens = [Int32](repeating: 1, count: length)
                     let start = CFAbsoluteTimeGetCurrent()
                     _ = m.prefill(tokens: tokens)
@@ -346,7 +346,7 @@ struct RotorQuantBenchmarkTests {
             BenchmarkSupport.settleGPU()
 
             for _ in 0..<iterations {
-                m.resetCaches()
+                m.resetState()
                 var currentToken = m.prefill(tokens: promptTokens)
                 for _ in 0..<3 { currentToken = m.decodeSync(tokenID: currentToken) }
 
@@ -423,7 +423,7 @@ struct RotorQuantBenchmarkTests {
             BenchmarkSupport.settleGPU()
 
             for _ in 0..<iterations {
-                m.resetCaches()
+                m.resetState()
                 var currentToken = m.prefill(tokens: promptTokens)
                 for _ in 0..<3 { currentToken = m.decodeSync(tokenID: currentToken) }
 
@@ -482,7 +482,7 @@ struct RotorQuantBenchmarkTests {
             for length in prefillLengths {
                 var results: [Double] = []
                 for _ in 0..<iterations {
-                    m.resetCaches()
+                    m.resetState()
                     let tokens = [Int32](repeating: 1, count: length)
                     let start = CFAbsoluteTimeGetCurrent()
                     _ = m.prefill(tokens: tokens)
@@ -549,7 +549,7 @@ struct RotorQuantBenchmarkTests {
 
             var promptTraces: [(String, [Int32])] = []
             for (promptName, promptTokens) in prompts {
-                m.resetCaches()
+                m.resetState()
                 BenchmarkSupport.settleGPU()
                 let trace = BenchmarkSupport.decodeTokenTrace(
                     model: &m,
@@ -687,7 +687,7 @@ struct RotorQuantBenchmarkTests {
                 bundlePath: Self.gemma4BundlePath,
                 inferencePolicy: policies[0].1)
             var m = warmModel
-            m.resetCaches()
+            m.resetState()
             let warmTokens = [Int32](repeating: 1, count: 64)
             var tok = m.prefill(tokens: warmTokens)
             for _ in 0..<20 { tok = m.decodeSync(tokenID: tok) }
@@ -715,7 +715,7 @@ struct RotorQuantBenchmarkTests {
                 var iterResults: [Double] = []
 
                 for _ in 0..<iterations {
-                    m.resetCaches()
+                    m.resetState()
                     BenchmarkSupport.settleGPU()
 
                     // Fill KV cache via prefill

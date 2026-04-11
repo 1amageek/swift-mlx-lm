@@ -9,32 +9,32 @@ A Swift package for LLM inference on Apple Silicon. Models are loaded directly f
 ```swift
 import SwiftLM
 
-let container = try await ModelBundleLoader().load(repo: "LiquidAI/LFM2.5-1.2B-Instruct")
+let session = try await ModelBundleLoader().load(repo: "LiquidAI/LFM2.5-1.2B-Instruct")
 
-let prepared = try await container.prepare(input: ModelInput("Hello"))
-let executable = try container.makeExecutablePrompt(from: prepared)
+let prepared = try await session.prepare(ModelInput(prompt: "Hello"))
+let executable = try session.makeExecutablePrompt(from: prepared)
 
-for await generation in try container.generate(prompt: executable) {
-    if let text = generation.chunk { print(text, terminator: "") }
+for await generation in try session.generate(from: executable) {
+    if let text = generation.text { print(text, terminator: "") }
 }
 
-if container.configuration.inputCapabilities.supportsImages {
+if session.configuration.inputCapabilities.supportsImages {
     print("This bundle declares image input support.")
 }
 
-if container.configuration.executionCapabilities.supportsImagePromptPreparation {
+if session.configuration.executionCapabilities.supportsImagePromptPreparation {
     print("The current runtime can prepare Qwen-style image prompts.")
 }
 
-if container.configuration.executionCapabilities.supportsVideoPromptPreparation {
+if session.configuration.executionCapabilities.supportsVideoPromptPreparation {
     print("The current runtime can prepare Qwen-style video prompts.")
 }
 
-if let vision = container.configuration.vision {
+if let vision = session.configuration.vision {
     print("image_token_id =", vision.imageTokenID as Any)
 }
 
-if container.configuration.executionCapabilities.supportsImagePromptPreparation {
+if session.configuration.executionCapabilities.supportsImagePromptPreparation {
     let visualInput = ModelInput(chat: [
         .user([
             .text("Describe this image."),
@@ -42,20 +42,20 @@ if container.configuration.executionCapabilities.supportsImagePromptPreparation 
         ])
     ])
 
-    let prepared = try await container.prepare(input: visualInput)
-    let executable = try container.makeExecutablePrompt(from: prepared)
+    let prepared = try await session.prepare(visualInput)
+    let executable = try session.makeExecutablePrompt(from: prepared)
 
-    for await generation in try container.generate(prompt: executable) {
-        if let chunk = generation.chunk { print(chunk, terminator: "") }
+    for await generation in try session.generate(from: executable) {
+        if let chunk = generation.text { print(chunk, terminator: "") }
     }
 }
 ```
 
 ## Release Status
 
-The current branch is targeting `0.2.0`.
+The current branch is targeting `0.3.0`.
 
-Supported in the `0.2.0` line:
+Supported in the `0.3.0` line:
 
 - Apple Silicon devices with Metal
 - HuggingFace snapshot directories containing `config.json`, `tokenizer.json`, and `.safetensors`
@@ -67,7 +67,7 @@ Supported in the `0.2.0` line:
 - Qwen3-VL style image and video execution through the bundled vision encoder path
 - the currently documented model families in this README and in `docs/using-swift-lm.md`
 
-Not part of the `0.2.0` line:
+Not part of the `0.3.0` line:
 - tool calling or structured function-calling APIs
 - non-Metal backends
 - training or fine-tuning workflows
@@ -81,7 +81,7 @@ Application developers should start with [`docs/using-swift-lm.md`](docs/using-s
 - required model bundle files
 - loading from HuggingFace or a local directory
 - text and chat generation
-- `PromptState` reuse for shared prefixes
+- `PromptSnapshot` reuse for shared prefixes
 - cache reset and tokenizer helpers
 - current public API limits and troubleshooting
 
@@ -97,7 +97,7 @@ SwiftPM dependency example:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/1amageek/swift-lm.git", from: "0.2.0")
+    .package(url: "https://github.com/1amageek/swift-lm.git", from: "0.3.0")
 ]
 ```
 
@@ -106,7 +106,7 @@ dependencies: [
 The Qwen3.5+ multimodal path is exercised in four layers:
 
 - unit suites for capability decode, prompt preparation, execution layout, and vision encoding
-- component suites for `PreparedInput -> ExecutablePrompt -> generate`
+- component suites for `PreparedPrompt -> ExecutablePrompt -> generate`
 - synthetic integration suites for `load -> prepare -> generate`
 - optional local real-bundle suites for `Qwen3-VL` snapshots when they exist on the machine
 
@@ -162,8 +162,8 @@ LMIR (IR — no dependencies)
     │
     └── SwiftLM (consumer API)
         ├── ModelBundleLoader (HF download → STAF → compile)
-        ├── ModelContainer (generate, encode, decode)
-        └── ModelInput, InputMessage, InputImage, GenerateParameters
+        ├── InferenceSession (generate, encode, decode)
+        └── ModelInput, InputMessage, InputImage, GenerationParameters
 ```
 
 ## Declarative Model DSL
@@ -253,7 +253,7 @@ This is the intended mental model for contributors:
 - `LMIR` holds the normalized backend-independent graph
 - `MetalCompiler` decides how that graph turns into kernels, pipelines, buffers, and dispatch steps
 
-For Qwen3-VL style bundles, `SwiftLM` also reads the official vision markers from `config.json` and `preprocessor_config.json`. `ModelContainer.prepare(input:)` expands image and video placeholders into the token layout expected by the official Qwen processor, and `makeExecutablePrompt(from:)` / `generate(prompt:)` execute the resulting visual prompt when the loaded bundle provides a compatible Qwen vision encoder.
+For Qwen3-VL style bundles, `SwiftLM` also reads the official vision markers from `config.json` and `preprocessor_config.json`. `InferenceSession.prepare()` expands image and video placeholders into the token layout expected by the official Qwen processor, and `makeExecutablePrompt(from:)` / `generate(from:)` execute the resulting visual prompt when the loaded bundle provides a compatible Qwen vision encoder.
 
 If you want to inspect the real declarations, start with `Sources/Models/Transformer.swift` and `Sources/Models/LFM2.swift`.
 
@@ -491,6 +491,7 @@ xcodebuild test -scheme swift-lm-Package -destination 'platform=macOS' \
 ## Documentation
 
 - `docs/using-swift-lm.md` — developer integration guide
+- `docs/releases/0.3.0.md` — release notes and support boundary for `0.3.0`
 - `docs/releases/0.1.0.md` — release notes and support boundary for `0.1.0`
 - `Sources/SwiftLM/SwiftLM.docc` — DocC catalog for the `SwiftLM` module
 - `AGENTS.md` — repository architecture and contribution guidance

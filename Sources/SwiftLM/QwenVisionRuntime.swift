@@ -29,9 +29,9 @@ final class QwenVisionRuntime {
         return QwenVisionRuntime(encoder: encoder)
     }
 
-    func makeVisualContext(from prepared: PreparedInput) throws -> VisualContext {
+    func makeVisualContext(from prepared: PreparedPrompt) throws -> VisualContext {
         guard let multimodal = prepared.multimodalMetadata else {
-            throw ModelContainerError.unsupportedInputForModel(
+            throw InferenceSessionError.unsupportedInputForModel(
                 "Missing multimodal prompt metadata."
             )
         }
@@ -42,26 +42,26 @@ final class QwenVisionRuntime {
 
         let visualTokenCount = layout.layout.tokenTypeIDs.filter { $0 == 1 }.count
         guard visualTokenCount == encodedImages.visualTokenEmbeddings.count else {
-            throw ModelContainerError.multimodalInputNotSupported(
+            throw InferenceSessionError.multimodalInputNotSupported(
                 "Vision encoder output count does not match image placeholder count."
             )
         }
         for (layerIndex, features) in encodedImages.deepstackFeaturesByLayer {
             guard features.count == visualTokenCount else {
-                throw ModelContainerError.multimodalInputNotSupported(
+                throw InferenceSessionError.multimodalInputNotSupported(
                     "Deepstack feature count mismatch at visual layer \(layerIndex)."
                 )
             }
         }
         let videoTokenCount = layout.layout.tokenTypeIDs.filter { $0 == 2 }.count
         guard videoTokenCount == encodedVideos.visualTokenEmbeddings.count else {
-            throw ModelContainerError.multimodalInputNotSupported(
+            throw InferenceSessionError.multimodalInputNotSupported(
                 "Vision encoder output count does not match video placeholder count."
             )
         }
         for (layerIndex, features) in encodedVideos.deepstackFeaturesByLayer {
             guard features.count == videoTokenCount else {
-                throw ModelContainerError.multimodalInputNotSupported(
+                throw InferenceSessionError.multimodalInputNotSupported(
                     "Deepstack feature count mismatch at video layer \(layerIndex)."
                 )
             }

@@ -16,8 +16,7 @@ struct PromptStateTraceDiagnosticTests {
         }
 
         let container = try await ModelBundleLoader().load(directory: localModelDirectory)
-        let prepared = try await container.prepare(
-            input: ModelInput(prompt: RealOutputAssertionSupport.strictCapitalPrompt)
+        let prepared = try await container.prepare( ModelInput(prompt: RealOutputAssertionSupport.strictCapitalPrompt)
         )
         let prompt = try container.makeExecutablePrompt(from: prepared)
         let trace = try container.debugPromptStateGenerationTrace(
@@ -42,8 +41,7 @@ struct PromptStateTraceDiagnosticTests {
         }
 
         let container = try await ModelBundleLoader().load(directory: directory)
-        let prepared = try await container.prepare(
-            input: ModelInput(prompt: RealOutputAssertionSupport.strictCapitalPrompt)
+        let prepared = try await container.prepare( ModelInput(prompt: RealOutputAssertionSupport.strictCapitalPrompt)
         )
         let prompt = try container.makeExecutablePrompt(from: prepared)
         let trace = try container.debugPromptStateGenerationTrace(
@@ -73,28 +71,26 @@ struct PromptStateTraceDiagnosticTests {
 
         let loader = ModelBundleLoader()
         let firstContainer = try await loader.load(directory: localModelDirectory)
-        let prepared = try await firstContainer.prepare(
-            input: ModelInput(prompt: RealOutputAssertionSupport.strictCapitalPrompt)
+        let prepared = try await firstContainer.prepare( ModelInput(prompt: RealOutputAssertionSupport.strictCapitalPrompt)
         )
         let prompt = try firstContainer.makeExecutablePrompt(from: prepared)
 
-        firstContainer.resetCaches()
+        firstContainer.resetState()
         let sameContainerFirst = try firstContainer.debugGeneratedTokenIDs(
             prompt: prompt,
             parameters: RealOutputAssertionSupport.greedyParameters()
         )
-        firstContainer.resetCaches()
+        firstContainer.resetState()
         let sameContainerSecond = try firstContainer.debugGeneratedTokenIDs(
             prompt: prompt,
             parameters: RealOutputAssertionSupport.greedyParameters()
         )
 
         let secondContainer = try await loader.load(directory: localModelDirectory)
-        let secondPrepared = try await secondContainer.prepare(
-            input: ModelInput(prompt: RealOutputAssertionSupport.strictCapitalPrompt)
+        let secondPrepared = try await secondContainer.prepare( ModelInput(prompt: RealOutputAssertionSupport.strictCapitalPrompt)
         )
         let secondPrompt = try secondContainer.makeExecutablePrompt(from: secondPrepared)
-        secondContainer.resetCaches()
+        secondContainer.resetState()
         let freshContainerRun = try secondContainer.debugGeneratedTokenIDs(
             prompt: secondPrompt,
             parameters: RealOutputAssertionSupport.greedyParameters()
@@ -103,9 +99,9 @@ struct PromptStateTraceDiagnosticTests {
         print("[LFM determinism same-container first] \(sameContainerFirst)")
         print("[LFM determinism same-container second] \(sameContainerSecond)")
         print("[LFM determinism fresh-container] \(freshContainerRun)")
-        print("[LFM determinism same-container first text] \(firstContainer.decode(tokens: sameContainerFirst))")
-        print("[LFM determinism same-container second text] \(firstContainer.decode(tokens: sameContainerSecond))")
-        print("[LFM determinism fresh-container text] \(secondContainer.decode(tokens: freshContainerRun))")
+        print("[LFM determinism same-container first text] \(firstContainer.decode( sameContainerFirst))")
+        print("[LFM determinism same-container second text] \(firstContainer.decode( sameContainerSecond))")
+        print("[LFM determinism fresh-container text] \(secondContainer.decode( freshContainerRun))")
     }
 
     private func printBoundary(_ boundary: DebugGenerationBoundaryState, label: String) {

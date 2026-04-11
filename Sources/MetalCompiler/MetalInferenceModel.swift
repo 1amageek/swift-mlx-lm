@@ -543,7 +543,7 @@ public struct MetalInferenceModel: @unchecked Sendable {
         guard tokens.count <= prefillPlan.maximumSequenceLength else {
             throw MetalCompilerError.deviceSetupFailed("Debug prefill token count exceeds maximum sequence length")
         }
-        resetCaches()
+        resetState()
         if let prefillPerLayerInputs {
             try writePrefillPerLayerInputs(prefillPerLayerInputs)
         }
@@ -565,7 +565,7 @@ public struct MetalInferenceModel: @unchecked Sendable {
             throw MetalCompilerError.deviceSetupFailed("Debug prefill token count exceeds maximum sequence length")
         }
 
-        resetCaches()
+        resetState()
         return try prefillExecutor.captureLastTokenFinalHidden(
             prefillPlan: prefillPlan,
             submission: &submission,
@@ -583,7 +583,7 @@ public struct MetalInferenceModel: @unchecked Sendable {
         guard tokens.count <= prefillPlan.maximumSequenceLength else {
             throw MetalCompilerError.deviceSetupFailed("Debug prefill token count exceeds maximum sequence length")
         }
-        resetCaches()
+        resetState()
         return try prefillExecutor.captureLastTokenResidualSnapshots(
             prefillPlan: prefillPlan,
             submission: &submission,
@@ -618,7 +618,7 @@ public struct MetalInferenceModel: @unchecked Sendable {
             hiddenOverridesByTokenIndex[index] = hiddenState
         }
 
-        resetCaches()
+        resetState()
         if let prefillPerLayerInputs {
             try writePrefillPerLayerInputs(prefillPerLayerInputs)
         }
@@ -656,7 +656,7 @@ public struct MetalInferenceModel: @unchecked Sendable {
         for (index, hiddenState) in hiddenStates.enumerated() {
             hiddenOverridesByTokenIndex[index] = hiddenState
         }
-        resetCaches()
+        resetState()
         if let prefillPerLayerInputs {
             try writePrefillPerLayerInputs(prefillPerLayerInputs)
         }
@@ -688,7 +688,7 @@ public struct MetalInferenceModel: @unchecked Sendable {
         guard rowStride > 0 else {
             throw MetalCompilerError.deviceSetupFailed("Debug scratch row stride must be positive")
         }
-        resetCaches()
+        resetState()
         if let prefillPerLayerInputs {
             try writePrefillPerLayerInputs(prefillPerLayerInputs)
         }
@@ -736,7 +736,7 @@ public struct MetalInferenceModel: @unchecked Sendable {
             hiddenOverridesByTokenIndex[index] = hiddenState
         }
 
-        resetCaches()
+        resetState()
         if let prefillPerLayerInputs {
             try writePrefillPerLayerInputs(prefillPerLayerInputs)
         }
@@ -786,7 +786,7 @@ public struct MetalInferenceModel: @unchecked Sendable {
             throw MetalCompilerError.deviceSetupFailed("Cannot allocate debug scratch staging buffer")
         }
 
-        resetCaches()
+        resetState()
         Self.populatePrefillInputs(
             prefillPlan: prefillPlan,
             position: position,
@@ -864,7 +864,7 @@ public struct MetalInferenceModel: @unchecked Sendable {
             throw MetalCompilerError.deviceSetupFailed("Cannot allocate debug staging buffer")
         }
 
-        resetCaches()
+        resetState()
         Self.populatePrefillInputs(
             prefillPlan: prefillPlan,
             position: position,
@@ -944,7 +944,7 @@ public struct MetalInferenceModel: @unchecked Sendable {
             count: stagingLength
         )
 
-        resetCaches()
+        resetState()
         Self.populatePrefillInputs(
             prefillPlan: prefillPlan,
             position: position,
@@ -1030,7 +1030,7 @@ public struct MetalInferenceModel: @unchecked Sendable {
             throw MetalCompilerError.deviceSetupFailed("Cannot allocate split-pass debug staging buffer")
         }
 
-        resetCaches()
+        resetState()
         Self.populatePrefillInputs(
             prefillPlan: prefillPlan,
             position: position,
@@ -1129,7 +1129,7 @@ public struct MetalInferenceModel: @unchecked Sendable {
             buffers: bindingTable.ownedResidencyBuffers
         )
 
-        resetCaches()
+        resetState()
         Self.populatePrefillInputs(
             prefillPlan: prefillPlan,
             position: position,
@@ -1311,7 +1311,7 @@ public struct MetalInferenceModel: @unchecked Sendable {
         }
 
         var replaySubmission = try submission.makeReplayContext()
-        resetCaches(using: &replaySubmission)
+        resetState(using: &replaySubmission)
         if let prefillPerLayerInputs {
             try writePrefillPerLayerInputs(prefillPerLayerInputs)
         }
@@ -1374,7 +1374,7 @@ public struct MetalInferenceModel: @unchecked Sendable {
         let resolvedStepVisibilityOptions = stepVisibilityOptions ?? visibilityOptions
         let resolvedProbeVisibilityOptions = probeVisibilityOptions ?? visibilityOptions
 
-        resetCaches(using: &probeSubmission)
+        resetState(using: &probeSubmission)
         if let prefillPerLayerInputs {
             try writePrefillPerLayerInputs(prefillPerLayerInputs)
         }
@@ -1562,7 +1562,7 @@ public struct MetalInferenceModel: @unchecked Sendable {
             stagingBuffers[probe.label] = (stagingBuffer, probe.precision, probe.count)
         }
 
-        resetCaches()
+        resetState()
         _ = prefill(tokens: promptTokens)
 
         let buffers = decodePlan.buffers
@@ -1670,8 +1670,8 @@ public struct MetalInferenceModel: @unchecked Sendable {
 
     // MARK: - Lifecycle
 
-    public mutating func makePromptState(firstToken: Int32) throws -> MetalPromptState {
-        try promptStateStore.makePromptState(
+    public mutating func makePromptSnapshot(firstToken: Int32) throws -> MetalPromptState {
+        try promptStateStore.makePromptSnapshot(
             plan: decodePlan,
             submission: &submission,
             position: position,
@@ -1684,13 +1684,13 @@ public struct MetalInferenceModel: @unchecked Sendable {
         position = promptState.position
     }
 
-    public mutating func resetCaches() {
+    public mutating func resetState() {
         var sharedSubmission = submission
-        resetCaches(using: &sharedSubmission)
+        resetState(using: &sharedSubmission)
         submission = sharedSubmission
     }
 
-    private mutating func resetCaches(using submission: inout MetalSubmissionContext) {
+    private mutating func resetState(using submission: inout MetalSubmissionContext) {
         position = 0
         submission.resetReuseState()
         do {

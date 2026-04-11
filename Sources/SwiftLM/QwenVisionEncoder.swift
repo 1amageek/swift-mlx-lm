@@ -70,11 +70,11 @@ final class QwenVisionEncoder {
         self.hiddenAct = configuration.hiddenAct ?? "gelu"
     }
 
-    func encode(images: [PreparedInput.Multimodal.Image]) throws -> QwenVisionEncodedOutputs {
+    func encode(images: [PreparedPrompt.Multimodal.Image]) throws -> QwenVisionEncodedOutputs {
         try encode(samples: images.map(VisionSample.init))
     }
 
-    func encode(videos: [PreparedInput.Multimodal.Video]) throws -> QwenVisionEncodedOutputs {
+    func encode(videos: [PreparedPrompt.Multimodal.Video]) throws -> QwenVisionEncodedOutputs {
         try encode(samples: videos.map(VisionSample.init))
     }
 
@@ -138,7 +138,7 @@ final class QwenVisionEncoder {
         )
     }
 
-    private func patchEmbed(images: [PreparedInput.Multimodal.Image]) throws -> [Float] {
+    private func patchEmbed(images: [PreparedPrompt.Multimodal.Image]) throws -> [Float] {
         try patchEmbed(samples: images.map(VisionSample.init))
     }
 
@@ -691,14 +691,14 @@ private struct VisionSample {
     let pixelValuesShape: [Int]
     let pixelValues: [Float]
 
-    init(_ image: PreparedInput.Multimodal.Image) {
+    init(_ image: PreparedPrompt.Multimodal.Image) {
         self.gridTHW = image.gridTHW
         self.placeholderTokenCount = image.placeholderTokenCount
         self.pixelValuesShape = image.pixelValuesShape
         self.pixelValues = image.pixelValues
     }
 
-    init(_ video: PreparedInput.Multimodal.Video) {
+    init(_ video: PreparedPrompt.Multimodal.Video) {
         self.gridTHW = video.gridTHW
         self.placeholderTokenCount = video.placeholderTokenCount
         self.pixelValuesShape = video.pixelValuesShape

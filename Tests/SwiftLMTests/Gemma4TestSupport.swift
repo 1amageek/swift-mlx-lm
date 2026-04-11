@@ -8,11 +8,11 @@ import Tokenizers
 @testable import ModelDeclarations
 
 enum Gemma4TestSupport {
-    static func syntheticGemma4Container() async throws -> ModelContainer? {
+    static func syntheticGemma4Container() async throws -> InferenceSession? {
         try await Gemma4SyntheticContainerCache.shared.container()
     }
 
-    static func realGemma4Container() async throws -> ModelContainer? {
+    static func realGemma4Container() async throws -> InferenceSession? {
         try await Gemma4RealBundleCache.shared.container()
     }
 
@@ -369,7 +369,7 @@ enum Gemma4TestSupport {
 private actor Gemma4SyntheticContainerCache {
     static let shared = Gemma4SyntheticContainerCache()
 
-    func container() async throws -> ModelContainer? {
+    func container() async throws -> InferenceSession? {
         guard let device = MTLCreateSystemDefaultDevice() else {
             return nil
         }
@@ -402,7 +402,7 @@ private actor Gemma4SyntheticContainerCache {
         compiledModel = compiledModel.withPrefillPlan(prefillPlan)
         let inferenceModel = try MetalInferenceModel(plan: compiledModel, device: device)
         let hiddenSize = config.hiddenSize
-        let container = ModelContainer(
+        let container = InferenceSession(
             inferenceModel: inferenceModel,
             tokenizer: Gemma4TestTokenizer(),
             configuration: Gemma4TestSupport.modelConfiguration(hiddenSize: hiddenSize),
@@ -415,11 +415,11 @@ private actor Gemma4SyntheticContainerCache {
 
 private actor Gemma4RealBundleCache {
     static let shared = Gemma4RealBundleCache()
-    private var cachedContainer: ModelContainer?
+    private var cachedContainer: InferenceSession?
 
-    func container() async throws -> ModelContainer? {
+    func container() async throws -> InferenceSession? {
         if let cachedContainer {
-            cachedContainer.resetCaches()
+            cachedContainer.resetState()
             return cachedContainer
         }
         if let repo = Gemma4TestSupport.optionalRealGemma4RepoID() {

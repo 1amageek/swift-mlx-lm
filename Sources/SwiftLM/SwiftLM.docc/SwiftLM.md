@@ -9,11 +9,11 @@ Use `SwiftLM` when you want to load a HuggingFace model bundle, compile it for M
 The public entry points are:
 
 - ``ModelBundleLoader`` to load and compile a model
-- ``ModelContainer`` to prepare prompts and stream generations
+- ``InferenceSession`` to prepare prompts and stream generations
 - ``ModelInput`` and ``InputMessage`` for text, chat, and Qwen-style multimodal prompt preparation
-- ``PreparedInput`` and ``ExecutablePrompt`` for the explicit prepare/execute boundary
-- ``GenerateParameters`` to control decoding behavior
-- ``PromptState`` to reuse prompt prefixes efficiently
+- ``PreparedPrompt`` and ``ExecutablePrompt`` for the explicit prepare/execute boundary
+- ``GenerationParameters`` to control decoding behavior
+- ``PromptSnapshot`` to reuse prompt prefixes efficiently
 
 ## Topics
 
@@ -23,23 +23,23 @@ The public entry points are:
 - <doc:ChatAndPromptReuse>
 - <doc:Troubleshooting>
 
-### Loading and Generation
+### Loading and GenerationEvent
 
 - ``ModelBundleLoader``
-- ``ModelContainer``
+- ``InferenceSession``
 - ``ModelInput``
-- ``PreparedInput``
+- ``PreparedPrompt``
 - ``ExecutablePrompt``
 - ``InputMessage``
 - ``InputImage``
 - ``InputVideo``
-- ``GenerateParameters``
-- ``Generation``
+- ``GenerationParameters``
+- ``GenerationEvent``
 - ``CompletionInfo``
-- ``PromptState``
+- ``PromptSnapshot``
 
 ### Supporting Types
 
 - ``ModelConfiguration``
 - ``ModelBundleLoaderError``
-- ``ModelContainerError``
+- ``InferenceSessionError``

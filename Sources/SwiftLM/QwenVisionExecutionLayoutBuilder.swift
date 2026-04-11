@@ -1,7 +1,7 @@
 import Foundation
 
 struct QwenVisionExecutionLayoutBuilder {
-    func makeLayout(for prepared: PreparedInput) throws -> QwenVisionExecutionLayout {
+    func makeLayout(for prepared: PreparedPrompt) throws -> QwenVisionExecutionLayout {
         guard let multimodal = prepared.multimodalMetadata else {
             return QwenVisionExecutionLayout(
                 layout: PromptLayout(
@@ -17,7 +17,7 @@ struct QwenVisionExecutionLayoutBuilder {
 
         let mmTokenTypeIDs = multimodal.mmTokenTypeIDs
         guard mmTokenTypeIDs.count == prepared.tokenIDs.count else {
-            throw ModelContainerError.multimodalInputNotSupported(
+            throw InferenceSessionError.multimodalInputNotSupported(
                 "Multimodal token type IDs must align with the tokenized prompt."
             )
         }
@@ -59,12 +59,12 @@ struct QwenVisionExecutionLayoutBuilder {
         var expandedPlaceholderCounts: [Int] = []
         for (grid, placeholderCount) in zip(videoGridTHW, videoPlaceholderCounts) {
             guard grid.count == 3, grid[0] > 0 else {
-                throw ModelContainerError.multimodalInputNotSupported(
+                throw InferenceSessionError.multimodalInputNotSupported(
                     "Video grid metadata is invalid for Qwen multimodal execution."
                 )
             }
             guard placeholderCount % grid[0] == 0 else {
-                throw ModelContainerError.multimodalInputNotSupported(
+                throw InferenceSessionError.multimodalInputNotSupported(
                     "Video placeholder count does not divide evenly across temporal frames."
                 )
             }
@@ -108,14 +108,14 @@ struct QwenVisionExecutionLayoutBuilder {
                 currentPosition += run.length
             case 1:
                 guard nextImageIndex < imageGridTHW.count else {
-                    throw ModelContainerError.multimodalInputNotSupported(
+                    throw InferenceSessionError.multimodalInputNotSupported(
                         "Multimodal layout is missing image grid metadata."
                     )
                 }
                 let grid = imageGridTHW[nextImageIndex]
                 let expectedCount = imagePlaceholderCounts[nextImageIndex]
                 guard run.length == expectedCount else {
-                    throw ModelContainerError.multimodalInputNotSupported(
+                    throw InferenceSessionError.multimodalInputNotSupported(
                         "Image placeholder count does not match the Qwen processor grid."
                     )
                 }
@@ -135,14 +135,14 @@ struct QwenVisionExecutionLayoutBuilder {
                 nextImageIndex += 1
             case 2:
                 guard nextVideoIndex < videoGridTHW.count else {
-                    throw ModelContainerError.multimodalInputNotSupported(
+                    throw InferenceSessionError.multimodalInputNotSupported(
                         "Multimodal layout is missing video grid metadata."
                     )
                 }
                 let grid = videoGridTHW[nextVideoIndex]
                 let expectedCount = videoPlaceholderCounts[nextVideoIndex]
                 guard run.length == expectedCount else {
-                    throw ModelContainerError.multimodalInputNotSupported(
+                    throw InferenceSessionError.multimodalInputNotSupported(
                         "Video placeholder count does not match the Qwen processor grid."
                     )
                 }
@@ -161,14 +161,14 @@ struct QwenVisionExecutionLayoutBuilder {
                 currentPosition += max(grid[1], grid[2]) / spatialMergeSize
                 nextVideoIndex += 1
             default:
-                throw ModelContainerError.multimodalInputNotSupported(
+                throw InferenceSessionError.multimodalInputNotSupported(
                     "Unsupported multimodal token type ID: \(run.modality)"
                 )
             }
         }
 
         guard temporal.count == mmTokenTypeIDs.count else {
-            throw ModelContainerError.multimodalInputNotSupported(
+            throw InferenceSessionError.multimodalInputNotSupported(
                 "Failed to build Qwen multimodal RoPE indices."
             )
         }

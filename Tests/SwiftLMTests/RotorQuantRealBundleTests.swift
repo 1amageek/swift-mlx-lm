@@ -20,19 +20,17 @@ private enum RotorQuantRealBundleTestSupport {
             inferencePolicy: inferencePolicy
         )
 
-        container.resetCaches()
-        let prepared = try await container.prepare(
-            input: ModelInput(prompt: promptText)
+        container.resetState()
+        let prepared = try await container.prepare( ModelInput(prompt: promptText)
         )
         let prompt = try container.makeExecutablePrompt(from: prepared)
-        let promptState = try container.makePromptState(prompt: prompt)
+        let promptState = try container.makePromptSnapshot(from: prompt)
         let firstToken = Int(promptState.metalState.firstToken)
         let rawDecoded = container.tokenizer.decode(tokens: [firstToken], skipSpecialTokens: false)
         print("[Gemma4 \(label) prompt-state first token] \(firstToken) -> \(String(reflecting: rawDecoded))")
 
-        let stream = try container.generate(
-            prompt: prompt,
-            parameters: GenerateParameters(
+        let stream = try container.generate(from: prompt,
+            parameters: GenerationParameters(
                 maxTokens: 1,
                 streamChunkTokenCount: 1,
                 temperature: 0
@@ -41,7 +39,7 @@ private enum RotorQuantRealBundleTestSupport {
 
         var firstChunk = ""
         for await generation in stream {
-            if let chunk = generation.chunk, !chunk.isEmpty {
+            if let chunk = generation.text, !chunk.isEmpty {
                 firstChunk = chunk
                 break
             }

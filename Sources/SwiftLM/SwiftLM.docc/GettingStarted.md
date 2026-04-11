@@ -11,7 +11,7 @@
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/1amageek/swift-lm.git", from: "0.2.0")
+    .package(url: "https://github.com/1amageek/swift-lm.git", from: "0.3.0")
 ],
 targets: [
     .target(
@@ -51,13 +51,13 @@ let container = try await ModelBundleLoader().load(directory: directory)
 
 ```swift
 let input = try await container.prepare(
-    input: ModelInput(prompt: "Write a haiku about Metal shaders.")
+    ModelInput(prompt: "Write a haiku about Metal shaders.")
 )
 let executable = try container.makeExecutablePrompt(from: input)
 
 let stream = try container.generate(
-    prompt: executable,
-    parameters: GenerateParameters(
+    from: executable,
+    parameters: GenerationParameters(
         maxTokens: 128,
         streamChunkTokenCount: 8,
         temperature: 0.6,
@@ -66,16 +66,16 @@ let stream = try container.generate(
 )
 
 for await event in stream {
-    if let chunk = event.chunk {
+    if let chunk = event.text {
         print(chunk, terminator: "")
     }
-    if let info = event.info {
+    if let info = event.completion {
         print("\nGenerated \(info.tokenCount) tokens in \(info.totalTime)s")
     }
 }
 ```
 
-`ModelContainer/generate(prompt:parameters:)` returns an `AsyncStream` of ``Generation`` values. `ModelContainer/generate(input:parameters:)` is the async convenience API that prepares and executes in one step. The public generation entry points throw when the prompt cannot be executed.
+`InferenceSession/generate(from:parameters:)` returns an `AsyncStream` of ``GenerationEvent`` values. `InferenceSession/generate(_:parameters:)` is the async convenience API that prepares and executes in one step. The public generation entry points throw when the prompt cannot be executed.
 
 `ModelInput` is the primary prompt type. It now supports Qwen3-VL style image-bearing and video-bearing chat prompts during preparation and execution when the loaded bundle includes compatible vision weights.
 

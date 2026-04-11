@@ -1,7 +1,7 @@
 import Testing
 @testable import SwiftLM
 
-@Suite("Generation Visibility State", .serialized)
+@Suite("GenerationEvent Visibility State", .serialized)
 struct GenerationVisibilityStateTests {
     @Test("reasoning tags are suppressed across split fragments")
     func suppressesThinkingSpan() {

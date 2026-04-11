@@ -26,11 +26,11 @@ struct Gemma4BenchmarkTests {
 
         let warmupTokens: [Int32] = [1, 1, 6]
         _ = inferenceModel.prefill(tokens: warmupTokens)
-        inferenceModel.resetCaches()
+        inferenceModel.resetState()
 
         let lengths = [16, 32, 64]
         for length in lengths {
-            inferenceModel.resetCaches()
+            inferenceModel.resetState()
             let tokens = [Int32](repeating: 1, count: length)
 
             let start = CFAbsoluteTimeGetCurrent()
@@ -287,7 +287,7 @@ struct Gemma4BenchmarkTests {
         print("  us/step (encode): \(String(format: "%.1f", breakdown.encodeSubmitMicroseconds / Double(steps.count)))")
 
         // Per-decode GPU time using decodeSyncTimed (Metal 4 reusable command buffer)
-        inferenceModel.resetCaches()
+        inferenceModel.resetState()
         let promptTokens: [Int32] = [1, 1, 6, 6423, 708]
         var tok = inferenceModel.prefill(tokens: promptTokens)
         for _ in 0..<3 { tok = inferenceModel.decodeSync(tokenID: tok) }

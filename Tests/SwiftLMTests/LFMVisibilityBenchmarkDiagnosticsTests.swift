@@ -17,21 +17,21 @@ struct LFMVisibilityBenchmarkDiagnosticsTests {
 
         let container = try await ModelBundleLoader().load(directory: localModelDirectory)
         let prompt = ExecutablePrompt(tokenIDs: [1, 1, 6, 6423, 708])
-        let parameters = GenerateParameters(maxTokens: 50, streamChunkTokenCount: 8, temperature: 0)
+        let parameters = GenerationParameters(maxTokens: 50, streamChunkTokenCount: 8, temperature: 0)
 
-        container.resetCaches()
+        container.resetState()
         let visibleTokenIDs = try container.debugGeneratedTokenIDs(
             prompt: prompt,
             parameters: parameters
         )
 
-        container.resetCaches()
+        container.resetState()
         let rawTokenIDs = try container.debugRawGeneratedTokenIDs(
             prompt: prompt,
             parameters: parameters
         )
 
-        let visibleText = container.decode(tokens: visibleTokenIDs)
+        let visibleText = container.decode( visibleTokenIDs)
         let rawText = container.tokenizer.decode(tokens: rawTokenIDs, skipSpecialTokens: false)
         let expansion = Double(rawTokenIDs.count) / Double(max(visibleTokenIDs.count, 1))
 
@@ -61,23 +61,23 @@ struct LFMVisibilityBenchmarkDiagnosticsTests {
         }
 
         let container = try await ModelBundleLoader().load(directory: localModelDirectory)
-        let prepared = try await container.prepare(input: ModelInput(prompt: "Hello"))
+        let prepared = try await container.prepare( ModelInput(prompt: "Hello"))
         let prompt = try container.makeExecutablePrompt(from: prepared)
-        let parameters = GenerateParameters(maxTokens: 4, streamChunkTokenCount: 1, temperature: 0)
+        let parameters = GenerationParameters(maxTokens: 4, streamChunkTokenCount: 1, temperature: 0)
 
-        container.resetCaches()
+        container.resetState()
         let visibleTokenIDs = try container.debugGeneratedTokenIDs(
             prompt: prompt,
             parameters: parameters
         )
 
-        container.resetCaches()
+        container.resetState()
         let rawTokenIDs = try container.debugRawGeneratedTokenIDs(
             prompt: prompt,
-            parameters: GenerateParameters(maxTokens: 1024, streamChunkTokenCount: 1, temperature: 0)
+            parameters: GenerationParameters(maxTokens: 1024, streamChunkTokenCount: 1, temperature: 0)
         )
 
-        let visibleText = container.decode(tokens: visibleTokenIDs)
+        let visibleText = container.decode( visibleTokenIDs)
         let rawText = container.tokenizer.decode(tokens: rawTokenIDs, skipSpecialTokens: false)
         let expansion = Double(rawTokenIDs.count) / Double(max(visibleTokenIDs.count, 1))
 
@@ -106,32 +106,32 @@ struct LFMVisibilityBenchmarkDiagnosticsTests {
         }
 
         let container = try await ModelBundleLoader().load(directory: localModelDirectory)
-        let parameters = GenerateParameters(
+        let parameters = GenerationParameters(
             maxTokens: 64,
             streamChunkTokenCount: 1,
             temperature: 0,
-            thinking: .visible
+            reasoning: .inline
         )
-        let prepared = try await container.prepare(input: ModelInput(
+        let prepared = try await container.prepare( ModelInput(
             prompt: "Hello",
-            promptOptions: PromptPreparationOptions(thinkingEnabled: true)
+            promptOptions: PromptPreparationOptions(isThinkingEnabled: true)
         ))
         let prompt = try container.makeExecutablePrompt(from: prepared)
 
-        container.resetCaches()
+        container.resetState()
         let visibleTokenIDs = try container.debugGeneratedTokenIDs(
             prompt: prompt,
             parameters: parameters
         )
 
-        container.resetCaches()
+        container.resetState()
         let rawTokenIDs = try container.debugRawGeneratedTokenIDs(
             prompt: prompt,
             parameters: parameters
         )
 
-        container.resetCaches()
-        let stream = try container.generate(prompt: prompt, parameters: parameters)
+        container.resetState()
+        let stream = try container.generate(from: prompt, parameters: parameters)
         let streamed = await QwenVisionTestSupport.collectGeneration(from: stream)
 
         let visibleText = container.tokenizer.decode(tokens: visibleTokenIDs, skipSpecialTokens: false)
@@ -162,30 +162,30 @@ struct LFMVisibilityBenchmarkDiagnosticsTests {
         }
 
         let container = try await ModelBundleLoader().load(directory: localModelDirectory)
-        let parameters = GenerateParameters(
+        let parameters = GenerationParameters(
             maxTokens: 64,
             streamChunkTokenCount: 1,
             temperature: 0,
-            thinking: .separate
+            reasoning: .separate
         )
-        let prepared = try await container.prepare(input: ModelInput(
+        let prepared = try await container.prepare( ModelInput(
             prompt: "Hello",
-            promptOptions: PromptPreparationOptions(thinkingEnabled: true)
+            promptOptions: PromptPreparationOptions(isThinkingEnabled: true)
         ))
         let prompt = try container.makeExecutablePrompt(from: prepared)
 
-        container.resetCaches()
-        let stream = try container.generate(prompt: prompt, parameters: parameters)
+        container.resetState()
+        let stream = try container.generate(from: prompt, parameters: parameters)
 
         var answer = ""
         var reasoning = ""
         for await generation in stream {
             switch generation {
-            case .chunk(let chunk):
+            case .text(let chunk):
                 answer += chunk
-            case .reasoningChunk(let chunk):
+            case .reasoning(let chunk):
                 reasoning += chunk
-            case .info:
+            case .completed:
                 break
             }
         }

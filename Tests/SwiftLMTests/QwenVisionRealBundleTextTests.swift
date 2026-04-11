@@ -12,9 +12,8 @@ struct QwenVisionRealBundleTextTests {
         }
         let container = try await ModelBundleLoader().load(directory: directory)
 
-        container.resetCaches()
-        let prepared = try await container.prepare(
-            input: ModelInput(prompt: RealOutputAssertionSupport.strictCapitalPrompt)
+        container.resetState()
+        let prepared = try await container.prepare( ModelInput(prompt: RealOutputAssertionSupport.strictCapitalPrompt)
         )
         let prompt = try container.makeExecutablePrompt(from: prepared)
         let comparison = try RealOutputAssertionSupport.assertGreedyDirectMatchesPromptState(
@@ -38,36 +37,36 @@ struct QwenVisionRealBundleTextTests {
         }
         let container = try await ModelBundleLoader().load(directory: directory)
 
-        let parameters = GenerateParameters(
+        let parameters = GenerationParameters(
             maxTokens: 64,
             streamChunkTokenCount: 1,
             temperature: 0,
-            thinking: .visible
+            reasoning: .inline
         )
-        let prepared = try await container.prepare(input: ModelInput(
+        let prepared = try await container.prepare( ModelInput(
             chat: [
                 .user([.text("Hello")])
             ],
-            promptOptions: PromptPreparationOptions(thinkingEnabled: true)
+            promptOptions: PromptPreparationOptions(isThinkingEnabled: true)
         ))
         print("[Qwen3.5 thinking rendered text prefix]")
         print(String(prepared.renderedText.prefix(400)))
         let prompt = try container.makeExecutablePrompt(from: prepared)
 
-        container.resetCaches()
+        container.resetState()
         let visibleTokenIDs = try container.debugGeneratedTokenIDs(
             prompt: prompt,
             parameters: parameters
         )
 
-        container.resetCaches()
+        container.resetState()
         let rawTokenIDs = try container.debugRawGeneratedTokenIDs(
             prompt: prompt,
             parameters: parameters
         )
 
-        container.resetCaches()
-        let stream = try container.generate(prompt: prompt, parameters: parameters)
+        container.resetState()
+        let stream = try container.generate(from: prompt, parameters: parameters)
         let streamed = await QwenVisionTestSupport.collectGeneration(from: stream)
 
         let visibleText = container.tokenizer.decode(tokens: visibleTokenIDs, skipSpecialTokens: false)

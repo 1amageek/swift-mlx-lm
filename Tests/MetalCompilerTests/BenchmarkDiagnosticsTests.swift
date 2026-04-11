@@ -696,7 +696,7 @@ struct BenchmarkDiagnosticsTests {
         let (model, _) = try BenchmarkSupport.setupOrSkip(optimizer: optimizer)
         var inference = model
         defer {
-            inference.resetCaches()
+            inference.resetState()
             BenchmarkSupport.settleGPU()
         }
 
@@ -745,7 +745,7 @@ struct BenchmarkDiagnosticsTests {
         )
         var inference = model
         defer {
-            inference.resetCaches()
+            inference.resetState()
             BenchmarkSupport.settleGPU()
         }
 

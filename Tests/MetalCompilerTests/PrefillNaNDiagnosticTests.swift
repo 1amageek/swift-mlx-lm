@@ -364,7 +364,7 @@ struct PrefillNaNDiagnosticTests {
     }
 }
 
-// MARK: - BF16 Weight Generation
+// MARK: - BF16 Weight GenerationEvent
 
 /// Create a safetensors file with BF16 weights matching Transformer (llama-family) naming.
 private func createBF16Weights(

@@ -9,7 +9,7 @@ struct QwenVisionImagePreprocessor {
         self.configuration = configuration
     }
 
-    func prepare(_ image: InputImage) throws -> PreparedInput.Multimodal.Image {
+    func prepare(_ image: InputImage) throws -> PreparedPrompt.Multimodal.Image {
         let decodedImage = try decodeCGImage(image)
         let patchSize = configuration.patchSize ?? 16
         let temporalPatchSize = configuration.temporalPatchSize ?? 2
@@ -43,7 +43,7 @@ struct QwenVisionImagePreprocessor {
         )
         let placeholderTokenCount = (gridH * gridW) / (mergeSize * mergeSize)
 
-        return PreparedInput.Multimodal.Image(
+        return PreparedPrompt.Multimodal.Image(
             gridTHW: [1, gridH, gridW],
             placeholderTokenCount: placeholderTokenCount,
             pixelValuesShape: [
@@ -82,7 +82,7 @@ struct QwenVisionImagePreprocessor {
 
         guard let source,
               let cgImage = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
-            throw ModelContainerError.unsupportedInputForModel(
+            throw InferenceSessionError.unsupportedInputForModel(
                 "Could not decode image data for Qwen vision preprocessing."
             )
         }
@@ -110,7 +110,7 @@ struct QwenVisionImagePreprocessor {
             space: colorSpace,
             bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue | CGBitmapInfo.byteOrder32Big.rawValue
         ) else {
-            throw ModelContainerError.unsupportedInputForModel(
+            throw InferenceSessionError.unsupportedInputForModel(
                 "Could not create image resize context for Qwen vision preprocessing."
             )
         }

@@ -2,7 +2,7 @@ import Metal
 
 struct MetalPromptStateStore: Sendable {
 
-    func makePromptState(
+    func makePromptSnapshot(
         plan: MetalDispatchPlan,
         submission: inout MetalSubmissionContext,
         position: Int,

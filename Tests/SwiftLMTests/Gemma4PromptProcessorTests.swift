@@ -12,8 +12,7 @@ struct Gemma4PromptProcessorTests {
         }
 
         let imageData = try TestImageFixtures.makeOnePixelPNGData()
-        let prepared = try await container.prepare(
-            input: ModelInput(chat: [
+        let prepared = try await container.prepare( ModelInput(chat: [
                 .user([
                     .text("Describe"),
                     .image(InputImage(data: imageData, mimeType: "image/png")),

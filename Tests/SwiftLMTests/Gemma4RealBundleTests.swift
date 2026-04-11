@@ -14,9 +14,8 @@ struct Gemma4RealBundleTests {
             return
         }
 
-        container.resetCaches()
-        let prepared = try await container.prepare(
-            input: ModelInput(prompt: RealOutputAssertionSupport.strictCapitalPrompt)
+        container.resetState()
+        let prepared = try await container.prepare( ModelInput(prompt: RealOutputAssertionSupport.strictCapitalPrompt)
         )
         print("[Gemma4 rendered text]")
         print(prepared.renderedText)
@@ -175,10 +174,9 @@ struct Gemma4RealBundleTests {
             return
         }
 
-        container.resetCaches()
+        container.resetState()
         let imageData = try TestImageFixtures.makeOnePixelPNGData()
-        let prepared = try await container.prepare(
-            input: ModelInput(chat: [
+        let prepared = try await container.prepare( ModelInput(chat: [
                 .user([
                     .text("Describe the image"),
                     .image(InputImage(data: imageData, mimeType: "image/png")),
@@ -186,13 +184,12 @@ struct Gemma4RealBundleTests {
             ])
         )
         let prompt = try container.makeExecutablePrompt(from: prepared)
-        let stream = try container.generate(
-            prompt: prompt,
-            parameters: GenerateParameters(maxTokens: 1, streamChunkTokenCount: 1)
+        let stream = try container.generate(from: prompt,
+            parameters: GenerationParameters(maxTokens: 1, streamChunkTokenCount: 1)
         )
         var sawOutput = false
         for await generation in stream {
-            if generation.chunk != nil || generation.info != nil {
+            if generation.text != nil || generation.completion != nil {
                 sawOutput = true
                 break
             }
@@ -202,41 +199,42 @@ struct Gemma4RealBundleTests {
         #expect(sawOutput)
     }
 
-    @Test("Real Gemma4 bundle ignores thinking prompt options without regressing chat output", .timeLimit(.minutes(10)))
-    func realBundleChatIgnoresThinkingPromptOptions() async throws {
+    @Test("Real Gemma4 bundle applies thinking template options and preserves chat output", .timeLimit(.minutes(10)))
+    func realBundleChatAppliesThinkingTemplateOptions() async throws {
         guard let container = try await Gemma4TestSupport.realGemma4Container() else {
             print("[Skip] No local official Gemma4 E2B snapshot found")
             return
         }
 
-        container.resetCaches()
-        let prepared = try await container.prepare(input: ModelInput(
+        container.resetState()
+        let prepared = try await container.prepare( ModelInput(
             chat: [
                 .user([.text(RealOutputAssertionSupport.strictCapitalPrompt)])
             ],
             promptOptions: PromptPreparationOptions(
-                thinkingEnabled: true,
+                isThinkingEnabled: true,
                 templateVariables: ["enable_thinking": .boolean(true)]
             )
         ))
         print("[Gemma4 thinking-option rendered text]")
         print(prepared.renderedText)
+        #expect(prepared.renderedText.contains("<|think|>"))
         let prompt = try container.makeExecutablePrompt(from: prepared)
         let comparison = try RealOutputAssertionSupport.assertGreedyDirectMatchesPromptState(
             container: container,
             prompt: prompt,
-            label: "Gemma4 chat thinking-option greedy"
+            label: "Gemma4 chat thinking-template greedy"
         )
         RealOutputAssertionSupport.assertStartsWithTokyo(
             comparison.directText,
-            label: "Gemma4 chat thinking-option greedy"
+            label: "Gemma4 chat thinking-template greedy"
         )
-        #expect(!comparison.directText.contains("<think>"))
+        #expect(!comparison.directText.contains("<|think|>"))
     }
 
 #if ENABLE_METAL_PROBES
     private func printActualLayerOutputs(
-        container: ModelContainer,
+        container: InferenceSession,
         prompt: ExecutablePrompt,
         selectedLayers: Set<Int>
     ) throws {

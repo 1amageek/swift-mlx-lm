@@ -37,14 +37,14 @@ struct BenchmarkTests {
             BenchmarkSupport.settleGPU()
 
             for _ in 0..<iterations {
-                m.resetCaches()
+                m.resetState()
                 let prefillTokens = [Int32](repeating: 1, count: prefillLength)
                 let pfStart = CFAbsoluteTimeGetCurrent()
                 _ = m.prefill(tokens: prefillTokens)
                 let pfTime = CFAbsoluteTimeGetCurrent() - pfStart
                 pfResults.append(pfTime)
 
-                m.resetCaches()
+                m.resetState()
                 var currentToken = m.prefill(tokens: promptTokens)
                 for _ in 0..<3 { currentToken = m.decodeSync(tokenID: currentToken) }
 
@@ -81,11 +81,11 @@ struct BenchmarkTests {
 
         let warmupTokens: [Int32] = [1, 1, 6]
         _ = inferenceModel.prefill(tokens: warmupTokens)
-        inferenceModel.resetCaches()
+        inferenceModel.resetState()
 
         let lengths = [16, 32, 64]
         for length in lengths {
-            inferenceModel.resetCaches()
+            inferenceModel.resetState()
             let tokens = [Int32](repeating: 1, count: length)
 
             let start = CFAbsoluteTimeGetCurrent()

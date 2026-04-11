@@ -52,20 +52,20 @@ final class Gemma4Runtime {
         )
     }
 
-    func makePromptContext(from prepared: PreparedInput) throws -> Gemma4PromptContext {
+    func makePromptContext(from prepared: PreparedPrompt) throws -> Gemma4PromptContext {
         var promptEmbeddings = try textRuntime.tokenEmbeddings(tokenIDs: prepared.tokenIDs)
         var perLayerTokenIDs = prepared.tokenIDs
         var usesEmbeddingOverrides = false
 
         if let multimodal = prepared.multimodalMetadata {
             if !multimodal.videos.isEmpty {
-                throw ModelContainerError.multimodalInputNotSupported(
+                throw InferenceSessionError.multimodalInputNotSupported(
                     "Gemma4 video execution is not implemented yet."
                 )
             }
             if !multimodal.images.isEmpty {
                 guard let visionEncoder else {
-                    throw ModelContainerError.multimodalInputNotSupported(
+                    throw InferenceSessionError.multimodalInputNotSupported(
                         "This Gemma4 bundle does not have an active vision encoder."
                     )
                 }
@@ -74,7 +74,7 @@ final class Gemma4Runtime {
                     type == 1 ? index : nil
                 }
                 guard imageIndices.count == imageEmbeddings.count else {
-                    throw ModelContainerError.multimodalInputNotSupported(
+                    throw InferenceSessionError.multimodalInputNotSupported(
                         "Gemma4 image soft token count does not match the encoded image feature count."
                     )
                 }

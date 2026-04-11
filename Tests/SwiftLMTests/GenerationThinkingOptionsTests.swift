@@ -1,11 +1,17 @@
 import Testing
 @testable import SwiftLM
 
-@Suite("Generation Thinking Options")
+@Suite("GenerationEvent Thinking Options")
 struct GenerationThinkingOptionsTests {
     private let policy = ThinkingTagPolicy(
         openTag: "<think>",
         closeTag: "</think>",
+        openTagTokenID: nil,
+        closeTagTokenID: nil
+    )
+    private let gemmaChannelPolicy = ThinkingTagPolicy(
+        openTag: "<|channel>thought\n",
+        closeTag: "<channel|>",
         openTagTokenID: nil,
         closeTagTokenID: nil
     )
@@ -45,6 +51,32 @@ struct GenerationThinkingOptionsTests {
 
         #expect(emitted.reasoning.isEmpty)
         #expect(emitted.answer == "<think>plan</think>answer")
+        #expect(trailing.reasoning.isEmpty)
+        #expect(trailing.answer.isEmpty)
+    }
+
+    @Test("Gemma channel mode emits reasoning chunks and strips them from answer")
+    func gemmaChannelSeparateModeSplitsReasoning() {
+        var state = GenerationVisibilityState(policy: gemmaChannelPolicy, emitsReasoning: true)
+
+        let emitted = state.append(decodedText: "<|channel>thought\nplan\n<channel|>Tokyo")
+        let trailing = state.finalize()
+
+        #expect(emitted.reasoning == "plan\n")
+        #expect(emitted.answer == "Tokyo")
+        #expect(trailing.reasoning.isEmpty)
+        #expect(trailing.answer.isEmpty)
+    }
+
+    @Test("Gemma channel hidden mode suppresses reasoning from visible output")
+    func gemmaChannelHiddenModeSuppressesReasoning() {
+        var state = GenerationVisibilityState(policy: gemmaChannelPolicy, emitsReasoning: false)
+
+        let emitted = state.append(decodedText: "<|channel>thought\nplan\n<channel|>Tokyo")
+        let trailing = state.finalize()
+
+        #expect(emitted.reasoning.isEmpty)
+        #expect(emitted.answer == "Tokyo")
         #expect(trailing.reasoning.isEmpty)
         #expect(trailing.answer.isEmpty)
     }

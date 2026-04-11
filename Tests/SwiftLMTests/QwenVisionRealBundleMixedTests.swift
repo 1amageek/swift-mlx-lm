@@ -15,12 +15,11 @@ struct QwenVisionRealBundleMixedTests {
             print("[Skip] Loaded local Qwen vision bundle does not execute both image and video prompts")
             return
         }
-        container.resetCaches()
+        container.resetState()
 
         let imageData = try TestImageFixtures.makeOnePixelPNGData()
         let videoData = try await TestVideoFixtures.makeMP4Data()
-        let stream = try await container.generate(
-            input: ModelInput(chat: [
+        let stream = try await container.generate( ModelInput(chat: [
                 .user([
                     .text("Compare"),
                     .image(InputImage(data: imageData, mimeType: "image/png")),
@@ -28,7 +27,7 @@ struct QwenVisionRealBundleMixedTests {
                     .video(InputVideo(data: videoData, mimeType: "video/mp4")),
                 ])
             ]),
-            parameters: GenerateParameters(maxTokens: 1, streamChunkTokenCount: 1)
+            parameters: GenerationParameters(maxTokens: 1, streamChunkTokenCount: 1)
         )
         let result = await QwenVisionTestSupport.collectGeneration(from: stream)
 

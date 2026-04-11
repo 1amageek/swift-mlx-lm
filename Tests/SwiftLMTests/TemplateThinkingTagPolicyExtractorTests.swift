@@ -33,6 +33,21 @@ struct TemplateThinkingTagPolicyExtractorTests {
         #expect(policy?.closeTag == "</reasoning>")
     }
 
+    @Test("extracts Gemma channel reasoning tags from template source")
+    func extractsGemmaChannelReasoningTags() {
+        let template = """
+        {%- set thinking_text = message.get('reasoning') or message.get('reasoning_content') -%}
+        {%- if thinking_text -%}
+        {{- '<|channel>thought\\n' + thinking_text + '\\n<channel|>' -}}
+        {%- endif -%}
+        """
+
+        let policy = TemplateThinkingTagPolicyExtractor.extract(from: template)
+
+        #expect(policy?.openTag == "<|channel>thought\n")
+        #expect(policy?.closeTag == "<channel|>")
+    }
+
     @Test("ignores templates without reasoning tags")
     func ignoresTemplatesWithoutReasoningTags() {
         let template = """

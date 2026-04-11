@@ -203,7 +203,7 @@ struct RealModelDiagnosticTests {
     }
 }
 
-// MARK: - Real-Scale Weight Generation
+// MARK: - Real-Scale Weight GenerationEvent
 
 private func createRealScaleWeights(
     hiddenSize: Int, intermediateSize: Int, vocabSize: Int,

@@ -1,15 +1,15 @@
 /// Prompt/render-time configuration applied before token generation begins.
 public struct PromptPreparationOptions: Sendable, Equatable {
     /// Enables model thinking for chat templates that expose an `enable_thinking` variable.
-    public var thinkingEnabled: Bool
+    public var isThinkingEnabled: Bool
     /// Additional variables forwarded only to prompt-template rendering.
     public var templateVariables: [String: PromptTemplateValue]
 
     public init(
-        thinkingEnabled: Bool = false,
+        isThinkingEnabled: Bool = false,
         templateVariables: [String: PromptTemplateValue] = [:]
     ) {
-        self.thinkingEnabled = thinkingEnabled
+        self.isThinkingEnabled = isThinkingEnabled
         self.templateVariables = templateVariables
     }
 }

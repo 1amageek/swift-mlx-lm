@@ -31,7 +31,7 @@ struct Metal4TokenQualityTests {
         }
 
         // Determinism: reset and decode again, should produce identical tokens
-        m.resetCaches()
+        m.resetState()
         var tokens2: [Int32] = []
         tok = m.prefill(tokens: promptTokens)
         for _ in 0..<decodeSteps {

@@ -2,10 +2,13 @@ import MetalCompiler
 
 /// A reusable snapshot of decode state for a prepared prompt prefix.
 ///
-/// Build a prompt state with ``ModelContainer/makePromptState(prompt:)`` or
-/// ``ModelContainer/makePromptState(input:)-(ModelInput)`` and reuse it with
-/// ``ModelContainer/generate(from:parameters:)``.
-public struct PromptState: @unchecked Sendable {
+/// Build a prompt snapshot with ``InferenceSession/makePromptSnapshot(from:)`` or
+/// ``InferenceSession/makePromptSnapshot(from:)-(ModelInput)`` and reuse it with
+/// ``InferenceSession/generate(from:parameters:)``.
+///
+/// `PromptSnapshot` is session-affine runtime state. Reuse it only with the same
+/// `InferenceSession` instance and the same loaded model bundle that produced it.
+public struct PromptSnapshot: @unchecked Sendable {
     let metalState: MetalPromptState
     let ropePositionOffset: Int
     let samplingSeed: UInt64
@@ -28,8 +31,8 @@ public struct PromptState: @unchecked Sendable {
     }
 }
 
-/// Errors produced by ``ModelContainer``.
-public enum ModelContainerError: Error {
+/// Errors produced by ``InferenceSession``.
+public enum InferenceSessionError: Error {
     /// Prefill did not produce a valid first token.
     case invalidPrefillResult
     /// The input asks for a modality the loaded model does not declare.
@@ -37,6 +40,10 @@ public enum ModelContainerError: Error {
     /// The input includes multimodal content that the active runtime or model
     /// family does not currently support.
     case multimodalInputNotSupported(String)
-    /// Restoring a prompt state failed before generation could start.
-    case promptStateRestoreFailed(String)
+    /// Restoring a prompt snapshot failed before generation could start.
+    case promptSnapshotRestoreFailed(String)
+    /// Prompt preparation options contained incompatible thinking controls.
+    case conflictingPromptThinkingConfiguration(String)
+    /// A known prompt-template variable was provided with an invalid value type.
+    case invalidPromptTemplateVariable(String)
 }

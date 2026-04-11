@@ -9,7 +9,7 @@ struct Gemma4ImagePreprocessor {
         self.configuration = configuration
     }
 
-    func prepare(_ image: InputImage) throws -> PreparedInput.Multimodal.Image {
+    func prepare(_ image: InputImage) throws -> PreparedPrompt.Multimodal.Image {
         let decodedImage = try decodeCGImage(image)
         let patchSize = configuration.patchSize ?? 16
         let poolingKernelSize = configuration.poolingKernelSize ?? 3
@@ -39,7 +39,7 @@ struct Gemma4ImagePreprocessor {
         )
         let placeholderTokenCount = (gridH * gridW) / (poolingKernelSize * poolingKernelSize)
 
-        return PreparedInput.Multimodal.Image(
+        return PreparedPrompt.Multimodal.Image(
             gridTHW: [1, gridH, gridW],
             placeholderTokenCount: placeholderTokenCount,
             pixelValuesShape: [
@@ -78,7 +78,7 @@ struct Gemma4ImagePreprocessor {
 
         guard let source,
               let cgImage = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
-            throw ModelContainerError.unsupportedInputForModel(
+            throw InferenceSessionError.unsupportedInputForModel(
                 "Could not decode image data for Gemma4 preprocessing."
             )
         }
@@ -106,7 +106,7 @@ struct Gemma4ImagePreprocessor {
             space: colorSpace,
             bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue | CGBitmapInfo.byteOrder32Big.rawValue
         ) else {
-            throw ModelContainerError.unsupportedInputForModel(
+            throw InferenceSessionError.unsupportedInputForModel(
                 "Could not create image resize context for Gemma4 preprocessing."
             )
         }
@@ -179,7 +179,7 @@ struct Gemma4ImagePreprocessor {
         var targetWidth = Int(floor(idealWidth / Double(sideMultiple))) * sideMultiple
 
         if targetHeight == 0 && targetWidth == 0 {
-            throw ModelContainerError.multimodalInputNotSupported(
+            throw InferenceSessionError.multimodalInputNotSupported(
                 "Gemma4 image resize collapsed to zero dimensions."
             )
         }

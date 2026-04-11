@@ -7,20 +7,20 @@ struct Gemma4PromptProcessor {
         self.configuration = configuration
     }
 
-    func prepare(renderedText: String, messages: [InputMessage]) async throws -> PreparedPrompt {
+    func prepare(renderedText: String, messages: [InputMessage]) async throws -> RenderedPrompt {
         let images = messages.flatMap(\.images)
         guard !images.isEmpty else {
-            return PreparedPrompt(text: renderedText, multimodal: nil)
+            return RenderedPrompt(text: renderedText, multimodal: nil)
         }
         guard Gemma4Support.supportsImagePromptPreparation(vision: configuration.vision) else {
-            throw ModelContainerError.multimodalInputNotSupported(
+            throw InferenceSessionError.multimodalInputNotSupported(
                 "This model declares image input support, but SwiftLM does not have an active Gemma4 image processor."
             )
         }
 
         let imagePlaceholderCount = renderedText.components(separatedBy: imageToken).count - 1
         if imagePlaceholderCount != images.count {
-            throw ModelContainerError.multimodalInputNotSupported(
+            throw InferenceSessionError.multimodalInputNotSupported(
                 imagePlaceholderCount < images.count
                     ? "The rendered chat template does not contain enough Gemma4 image placeholders for the supplied images."
                     : "The rendered chat template contains more Gemma4 image placeholders than supplied images."
@@ -28,7 +28,7 @@ struct Gemma4PromptProcessor {
         }
 
         var expandedText = renderedText
-        var preparedImages: [PreparedInput.Multimodal.Image] = []
+        var preparedImages: [PreparedPrompt.Multimodal.Image] = []
         let preprocessor = Gemma4ImagePreprocessor(configuration: configuration.vision ?? .init())
         for message in messages {
             for item in message.content {
@@ -42,7 +42,7 @@ struct Gemma4PromptProcessor {
                         + String(repeating: imageToken, count: preparedImage.placeholderTokenCount)
                         + eoiToken
                     guard let range = expandedText.range(of: imageToken) else {
-                        throw ModelContainerError.multimodalInputNotSupported(
+                        throw InferenceSessionError.multimodalInputNotSupported(
                             "The rendered chat template does not contain enough Gemma4 image placeholders for the supplied images."
                         )
                     }
@@ -52,9 +52,9 @@ struct Gemma4PromptProcessor {
             }
         }
 
-        return PreparedPrompt(
+        return RenderedPrompt(
             text: expandedText,
-            multimodal: PreparedInput.Multimodal(
+            multimodal: PreparedPrompt.Multimodal(
                 images: preparedImages,
                 videos: []
             )

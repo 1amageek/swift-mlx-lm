@@ -1,5 +1,5 @@
 /// Parameters controlling text generation.
-public struct GenerateParameters: Sendable {
+public struct GenerationParameters: Sendable {
     /// Maximum tokens to generate. nil uses the runtime default cap.
     public var maxTokens: Int?
     /// Maximum number of tokens to coalesce into one streamed text chunk.
@@ -18,8 +18,8 @@ public struct GenerateParameters: Sendable {
     public var presencePenalty: Float?
     /// Number of recent tokens to consider for repetition penalty.
     public var repetitionContextSize: Int
-    /// Request-level controls for whether reasoning tags are included in visible output.
-    public var thinking: GenerationThinkingOptions
+    /// Request-level controls for how reasoning content is surfaced.
+    public var reasoning: ReasoningOptions
 
     public init(
         maxTokens: Int? = nil,
@@ -31,7 +31,7 @@ public struct GenerateParameters: Sendable {
         repetitionPenalty: Float? = nil,
         presencePenalty: Float? = nil,
         repetitionContextSize: Int = 20,
-        thinking: GenerationThinkingOptions = .hidden
+        reasoning: ReasoningOptions = .hidden
     ) {
         self.maxTokens = maxTokens
         self.streamChunkTokenCount = streamChunkTokenCount
@@ -42,6 +42,6 @@ public struct GenerateParameters: Sendable {
         self.repetitionPenalty = repetitionPenalty
         self.presencePenalty = presencePenalty
         self.repetitionContextSize = repetitionContextSize
-        self.thinking = thinking
+        self.reasoning = reasoning
     }
 }

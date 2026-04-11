@@ -58,7 +58,7 @@ final class Gemma4VisionEncoder {
         self.hiddenAct = configuration.hiddenAct ?? "gelu_pytorch_tanh"
     }
 
-    func encode(images: [PreparedInput.Multimodal.Image]) throws -> [[Float]] {
+    func encode(images: [PreparedPrompt.Multimodal.Image]) throws -> [[Float]] {
         var allEmbeddings: [[Float]] = []
         for image in images {
             allEmbeddings.append(contentsOf: try encode(image: image))
@@ -66,15 +66,15 @@ final class Gemma4VisionEncoder {
         return allEmbeddings
     }
 
-    private func encode(image: PreparedInput.Multimodal.Image) throws -> [[Float]] {
+    private func encode(image: PreparedPrompt.Multimodal.Image) throws -> [[Float]] {
         guard image.gridTHW.count == 3, image.gridTHW[0] == 1 else {
-            throw ModelContainerError.multimodalInputNotSupported(
+            throw InferenceSessionError.multimodalInputNotSupported(
                 "Gemma4 image execution expects a single-frame image grid."
             )
         }
         let patchCount = image.gridTHW[1] * image.gridTHW[2]
         guard image.pixelValuesShape.count == 2, image.pixelValuesShape[0] == patchCount else {
-            throw ModelContainerError.multimodalInputNotSupported(
+            throw InferenceSessionError.multimodalInputNotSupported(
                 "Gemma4 image patch metadata does not match the prepared pixel values."
             )
         }
@@ -98,7 +98,7 @@ final class Gemma4VisionEncoder {
         return try projectToLanguageSpace(hiddenStates)
     }
 
-    private func patchEmbed(image: PreparedInput.Multimodal.Image) throws -> [Float] {
+    private func patchEmbed(image: PreparedPrompt.Multimodal.Image) throws -> [Float] {
         let input = image.pixelValues.map { 2 * ($0 - 0.5) }
         return QwenVisionMath.linear(
             input: input,

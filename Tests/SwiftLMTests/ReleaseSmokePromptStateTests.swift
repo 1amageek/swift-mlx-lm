@@ -1,7 +1,7 @@
 import Testing
 @testable import SwiftLM
 
-@Suite("Release Smoke PromptState", .serialized)
+@Suite("Release Smoke PromptSnapshot", .serialized)
 struct ReleaseSmokePromptStateTests {
     @Test("Local model bundle loads and generates", .timeLimit(.minutes(2)))
     func localBundleLoadPrefillDecodeSmoke() async throws {
@@ -9,20 +9,20 @@ struct ReleaseSmokePromptStateTests {
 
         let loader = ModelBundleLoader()
         let container = try await loader.load(directory: localModelDirectory)
-        let input = try await container.prepare(input: ModelInput(prompt: "Hello"))
+        let input = try await container.prepare( ModelInput(prompt: "Hello"))
         let executable = try container.makeExecutablePrompt(from: input)
-        let promptState = try container.makePromptState(prompt: executable)
+        let promptState = try container.makePromptSnapshot(from: executable)
 
         var chunks: [String] = []
         var completion: CompletionInfo?
         for await generation in try container.generate(
             from: promptState,
-            parameters: GenerateParameters(maxTokens: 4, streamChunkTokenCount: 1)
+            parameters: GenerationParameters(maxTokens: 4, streamChunkTokenCount: 1)
         ) {
-            if let chunk = generation.chunk {
+            if let chunk = generation.text {
                 chunks.append(chunk)
             }
-            if let info = generation.info {
+            if let info = generation.completion {
                 completion = info
             }
         }
@@ -38,8 +38,7 @@ struct ReleaseSmokePromptStateTests {
 
         let loader = ModelBundleLoader()
         let container = try await loader.load(directory: localModelDirectory)
-        let prepared = try await container.prepare(
-            input: ModelInput(prompt: RealOutputAssertionSupport.strictCapitalPrompt)
+        let prepared = try await container.prepare( ModelInput(prompt: RealOutputAssertionSupport.strictCapitalPrompt)
         )
         let executable = try container.makeExecutablePrompt(from: prepared)
 

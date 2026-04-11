@@ -10,11 +10,10 @@ struct QwenVisionIntegrationTests {
             print("[Skip] No local text bundle available for synthetic multimodal integration tests")
             return
         }
-        container.resetCaches()
+        container.resetState()
 
         let imageData = try TestImageFixtures.makeOnePixelPNGData()
-        let prepared = try await container.prepare(
-            input: ModelInput(chat: [
+        let prepared = try await container.prepare( ModelInput(chat: [
                 .user([
                     .text("Inspect"),
                     .image(InputImage(data: imageData, mimeType: "image/png")),
@@ -23,9 +22,8 @@ struct QwenVisionIntegrationTests {
             ])
         )
         let executable = try container.makeExecutablePrompt(from: prepared)
-        let stream = try container.generate(
-            prompt: executable,
-            parameters: GenerateParameters(maxTokens: 2, streamChunkTokenCount: 1)
+        let stream = try container.generate(from: executable,
+            parameters: GenerationParameters(maxTokens: 2, streamChunkTokenCount: 1)
         )
         let result = await QwenVisionTestSupport.collectGeneration(from: stream)
 
@@ -40,11 +38,10 @@ struct QwenVisionIntegrationTests {
             print("[Skip] No local text bundle available for synthetic multimodal integration tests")
             return
         }
-        container.resetCaches()
+        container.resetState()
 
         let videoData = try await TestVideoFixtures.makeMP4Data()
-        let prepared = try await container.prepare(
-            input: ModelInput(chat: [
+        let prepared = try await container.prepare( ModelInput(chat: [
                 .user([
                     .text("Inspect"),
                     .video(InputVideo(data: videoData, mimeType: "video/mp4")),
@@ -53,9 +50,8 @@ struct QwenVisionIntegrationTests {
             ])
         )
         let executable = try container.makeExecutablePrompt(from: prepared)
-        let stream = try container.generate(
-            prompt: executable,
-            parameters: GenerateParameters(maxTokens: 2, streamChunkTokenCount: 1)
+        let stream = try container.generate(from: executable,
+            parameters: GenerationParameters(maxTokens: 2, streamChunkTokenCount: 1)
         )
         let result = await QwenVisionTestSupport.collectGeneration(from: stream)
 
@@ -70,12 +66,11 @@ struct QwenVisionIntegrationTests {
             print("[Skip] No local text bundle available for synthetic multimodal integration tests")
             return
         }
-        container.resetCaches()
+        container.resetState()
 
         let imageData = try TestImageFixtures.makeOnePixelPNGData()
         let videoData = try await TestVideoFixtures.makeMP4Data()
-        let stream = try await container.generate(
-            input: ModelInput(chat: [
+        let stream = try await container.generate( ModelInput(chat: [
                 .user([
                     .text("Compare"),
                     .image(InputImage(data: imageData, mimeType: "image/png")),
@@ -84,7 +79,7 @@ struct QwenVisionIntegrationTests {
                     .text("summarize"),
                 ])
             ]),
-            parameters: GenerateParameters(maxTokens: 2, streamChunkTokenCount: 1)
+            parameters: GenerationParameters(maxTokens: 2, streamChunkTokenCount: 1)
         )
         let result = await QwenVisionTestSupport.collectGeneration(from: stream)
 
@@ -98,11 +93,10 @@ struct QwenVisionIntegrationTests {
             print("[Skip] No local text bundle available for synthetic multimodal integration tests")
             return
         }
-        container.resetCaches()
+        container.resetState()
 
         let imageData = try TestImageFixtures.makeOnePixelPNGData()
-        let promptState = try await container.makePromptState(
-            input: ModelInput(chat: [
+        let promptState = try await container.makePromptSnapshot(from: ModelInput(chat: [
                 .user([
                     .text("Reuse"),
                     .image(InputImage(data: imageData, mimeType: "image/png")),
@@ -112,7 +106,7 @@ struct QwenVisionIntegrationTests {
         )
         let stream = try container.generate(
             from: promptState,
-            parameters: GenerateParameters(maxTokens: 2, streamChunkTokenCount: 1)
+            parameters: GenerationParameters(maxTokens: 2, streamChunkTokenCount: 1)
         )
         let result = await QwenVisionTestSupport.collectGeneration(from: stream)
 

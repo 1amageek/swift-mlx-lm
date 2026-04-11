@@ -14,11 +14,10 @@ struct QwenVisionRealBundleImageTests {
             print("[Skip] Loaded local Qwen vision bundle does not execute image prompts")
             return
         }
-        container.resetCaches()
+        container.resetState()
 
         let imageData = try TestImageFixtures.makeOnePixelPNGData()
-        let prepared = try await container.prepare(
-            input: ModelInput(chat: [
+        let prepared = try await container.prepare( ModelInput(chat: [
                 .user([
                     .text("Describe"),
                     .image(InputImage(data: imageData, mimeType: "image/png")),
@@ -26,9 +25,8 @@ struct QwenVisionRealBundleImageTests {
             ])
         )
         let executable = try container.makeExecutablePrompt(from: prepared)
-        let stream = try container.generate(
-            prompt: executable,
-            parameters: GenerateParameters(maxTokens: 1, streamChunkTokenCount: 1)
+        let stream = try container.generate(from: executable,
+            parameters: GenerationParameters(maxTokens: 1, streamChunkTokenCount: 1)
         )
         let result = await QwenVisionTestSupport.collectGeneration(from: stream)
 

@@ -5,10 +5,10 @@ import Testing
 struct QwenVisionExecutionLayoutTests {
     @Test("Build official-style rope indices for text-image-text prompts")
     func buildRoPEIndices() throws {
-        let prepared = PreparedInput(
+        let prepared = PreparedPrompt(
             renderedText: "ignored",
             tokenIDs: Array(repeating: 0, count: 68),
-            multimodalMetadata: PreparedInput.Multimodal(
+            multimodalMetadata: PreparedPrompt.Multimodal(
                 mmTokenTypeIDs: [0, 0] + Array(repeating: 1, count: 64) + [0, 0],
                 images: [
                     .init(
@@ -33,10 +33,10 @@ struct QwenVisionExecutionLayoutTests {
 
     @Test("Reject mismatched image placeholder runs")
     func rejectMismatchedImagePlaceholderRuns() throws {
-        let prepared = PreparedInput(
+        let prepared = PreparedPrompt(
             renderedText: "ignored",
             tokenIDs: Array(repeating: 0, count: 5),
-            multimodalMetadata: PreparedInput.Multimodal(
+            multimodalMetadata: PreparedPrompt.Multimodal(
                 mmTokenTypeIDs: [0, 1, 1, 1, 0],
                 images: [
                     .init(
@@ -47,17 +47,17 @@ struct QwenVisionExecutionLayoutTests {
             )
         )
 
-        #expect(throws: ModelContainerError.self) {
+        #expect(throws: InferenceSessionError.self) {
             _ = try QwenVisionExecutionLayoutBuilder().makeLayout(for: prepared)
         }
     }
 
     @Test("Split Qwen video runs per frame when timestamps separate placeholders")
     func buildVideoRoPEIndices() throws {
-        let prepared = PreparedInput(
+        let prepared = PreparedPrompt(
             renderedText: "ignored",
             tokenIDs: Array(repeating: 0, count: 35),
-            multimodalMetadata: PreparedInput.Multimodal(
+            multimodalMetadata: PreparedPrompt.Multimodal(
                 mmTokenTypeIDs: [0]
                     + Array(repeating: 2, count: 16)
                     + [0]
@@ -88,10 +88,10 @@ struct QwenVisionExecutionLayoutTests {
 
     @Test("Build official-style rope indices for text-video-text prompts")
     func buildTextVideoTextRoPEIndices() throws {
-        let prepared = PreparedInput(
+        let prepared = PreparedPrompt(
             renderedText: "ignored",
             tokenIDs: Array(repeating: 0, count: 10),
-            multimodalMetadata: PreparedInput.Multimodal(
+            multimodalMetadata: PreparedPrompt.Multimodal(
                 mmTokenTypeIDs: [0, 0, 2, 2, 2, 2, 0, 0, 0, 0],
                 videos: [
                     .init(
@@ -115,10 +115,10 @@ struct QwenVisionExecutionLayoutTests {
 
     @Test("Build rope indices for mixed image and video prompts")
     func buildMixedImageAndVideoRoPEIndices() throws {
-        let prepared = PreparedInput(
+        let prepared = PreparedPrompt(
             renderedText: "ignored",
             tokenIDs: Array(repeating: 0, count: 9),
-            multimodalMetadata: PreparedInput.Multimodal(
+            multimodalMetadata: PreparedPrompt.Multimodal(
                 mmTokenTypeIDs: [0, 1, 0, 2, 0, 2, 0, 1, 0],
                 images: [
                     .init(gridTHW: [1, 2, 2], placeholderTokenCount: 1),
@@ -146,10 +146,10 @@ struct QwenVisionExecutionLayoutTests {
     @Test("Parity fixture matches official-style video layout positions")
     func layoutParityFixture() throws {
         let parity = try QwenVisionTestSupport.parityFixture()
-        let prepared = PreparedInput(
+        let prepared = PreparedPrompt(
             renderedText: "ignored",
             tokenIDs: Array(repeating: 0, count: 35),
-            multimodalMetadata: PreparedInput.Multimodal(
+            multimodalMetadata: PreparedPrompt.Multimodal(
                 mmTokenTypeIDs: [0]
                     + Array(repeating: 2, count: 16)
                     + [0]

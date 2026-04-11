@@ -8,12 +8,12 @@ import Tokenizers
 @testable import ModelDeclarations
 @testable import LMArchitecture
 
-@Suite("Performance: Generation Pipeline", .tags(.performance), .serialized, .heartbeat)
+@Suite("Performance: GenerationEvent Pipeline", .tags(.performance), .serialized, .heartbeat)
 struct GenerationPipelineBenchmarkTests {
 
     private static let stafPath = "/Users/1amageek/Desktop/swift-lm/TestData/LFM2.5-1.2B-Thinking/model.staf"
 
-    @Test("ModelContainer generate throughput", .timeLimit(.minutes(2)))
+    @Test("InferenceSession generate throughput", .timeLimit(.minutes(2)))
     func modelContainerGenerateThroughput() async throws {
         let promptTokens = [1, 1, 6, 6423, 708]
         let generateCount = 50
@@ -36,16 +36,16 @@ struct GenerationPipelineBenchmarkTests {
                 generateCount: generateCount)
         }
 
-        let generateResult = try await measureMedianAsync(name: "ModelContainer.generate(greedy)", iterations: 5, warmup: 1) {
+        let generateResult = try await measureMedianAsync(name: "InferenceSession.generate(greedy)", iterations: 5, warmup: 1) {
             try await runContainerGenerate(
                 container: resources.container,
                 promptTokens: promptTokens,
-                parameters: GenerateParameters(maxTokens: generateCount, temperature: 0)
+                parameters: GenerationParameters(maxTokens: generateCount, temperature: 0)
             )
         }
 
         print("")
-        print("=== Generation Pipeline Benchmark: LFM2.5-1.2B ===")
+        print("=== GenerationEvent Pipeline Benchmark: LFM2.5-1.2B ===")
         print("Mode                    tok/s   ms/tok  generated")
         print("--------------------------------------------------")
         print(format(syncResult))
@@ -61,7 +61,7 @@ struct GenerationPipelineBenchmarkTests {
         #expect(generateResult.generatedTokenCount == generateCount)
     }
 
-    @Test("Generation host overhead breakdown", .timeLimit(.minutes(2)))
+    @Test("GenerationEvent host overhead breakdown", .timeLimit(.minutes(2)))
     func generationHostOverheadBreakdown() async throws {
         let promptTokens = [1, 1, 6, 6423, 708]
         let generateCount = 50
@@ -200,7 +200,7 @@ struct GenerationPipelineBenchmarkTests {
                 try await runContainerGenerate(
                     container: resources.container,
                     promptTokens: promptTokens,
-                    parameters: GenerateParameters(maxTokens: generateCount, temperature: 0)
+                    parameters: GenerationParameters(maxTokens: generateCount, temperature: 0)
                 )
             }
 
@@ -271,8 +271,7 @@ struct GenerationPipelineBenchmarkTests {
             maximumSequenceLength: promptTokens.count
         )
         defer { resources.release() }
-        let promptState = try resources.container.makePromptState(
-            prompt: ExecutablePrompt(tokenIDs: promptTokens)
+        let promptState = try resources.container.makePromptSnapshot(from: ExecutablePrompt(tokenIDs: promptTokens)
         )
 
         let baseline = try await measureStreamMedian(iterations: 3, warmup: 1) {
@@ -374,7 +373,7 @@ struct GenerationPipelineBenchmarkTests {
             configuration.eosTokenIds.insert(eosId)
         }
 
-        let container = ModelContainer(
+        let container = InferenceSession(
             inferenceModel: containerModel,
             tokenizer: tokenizer,
             configuration: configuration,
@@ -395,7 +394,7 @@ struct GenerationPipelineBenchmarkTests {
         promptTokens: [Int],
         generateCount: Int
     ) throws -> Int {
-        model.resetCaches()
+        model.resetState()
         let prompt = promptTokens.map(Int32.init)
         var token = model.prefill(tokens: prompt)
         guard token >= 0 else { throw BenchmarkError.invalidToken }
@@ -418,7 +417,7 @@ struct GenerationPipelineBenchmarkTests {
         promptTokens: [Int],
         generateCount: Int
     ) throws -> Int {
-        model.resetCaches()
+        model.resetState()
         let prompt = promptTokens.map(Int32.init)
         var token = model.prefill(tokens: prompt)
         guard token >= 0 else { throw BenchmarkError.invalidToken }
@@ -438,7 +437,7 @@ struct GenerationPipelineBenchmarkTests {
         promptTokens: [Int],
         generateCount: Int
     ) throws -> Int {
-        model.resetCaches()
+        model.resetState()
         let prompt = promptTokens.map(Int32.init)
         let firstToken = model.prefill(tokens: prompt)
         guard firstToken >= 0 else { throw BenchmarkError.invalidToken }
@@ -460,19 +459,18 @@ struct GenerationPipelineBenchmarkTests {
     }
 
     private func runContainerGenerate(
-        container: ModelContainer,
+        container: InferenceSession,
         promptTokens: [Int],
-        parameters: GenerateParameters
+        parameters: GenerationParameters
     ) async throws -> Int {
-        container.resetCaches()
-        let stream = try container.generate(
-            prompt: ExecutablePrompt(tokenIDs: promptTokens),
+        container.resetState()
+        let stream = try container.generate(from: ExecutablePrompt(tokenIDs: promptTokens),
             parameters: parameters
         )
 
         var generated = 0
         for await item in stream {
-            if case .info(let info) = item {
+            if case .completed(let info) = item {
                 generated = info.tokenCount
             }
         }
@@ -480,9 +478,9 @@ struct GenerationPipelineBenchmarkTests {
     }
 
     private func runContainerGenerate(
-        container: ModelContainer,
-        promptState: PromptState,
-        parameters: GenerateParameters
+        container: InferenceSession,
+        promptState: PromptSnapshot,
+        parameters: GenerationParameters
     ) async throws -> Int {
         let stream = try container.generate(
             from: promptState,
@@ -491,7 +489,7 @@ struct GenerationPipelineBenchmarkTests {
 
         var generated = 0
         for await item in stream {
-            if case .info(let info) = item {
+            if case .completed(let info) = item {
                 generated = info.tokenCount
             }
         }
@@ -499,17 +497,16 @@ struct GenerationPipelineBenchmarkTests {
     }
 
     private func runContainerGenerateMeasured(
-        container: ModelContainer,
+        container: InferenceSession,
         promptTokens: [Int],
         generateCount: Int,
         chunkTokenCount: Int,
         temperature: Float
     ) async throws -> StreamResult {
-        container.resetCaches()
+        container.resetState()
         let start = CFAbsoluteTimeGetCurrent()
-        let stream = try container.generate(
-            prompt: ExecutablePrompt(tokenIDs: promptTokens),
-            parameters: GenerateParameters(
+        let stream = try container.generate(from: ExecutablePrompt(tokenIDs: promptTokens),
+            parameters: GenerationParameters(
                 maxTokens: generateCount,
                 streamChunkTokenCount: chunkTokenCount,
                 temperature: temperature
@@ -522,14 +519,14 @@ struct GenerationPipelineBenchmarkTests {
 
         for await item in stream {
             switch item {
-            case .chunk:
+            case .text:
                 chunkCount += 1
                 if firstChunkElapsed == nil {
                     firstChunkElapsed = CFAbsoluteTimeGetCurrent() - start
                 }
-            case .reasoningChunk:
+            case .reasoning:
                 break
-            case .info(let info):
+            case .completed(let info):
                 generated = info.tokenCount
             }
         }
@@ -544,8 +541,8 @@ struct GenerationPipelineBenchmarkTests {
     }
 
     private func runContainerGenerateMeasured(
-        container: ModelContainer,
-        promptState: PromptState,
+        container: InferenceSession,
+        promptState: PromptSnapshot,
         generateCount: Int,
         chunkTokenCount: Int,
         temperature: Float
@@ -553,7 +550,7 @@ struct GenerationPipelineBenchmarkTests {
         let start = CFAbsoluteTimeGetCurrent()
         let stream = try container.generate(
             from: promptState,
-            parameters: GenerateParameters(
+            parameters: GenerationParameters(
                 maxTokens: generateCount,
                 streamChunkTokenCount: chunkTokenCount,
                 temperature: temperature
@@ -566,14 +563,14 @@ struct GenerationPipelineBenchmarkTests {
 
         for await item in stream {
             switch item {
-            case .chunk:
+            case .text:
                 chunkCount += 1
                 if firstChunkElapsed == nil {
                     firstChunkElapsed = CFAbsoluteTimeGetCurrent() - start
                 }
-            case .reasoningChunk:
+            case .reasoning:
                 break
-            case .info(let info):
+            case .completed(let info):
                 generated = info.tokenCount
             }
         }
@@ -592,7 +589,7 @@ struct GenerationPipelineBenchmarkTests {
         promptTokens: [Int],
         generateCount: Int
     ) throws -> [Int] {
-        model.resetCaches()
+        model.resetState()
         let prompt = promptTokens.map(Int32.init)
         var token = model.prefill(tokens: prompt)
         guard token >= 0 else { throw BenchmarkError.invalidToken }
@@ -738,12 +735,12 @@ struct GenerationPipelineBenchmarkTests {
         let tokenizer: any Tokenizer
         var syncModel: MetalInferenceModel
         var pipelinedModel: MetalInferenceModel
-        let container: ModelContainer
+        let container: InferenceSession
 
         mutating func release() {
-            syncModel.resetCaches()
-            pipelinedModel.resetCaches()
-            container.resetCaches()
+            syncModel.resetState()
+            pipelinedModel.resetState()
+            container.resetState()
         }
     }
 

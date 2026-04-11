@@ -16,9 +16,8 @@ struct LFMOutputDiagnosticsTests {
         }
 
         let container = try await ModelBundleLoader().load(directory: localModelDirectory)
-        container.resetCaches()
-        let prepared = try await container.prepare(
-            input: ModelInput(prompt: RealOutputAssertionSupport.strictCapitalPrompt)
+        container.resetState()
+        let prepared = try await container.prepare( ModelInput(prompt: RealOutputAssertionSupport.strictCapitalPrompt)
         )
         print("[LFM prepared]")
         print(prepared.renderedText)
@@ -34,7 +33,7 @@ struct LFMOutputDiagnosticsTests {
 
         let tokenIDs = try container.debugRawGeneratedTokenIDs(
             prompt: prompt,
-            parameters: GenerateParameters(
+            parameters: GenerationParameters(
                 maxTokens: 64,
                 streamChunkTokenCount: 8,
                 temperature: 0

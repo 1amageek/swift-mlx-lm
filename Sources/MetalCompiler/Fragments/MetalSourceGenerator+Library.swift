@@ -218,7 +218,7 @@ extension MetalSourceGenerator {
         return sources.joined(separator: "\n\n")
     }
 
-    // MARK: - Fragment-Driven Generation
+    // MARK: - Fragment-Driven GenerationEvent
 
 
 

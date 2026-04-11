@@ -9,7 +9,7 @@ struct QwenVisionVideoPreprocessor {
         self.configuration = configuration
     }
 
-    func prepare(_ video: InputVideo) async throws -> PreparedInput.Multimodal.Video {
+    func prepare(_ video: InputVideo) async throws -> PreparedPrompt.Multimodal.Video {
         let decoded = try await decodeFrames(from: video)
         let patchSize = configuration.patchSize ?? 16
         let temporalPatchSize = configuration.temporalPatchSize ?? 2
@@ -58,7 +58,7 @@ struct QwenVisionVideoPreprocessor {
             temporalPatchSize: temporalPatchSize
         )
 
-        return PreparedInput.Multimodal.Video(
+        return PreparedPrompt.Multimodal.Video(
             gridTHW: [gridT, gridH, gridW],
             placeholderTokenCount: placeholderTokenCount,
             pixelValuesShape: [
@@ -130,14 +130,14 @@ struct QwenVisionVideoPreprocessor {
     ) async throws -> DecodedVideo {
         do {
             guard let track = try await asset.loadTracks(withMediaType: .video).first else {
-                throw ModelContainerError.unsupportedInputForModel(
+                throw InferenceSessionError.unsupportedInputForModel(
                     "Could not find a video track for Qwen vision preprocessing."
                 )
             }
             let duration = try await asset.load(.duration)
             let durationSeconds = CMTimeGetSeconds(duration)
             guard durationSeconds.isFinite, durationSeconds > 0 else {
-                throw ModelContainerError.unsupportedInputForModel(
+                throw InferenceSessionError.unsupportedInputForModel(
                     "Video duration is invalid for Qwen vision preprocessing."
                 )
             }
@@ -172,7 +172,7 @@ struct QwenVisionVideoPreprocessor {
                 frames.append(image)
             }
             guard let firstFrame = frames.first else {
-                throw ModelContainerError.unsupportedInputForModel(
+                throw InferenceSessionError.unsupportedInputForModel(
                     "Could not decode video frames for Qwen vision preprocessing."
                 )
             }
@@ -184,10 +184,10 @@ struct QwenVisionVideoPreprocessor {
                 width: firstFrame.width,
                 height: firstFrame.height
             )
-        } catch let error as ModelContainerError {
+        } catch let error as InferenceSessionError {
             throw error
         } catch {
-            throw ModelContainerError.unsupportedInputForModel(
+            throw InferenceSessionError.unsupportedInputForModel(
                 "Could not decode video frames for Qwen vision preprocessing: \(error.localizedDescription)"
             )
         }
@@ -252,7 +252,7 @@ struct QwenVisionVideoPreprocessor {
             space: colorSpace,
             bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue | CGBitmapInfo.byteOrder32Big.rawValue
         ) else {
-            throw ModelContainerError.unsupportedInputForModel(
+            throw InferenceSessionError.unsupportedInputForModel(
                 "Could not create video resize context for Qwen vision preprocessing."
             )
         }

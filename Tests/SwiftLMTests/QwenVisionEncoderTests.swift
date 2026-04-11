@@ -8,7 +8,7 @@ struct QwenVisionEncoderTests {
         let configuration = QwenVisionTestSupport.visionConfiguration(outHiddenSize: 8)
         let weights = QwenVisionTestSupport.syntheticVisionWeights(outHiddenSize: 8)
         let encoder = try QwenVisionEncoder(configuration: configuration, weights: weights)
-        let image = PreparedInput.Multimodal.Image(
+        let image = PreparedPrompt.Multimodal.Image(
             gridTHW: [1, 2, 2],
             placeholderTokenCount: 1,
             pixelValuesShape: [4, 12],
@@ -37,7 +37,7 @@ struct QwenVisionEncoderTests {
             configuration: configuration,
             weights: QwenVisionTestSupport.syntheticVisionWeights(outHiddenSize: 8)
         )
-        let video = PreparedInput.Multimodal.Video(
+        let video = PreparedPrompt.Multimodal.Video(
             gridTHW: [2, 2, 2],
             placeholderTokenCount: 2,
             pixelValuesShape: [8, 12],
@@ -60,7 +60,7 @@ struct QwenVisionEncoderTests {
         let configuration = QwenVisionTestSupport.visionConfiguration(outHiddenSize: 8)
         let weights = QwenVisionWeightStore(denseTensors: [:])
         let encoder = try QwenVisionEncoder(configuration: configuration, weights: weights)
-        let image = PreparedInput.Multimodal.Image(
+        let image = PreparedPrompt.Multimodal.Image(
             gridTHW: [1, 2, 2],
             placeholderTokenCount: 1,
             pixelValuesShape: [4, 12],
