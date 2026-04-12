@@ -13,7 +13,7 @@ This guide is for application developers integrating `SwiftLM` as a library.
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/1amageek/swift-lm.git", from: "0.3.0")
+    .package(url: "https://github.com/1amageek/swift-lm.git", from: "0.4.0")
 ],
 targets: [
     .target(

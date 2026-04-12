@@ -8,6 +8,7 @@ This directory keeps non-API documentation that does not need to live at the rep
 - `using-swift-lm.md` — application developer guide for generation, embeddings, and public API usage
 - `releases/0.1.0.md` — release notes and public support boundary for `0.1.0`
 - `releases/0.3.0.md` — release notes for the renamed public generation surface
+- `releases/0.4.0.md` — release notes for embedding request values and public API guide alignment
 - `../Sources/SwiftLM/SwiftLM.docc/` — DocC catalog for API and guide documentation
 - `../AGENTS.md` — repository guidance for coding agents
 - `../DESIGN-Metal4.md` — forward-looking Metal 4 design notes
