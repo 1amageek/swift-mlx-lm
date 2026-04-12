@@ -24,10 +24,13 @@ GenerationEvent is stream-based. If you need a single final string, collect all 
 ## Current Public API Limits
 
 - public input is represented by ``ModelInput``
+- embedding input is represented by ``TextEmbeddingInput``
 - image and video content can be represented in ``ModelInput``, and Qwen3-VL style prompt preparation expands the correct placeholder count before tokenization
 - ``PreparedPrompt`` and ``ExecutablePrompt`` separate prompt preparation from executable runtime input
-- ``LanguageModelContainer`` owns the loaded bundle and can prepare prompts or create fresh ``LanguageModelContext`` instances
+- ``LanguageModelContainer`` owns the loaded bundle and is the recommended generation entry point for most applications
 - ``LanguageModelContext`` owns mutable generation state such as KV/cache position and prompt snapshots
+- ``TextEmbeddingContainer`` is the recommended embedding entry point for most applications
+- ``TextEmbeddingContext`` owns mutable embedding runtime state when you need explicit ownership
 - `ExecutablePrompt(preparedPrompt:using:)` converts prepared input into an executable prompt, while `PromptSnapshot(from:using:)` captures reusable decode state for the same context
 - ``ModelConfiguration/vision`` now exposes Qwen-style marker tokens, processor names, and patch sizing metadata
 - ``ModelConfiguration/executionCapabilities`` tells you which prompt shapes the current runtime can prepare and execute

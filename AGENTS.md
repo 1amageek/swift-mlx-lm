@@ -14,7 +14,7 @@ The current repository is not a GGUF/MLX runtime. The active architecture is:
 - a backend-independent IR and model-declaration DSL
 - direct Metal compilation and execution for prefill and decode
 
-Consumer-facing loading starts from `SwiftLM.ModelBundleLoader`, which downloads or opens a HuggingFace model directory, converts weights to STAF when needed, builds a `ModelGraph`, compiles it to a Metal dispatch plan, and returns a `InferenceSession`.
+Consumer-facing loading starts from `SwiftLM.ModelBundleLoader`, which downloads or opens a HuggingFace model directory, converts weights to STAF when needed, builds a `ModelGraph`, compiles it to a Metal dispatch plan, and returns a `LanguageModelContainer` or `TextEmbeddingContainer`.
 
 ## Build & Test
 
@@ -45,7 +45,7 @@ Important:
 - For very long generation-length benchmarks such as `512`, reduce benchmark repetitions before raising the outer timeout. Prefer fewer iterations over a larger timeout so failures still surface quickly.
 - For real-model / Metal-heavy / large-bundle tests, do not batch multiple expensive cases into one long `xcodebuild test` process when you are debugging correctness. Prefer `build-for-testing` once, then `test-without-building` one test at a time. This avoids cumulative GPU memory pressure, repeated model loads in a single process, and hard-to-diagnose xctest crashes.
 - When validating output quality for a specific model/policy combination, prefer one focused test per invocation over a whole suite. If you need multiple policy comparisons, run them as separate `test-without-building` invocations.
-- For repeated real-model loads inside tests/helpers, explicitly scope temporary objects tightly and prefer `autoreleasepool` on synchronous helper boundaries when possible. Do not keep multiple large `InferenceSession` / tokenizer / bundle instances alive longer than needed.
+- For repeated real-model loads inside tests/helpers, explicitly scope temporary objects tightly and prefer `autoreleasepool` on synchronous helper boundaries when possible. Do not keep multiple large `LanguageModelContext` / `TextEmbeddingContext` / tokenizer / bundle instances alive longer than needed.
 - When `xcodebuild` reports `unexpected exit`, `Restarting after unexpected exit`, or flaky suite-level process failure, rerun with [`scripts/xcodebuild-test-timeout.sh`](/Users/1amageek/Desktop/swift-lm/scripts/xcodebuild-test-timeout.sh) or [`scripts/xcodebuild-test-hang-guard.sh`](/Users/1amageek/Desktop/swift-lm/scripts/xcodebuild-test-hang-guard.sh) before changing inference code.
 - Metal-dependent tests and generated libraries are exercised via the package Xcode scheme.
 - Repository targets currently declare Swift tools `6.2` and platforms `.macOS(.v26)`, `.iOS(.v26)`, `.visionOS(.v26)` in [Package.swift](/Users/1amageek/Desktop/swift-lm/Package.swift).
@@ -148,7 +148,10 @@ The repository is intentionally split into five layers.
 - `SwiftLM`
   - Public API for loading, tokenization, prompt formatting, and generation.
   - `ModelBundleLoader` is the main loader.
-  - `InferenceSession` exposes `prepare`, `generate`, `encode`, `decode`, and `resetState`.
+  - `LanguageModelContainer` is the primary public entry point for language generation.
+  - `LanguageModelContext` exposes mutable runtime state, prompt staging, prompt snapshots, and cache control.
+  - `TextEmbeddingContainer` is the primary public entry point for text embeddings.
+  - `TextEmbeddingContext` exposes mutable runtime state for reusable embedding execution.
 
 Dependency direction:
 
@@ -179,18 +182,17 @@ HF repo or local directory
   ├─ model declaration          → ModelGraph
   ├─ ParameterResolver          → parameter bindings
   ├─ MetalInferenceCompiler     → decode plan + prefill plan
-  └─ InferenceSession             → prepare / generate / decode
+  └─ LanguageModelContainer      → generate / prepare / encode / decode
 ```
 
 GenerationEvent path:
 
 ```text
 ModelInput
-  ├─ await prepare()      → text prompt or chat-template rendering
-  ├─ session.encode(...)        → PreparedPrompt(tokenIDs:)
-  ├─ makeExecutablePrompt(...)  → ExecutablePrompt(tokenIDs:)
-  ├─ prefill(tokens:)           → fill KV/conv cache, emit first token
-  └─ decodeSync(tokenID:)       → iterative token generation
+  ├─ await context.prepare(...)               → PreparedPrompt
+  ├─ ExecutablePrompt(preparedPrompt:using:)  → ExecutablePrompt
+  ├─ context.generate(from:...)               → prefill + decode stream
+  └─ PromptSnapshot(from:using:)              → reusable prefixed state
 ```
 
 ## Design Principles
@@ -311,16 +313,46 @@ These are the major declaration paths visible in the repository today.
 
 Current `SwiftLM` public API is intentionally thin.
 
-- `ModelBundleLoader.load(repo:)` downloads a HuggingFace snapshot and delegates to `load(directory:)`.
-- `InferenceSession.prepare()` is async and now prepares text/chat prompts plus Qwen-style image-bearing and video-bearing chat prompts.
-- `InferenceSession.generate(parameters:)` returns `AsyncStream<GenerationEvent>`.
+- `ModelBundleLoader.load(repo:)` and `load(directory:)` return a `LanguageModelContainer`.
+- `ModelBundleLoader.loadTextEmbeddings(repo:)` and `loadTextEmbeddings(directory:)` return a `TextEmbeddingContainer`.
+- `LanguageModelContainer` is the primary public entry point for language generation.
+- `LanguageModelContext` is the mutable runtime state for explicit context ownership, prompt snapshots, or staged execution.
+- `TextEmbeddingContainer` is the primary public entry point for text embeddings.
+- `TextEmbeddingContext` is the mutable runtime state for explicit embedding-context ownership.
+- `ModelInput` is the primary public request value for language-model APIs.
+- `TextEmbeddingInput` is the primary public request value for embedding APIs.
+- `PromptPreparationOptions` holds prompt/render-time configuration only.
+- `GenerationParameters` holds generation/output-time configuration only.
 - `PreparedPrompt` carries rendered prompt text, token IDs, and optional multimodal prompt metadata.
 - `ExecutablePrompt` carries the validated runtime input accepted by the current Metal execution path, including Qwen-style multimodal execution payloads when supported by the loaded bundle.
+
+Public API design rules:
+
+- Prefer `Container -> Context` as the top-level shape of the API.
+- Use the container as the recommended entry point for most app code.
+- Use the context when the caller explicitly needs mutable runtime ownership.
+- Prefer request-value types over parallel argument lists.
+  - language generation uses `ModelInput`
+  - embeddings use `TextEmbeddingInput`
+- Keep prompt/render-time options separate from generation-time options.
+  - prompt/template controls belong in `PromptPreparationOptions`
+  - sampling and output controls belong in `GenerationParameters`
+- Keep staged APIs available, but treat them as advanced APIs.
+  - `PreparedPrompt` and `ExecutablePrompt` are not the default path
+  - one-shot container APIs should remain the easiest path to use
+- When adding new options, first decide whether they are:
+  - structural request data
+  - prompt/render-time options
+  - generation/output-time options
+  - advanced staged/runtime-only details
+- Do not add public APIs that leak backend-specific Metal execution details into `SwiftLM`.
+- Keep language-model APIs and embedding APIs directionally aligned unless there is a clear reason not to.
 
 Do not reintroduce stale assumptions from older designs:
 
 - no GGUF loader types
 - no MLX execution engine
+- no `InferenceSession`
 - no async `preparePrefix`
 - no `perform(values:operation:)`
 
@@ -382,6 +414,190 @@ For performance or correctness work on Metal execution:
 - use `autoreleasepool` or tighter object lifetimes around repeated bundle loads and synchronous helper loops to avoid misleading crash signatures from retained GPU resources
 - add small contract tests for fragments, routing, stride/layout, and ownership rules; do not rely only on end-to-end text assertions
 - weak assertions such as `contains("tokyo")` are insufficient for correctness-sensitive regressions; prefer token IDs, exact prefix, or reference-aligned expectations where feasible
+
+## Production Readiness Gates
+
+Do not describe `swift-lm` as production-ready unless all of the following are true.
+
+### 1. Output correctness is stable
+
+- Major supported model families have focused real-model output tests.
+- Reference-aligned or exact-prefix assertions exist for critical prompts.
+- Output quality is confirmed before any benchmark result is treated as meaningful.
+- Inference-policy differences (`none`, `standard`, `aggressive`, RotorQuant, fallback paths) are checked for behavioral equivalence where they should match.
+
+### 2. Crash and memory behavior are understood
+
+- Repeated model load / generate / reset / snapshot-restore loops have been exercised without xctest restarts or unexplained process exits.
+- Heavy real-model tests are split into focused invocations to avoid false confidence from suite-level batching.
+- Large synchronous helper loops use tight lifetimes and `autoreleasepool` boundaries where appropriate.
+- Known crash-prone paths have probes or diagnostics that make the failure boundary obvious.
+
+### 3. Performance is measured only after correctness
+
+- Baseline benchmark numbers are recorded for representative models and policies.
+- Regressions are judged on both total tok/s and decode tok/s.
+- Benchmark diagnostics confirm that expected optimizer features remain active.
+- Performance claims are not made from builds that have unresolved output-quality issues.
+
+### 4. Public API direction is stable
+
+- `Container -> Context` remains the top-level API shape.
+- Request-value types remain the preferred public request shape.
+- Prompt/render options remain separate from generation/output options.
+- Advanced staged APIs remain available but are not the default recommended path.
+- New public APIs are reviewed against these rules before being added.
+
+### 5. Capability reporting is accurate
+
+- `ModelConfiguration.inputCapabilities` and `executionCapabilities` reflect actual supported behavior.
+- Unsupported modalities or template configurations fail with explicit errors.
+- README, DocC, tests, and actual runtime behavior stay aligned.
+
+### 6. Release process is repeatable
+
+- Focused correctness suites and smoke benchmarks are runnable with documented commands.
+- Supported-model notes and known limitations are updated for each release.
+- A release should not be cut while correctness regressions, unexplained crashes, or broken focused suites remain open.
+
+Recommended execution order for readiness work:
+
+1. narrow contract tests
+2. focused real-model correctness tests
+3. policy / optimizer equivalence checks
+4. smoke benchmarks
+5. longer benchmarks and release validation
+
+### Production Validation Matrix
+
+Use the following matrix as the default readiness checklist. Prefer focused
+`build-for-testing` once, then `test-without-building` per suite or per case.
+
+- LFM2 / LFM2.5
+  - declaration / graph validity
+    - `ModelsTests/ModelDeclarationTests`
+  - compiler / fragment / routing contracts
+    - `MetalCompilerTests/ComponentDispatchTests`
+    - `MetalCompilerTests/BarrierOptimizationTests`
+    - `MetalCompilerTests/PrefillTransferTests`
+  - reference-aligned correctness
+    - `MetalCompilerTests/ReferenceComparisonTests`
+    - `SwiftLMTests/ReleaseSmokePromptStateTests`
+  - chat-template correctness
+    - `SwiftLMTests/ChatTemplateRenderingTests`
+  - performance smoke
+    - `SwiftLMTests/GenerationThroughputBenchmarkTests`
+    - `SwiftLMTests/GenerationScalingBenchmarkTests`
+    - `SwiftLMTests/GenerationStreamingBenchmarkTests`
+    - `MetalCompilerTests/BenchmarkDiagnosticsTests`
+  - pass criteria
+    - reference comparisons pass or skip only because local reference assets are absent
+    - prompt-state direct vs restored generation stays equivalent
+    - benchmark diagnostics do not show broken optimizer configuration
+
+- Gemma4
+  - declaration / graph validity
+    - `ModelsTests/ModelDeclarationTests`
+    - `MetalCompilerTests/Gemma4CompilerTests`
+  - real-bundle correctness
+    - `SwiftLMTests/Gemma4RealBundleTests`
+  - chat-template / thinking correctness
+    - `SwiftLMTests/ChatTemplateRenderingTests`
+  - performance smoke
+    - `MetalCompilerTests/Gemma4BenchmarkTests`
+    - `MetalCompilerTests/RotorQuantBenchmarkTests`
+  - pass criteria
+    - factual greedy output starts with the expected prefix
+    - prompt-state and direct generation remain consistent
+    - image prompt preparation and execution pass when local assets are available
+    - RotorQuant quality checks remain within the expected tolerance
+
+- Qwen3.5 / Qwen vision
+  - declaration / graph validity
+    - `ModelsTests/ModelDeclarationTests`
+    - `SwiftLMTests/DimensionValidatorTests`
+  - multimodal preparation / execution
+    - `SwiftLMTests/QwenVisionCapabilityTests`
+    - `SwiftLMTests/QwenVisionPromptProcessorTests`
+    - `SwiftLMTests/QwenVisionExecutionLayoutTests`
+    - `SwiftLMTests/QwenVisionExecutionTests`
+    - `SwiftLMTests/QwenVisionIntegrationTests`
+  - real-bundle checks
+    - `SwiftLMTests/QwenVisionRealBundleImageTests`
+    - `SwiftLMTests/QwenVisionRealBundleVideoTests`
+    - `SwiftLMTests/QwenVisionRealBundleMixedTests`
+    - `SwiftLMTests/QwenVisionRealBundlePromptStateTests`
+  - pass criteria
+    - placeholder expansion, multimodal token typing, and executable layout all agree
+    - prompt-state reuse remains valid for multimodal prompts
+    - unsupported modality combinations fail explicitly, not implicitly
+
+- Text embeddings
+  - metadata / runtime contracts
+    - `SwiftLMTests/TextEmbeddingRuntimeTests`
+    - `SwiftLMTests/TextEmbeddingContainerIsolationTests`
+  - real-bundle correctness
+    - `SwiftLMTests/EmbeddingGemmaRealBundleTests`
+    - `SwiftLMTests/EmbeddingGemmaReferenceParityTests`
+  - pass criteria
+    - output dimension and normalization behavior match bundle expectations
+    - retrieval/reference parity remains within the stored tolerance
+
+- RotorQuant / KV cache policy
+  - correctness / sizing
+    - `MetalCompilerTests/RotorQuantCorrectnessTests`
+    - `MetalCompilerTests/RotorQuantBenchmarkTests`
+  - pass criteria
+    - policy-specific correctness checks pass before throughput claims are used
+    - memory-size expectations and quality checks remain stable
+
+Suggested command pattern:
+
+1. `perl -e 'alarm shift; exec @ARGV' 120 xcodebuild build-for-testing -scheme swift-lm-Package -destination 'platform=macOS'`
+2. `perl -e 'alarm shift; exec @ARGV' 120 xcodebuild test-without-building -scheme swift-lm-Package -destination 'platform=macOS' -only-testing:<Target>/<SuiteOrCase>`
+
+When running release validation, do not batch multiple heavy real-bundle suites in
+one test process. Run them one at a time and inspect the result before starting the
+next suite.
+
+### Readiness Tracking Rules
+
+When reporting current readiness status, classify each area as exactly one of:
+
+- `done`
+- `partial`
+- `missing`
+
+Status rules:
+
+- `done`
+  - there is direct evidence from recent test or benchmark execution
+  - the relevant focused suites or cases passed
+  - no known open correctness or crash issue blocks the claim
+- `partial`
+  - some coverage or evidence exists, but not enough to make a production claim
+  - local-asset-dependent suites were skipped or not all focused suites were run
+  - performance data exists without complete correctness evidence, or vice versa
+- `missing`
+  - no current evidence exists
+  - the required suite, benchmark, or real-bundle check has not been run
+  - the area is still design-only or known-broken
+
+Evidence rules:
+
+- Do not mark an area `done` from code inspection alone.
+- Do not mark an area `done` from benchmark numbers alone.
+- Do not use passing unit tests to claim real-model correctness.
+- Do not use a suite-level green result if the intended case did not actually run.
+- If a real-bundle suite skips because assets are absent, record that as `partial`, not `done`.
+- If output correctness is unresolved, benchmark evidence can only raise an area to `partial`.
+
+Recommended reporting format:
+
+- area
+  - status: `done|partial|missing`
+  - evidence: concrete suite or benchmark names
+  - gap: the next missing check required to reach `done`
 
 ## Editing Guidance
 

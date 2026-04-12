@@ -13,7 +13,7 @@ This guide is for application developers integrating `SwiftLM` as a library.
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/1amageek/swift-lm.git", from: "0.2.0")
+    .package(url: "https://github.com/1amageek/swift-lm.git", from: "0.3.0")
 ],
 targets: [
     .target(
@@ -100,10 +100,40 @@ let embeddings = try await ModelBundleLoader().loadTextEmbeddings(
     repo: "google/embeddinggemma-300m"
 )
 
+let vector = try embeddings.embed(
+    TextEmbeddingInput(
+        "swift metal inference",
+        promptName: embeddings.defaultPromptName
+    )
+)
+
+print("embedding dimension =", vector.count)
+```
+
+Recommended high-level flow:
+
+```swift
+let embeddings = try await ModelBundleLoader().loadTextEmbeddings(
+    repo: "google/embeddinggemma-300m"
+)
+
+let vector = try embeddings.embed(
+    TextEmbeddingInput(
+        "swift metal inference",
+        promptName: embeddings.defaultPromptName
+    )
+)
+```
+
+Context-owned flow when you want explicit mutable state:
+
+```swift
 let context = try TextEmbeddingContext(embeddings)
 let vector = try context.embed(
-    "swift metal inference",
-    promptName: embeddings.defaultPromptName
+    TextEmbeddingInput(
+        "swift metal inference",
+        promptName: embeddings.defaultPromptName
+    )
 )
 
 print("embedding dimension =", vector.count)
@@ -111,7 +141,83 @@ print("embedding dimension =", vector.count)
 
 `TextEmbeddingContainer` is the immutable loaded bundle and factory for execution state. `TextEmbeddingContext` owns the isolated mutable prefill runtime used to compute embeddings.
 
+`TextEmbeddingInput` is the primary public request value for embeddings. `TextEmbeddingContainer.embed(_:)` is the recommended entry point. `TextEmbeddingContext.embed(_:)` is the context-owned API when you want explicit runtime ownership. The string-based overloads remain as convenience APIs.
+
+Internally, embedding bundles are normalized into structural stages and output-only postprocessors:
+
+- structure: pooling and dense layers
+- postprocessors: output modifiers such as L2 normalization
+
+`normalize` is treated as a postprocessor, not as a structural argument.
+
+## Public API Shape
+
+`swift-lm` uses a consistent public API split:
+
+- container types own immutable loaded bundles
+- context types own reusable mutable runtime state
+- input value types carry request data
+
+For generation:
+
+- `LanguageModelContainer`
+- `LanguageModelContext`
+- `ModelInput`
+
+For embeddings:
+
+- `TextEmbeddingContainer`
+- `TextEmbeddingContext`
+- `TextEmbeddingInput`
+
+This keeps runtime ownership explicit without forcing advanced staging into the common path.
+
 ## Generate from Text
+
+Recommended high-level flow:
+
+```swift
+import SwiftLM
+
+let stream = try await container.generate(
+    ModelInput(prompt: "Write a haiku about Metal shaders."),
+    parameters: GenerationParameters(
+        maxTokens: 128,
+        temperature: 0.6,
+        topP: 0.9
+    )
+)
+
+for await event in stream {
+    if let chunk = event.text {
+        print(chunk, terminator: "")
+    }
+}
+```
+
+Context-owned flow when you want explicit mutable state but do not need manual staging:
+
+```swift
+import SwiftLM
+
+let context = try LanguageModelContext(container)
+let stream = try await context.generate(
+    ModelInput(prompt: "Write a haiku about Metal shaders."),
+    parameters: GenerationParameters(
+        maxTokens: 128,
+        temperature: 0.6,
+        topP: 0.9
+    )
+)
+
+for await event in stream {
+    if let chunk = event.text {
+        print(chunk, terminator: "")
+    }
+}
+```
+
+Advanced staged flow when you need explicit prompt ownership:
 
 ```swift
 import SwiftLM
@@ -141,7 +247,39 @@ for await event in stream {
 
 `LanguageModelContainer` is the immutable loaded bundle and factory for execution state. `LanguageModelContext` is the mutable runtime state for one conversation or generation flow.
 
-Use `PreparedPrompt` as the result of prompt preparation and `ExecutablePrompt` as the runtime execution shape. `LanguageModelContainer.generate(_:parameters:)` is the async one-shot convenience entry point; `LanguageModelContext.generate(from:parameters:)` is the low-level execution API when you want explicit context ownership.
+Use `PreparedPrompt` as the result of prompt preparation and `ExecutablePrompt` as the runtime execution shape. `LanguageModelContainer.generate(_:parameters:)` is the recommended one-shot entry point; `LanguageModelContext.generate(_:parameters:)` is the recommended context-owned entry point; `LanguageModelContext.generate(from:parameters:)` is the low-level execution API when you want explicit prompt staging.
+
+## Thinking and Reasoning
+
+Prompt-time thinking control and output-time reasoning visibility are configured separately.
+
+Use `PromptPreparationOptions` for prompt rendering:
+
+```swift
+let input = ModelInput(
+    chat: [
+        .user("Solve this carefully.")
+    ],
+    promptOptions: .init(isThinkingEnabled: true)
+)
+```
+
+Use `GenerationParameters.reasoning` for output visibility:
+
+```swift
+let parameters = GenerationParameters(
+    maxTokens: 128,
+    reasoning: .separate
+)
+```
+
+This separation is intentional:
+
+- `PromptPreparationOptions.isThinkingEnabled` affects templates that expose `enable_thinking`
+- `PromptPreparationOptions.templateVariables` is only for prompt-template rendering
+- `GenerationParameters.reasoning` controls whether reasoning is hidden, inline, or emitted separately
+
+When reasoning visibility is `.separate`, generation can emit `.reasoning(String)` events alongside visible `.text(String)` events.
 
 ## Generate from Chat Messages
 
@@ -233,8 +371,10 @@ context.resetState()
 
 For sentence-transformers bundles:
 
-- `TextEmbeddingContainer.embed(_:,promptName:)` is the one-shot convenience API
-- `TextEmbeddingContext.embed(_:,promptName:)` is the low-level API when you want explicit context ownership
+- `TextEmbeddingContainer.embed(_:)` is the recommended one-shot entry point
+- `TextEmbeddingContext.embed(_:)` is the context-owned API when you want explicit runtime ownership
+- `TextEmbeddingContainer.embed(_:,promptName:)` and `TextEmbeddingContext.embed(_:,promptName:)` remain as convenience overloads
+- `TextEmbeddingInput` is the preferred request value for new code
 - `availablePromptNames` and `defaultPromptName` expose prompt presets declared by the bundle
 
 ## Generation Parameters
@@ -245,8 +385,12 @@ For sentence-transformers bundles:
 - `streamChunkTokenCount`
 - `temperature`
 - `topP`
+- `topK`
+- `minP`
 - `repetitionPenalty`
+- `presencePenalty`
 - `repetitionContextSize`
+- `reasoning`
 
 For predictable behavior, set `maxTokens` explicitly. If `maxTokens` is `nil`, the current runtime applies its default cap.
 

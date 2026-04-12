@@ -58,8 +58,8 @@ struct TextEmbeddingContainerIsolationTests {
             defaultPromptName: "query",
             similarityFunctionName: "cosine",
             pooling: .init(strategy: .mean, includePrompt: true),
-            denseModules: [],
-            normalizeOutput: false
+            denseLayers: [],
+            postprocessors: []
         )
         return try SentenceTransformerTextEmbeddingRuntime(
             metadata: metadata,

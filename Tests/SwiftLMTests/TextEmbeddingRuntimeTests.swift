@@ -197,8 +197,8 @@ struct TextEmbeddingRuntimeTests {
         #expect(metadata.availablePromptNames == ["document", "query"])
         #expect(metadata.pooling.strategy == .mean)
         #expect(metadata.pooling.includePrompt)
-        #expect(metadata.denseModules.count == 2)
-        #expect(metadata.normalizeOutput)
+        #expect(metadata.denseLayers.count == 2)
+        #expect(metadata.postprocessors == [.l2Normalize])
     }
 
     @Test("SentenceTransformerMetadata falls back to model-scoped defaults when module configs are absent")
@@ -282,19 +282,45 @@ struct TextEmbeddingRuntimeTests {
 
         #expect(metadata.pooling.strategy == .mean)
         #expect(metadata.pooling.includePrompt)
-        #expect(metadata.denseModules.count == 2)
-        #expect(metadata.denseModules.allSatisfy { $0.activation == .identity })
-        #expect(metadata.normalizeOutput)
+        #expect(metadata.denseLayers.count == 2)
+        #expect(metadata.denseLayers.allSatisfy { $0.activation == .identity })
+        #expect(metadata.postprocessors == [.l2Normalize])
     }
 
-    @Test("SentenceTransformer runtime applies prompt-aware pooling, dense, and normalize")
+    @Test("SentenceTransformer metadata omits postprocessors when Normalize module is absent")
+    func sentenceTransformerMetadataWithoutNormalizeHasNoPostprocessors() throws {
+        let metadata = SentenceTransformerMetadata(
+            prompts: [:],
+            defaultPromptName: nil,
+            similarityFunctionName: nil,
+            pooling: .init(strategy: .mean, includePrompt: true),
+            denseLayers: [],
+            postprocessors: []
+        )
+
+        #expect(metadata.postprocessors.isEmpty)
+        #expect(metadata.pooling.includePrompt)
+    }
+
+    @Test("TextEmbeddingInput keeps text and prompt selection together")
+    func textEmbeddingInputCapturesRequestValue() {
+        let implicit = TextEmbeddingInput("swift metal", promptName: "query")
+        #expect(implicit.text == "swift metal")
+        #expect(implicit.promptName == "query")
+
+        let explicit = TextEmbeddingInput(text: "embedding", promptName: nil)
+        #expect(explicit.text == "embedding")
+        #expect(explicit.promptName == nil)
+    }
+
+    @Test("SentenceTransformer runtime applies pooling then dense then postprocessors")
     func sentenceTransformerRuntimePipeline() throws {
         let metadata = SentenceTransformerMetadata(
             prompts: ["query": "task: search | query: "],
             defaultPromptName: nil,
             similarityFunctionName: "cosine",
             pooling: .init(strategy: .mean, includePrompt: false),
-            denseModules: [
+            denseLayers: [
                 .init(
                     weightName: "dense.0.weight",
                     biasName: "dense.0.bias",
@@ -303,7 +329,7 @@ struct TextEmbeddingRuntimeTests {
                     activation: .identity
                 )
             ],
-            normalizeOutput: true
+            postprocessors: [.l2Normalize]
         )
         let weightStore = CPUWeightStore(denseTensors: [
             "dense.0.weight": .init(
@@ -336,6 +362,60 @@ struct TextEmbeddingRuntimeTests {
         #expect(embedding.count == 2)
         #expect(abs(embedding[0] - 0.8) < 0.0001)
         #expect(abs(embedding[1] - 0.6) < 0.0001)
+        #expect(prepared.promptTokenCount > 0)
+    }
+
+    @Test("SentenceTransformer runtime only normalizes when postprocessors request it")
+    func sentenceTransformerRuntimeSkipsNormalizeWhenPostprocessorsAreEmpty() throws {
+        let metadata = SentenceTransformerMetadata(
+            prompts: ["query": "task: search | query: "],
+            defaultPromptName: nil,
+            similarityFunctionName: nil,
+            pooling: .init(strategy: .mean, includePrompt: false),
+            denseLayers: [
+                .init(
+                    weightName: "dense.0.weight",
+                    biasName: "dense.0.bias",
+                    inputDimension: 2,
+                    outputDimension: 2,
+                    activation: .identity
+                )
+            ],
+            postprocessors: []
+        )
+        let weightStore = CPUWeightStore(denseTensors: [
+            "dense.0.weight": .init(
+                values: [
+                    2, 0,
+                    0, 1,
+                ],
+                shape: [2, 2]
+            )
+        ])
+        let runtime = try SentenceTransformerTextEmbeddingRuntime(
+            metadata: metadata,
+            weightStore: weightStore
+        )
+        let tokenizer = QwenVisionTestTokenizer()
+        let prepared = try runtime.prepare(
+            text: "swift metal",
+            promptName: "query",
+            tokenizer: tokenizer
+        )
+        let hiddenStates = Array(
+            repeating: [Float](repeating: 0, count: 2),
+            count: prepared.promptTokenCount
+        ) + [[1, 2], [3, 4]]
+
+        let embedding = try runtime.embed(
+            hiddenStates: hiddenStates,
+            promptTokenCount: prepared.promptTokenCount
+        )
+
+        #expect(abs(embedding[0] - 4) < 0.0001)
+        #expect(abs(embedding[1] - 3) < 0.0001)
+        let norm = (embedding[0] * embedding[0] + embedding[1] * embedding[1]).squareRoot()
+        #expect(abs(norm - 5) < 0.0001)
     }
 
     @Test("CPUWeightStore dequantizes q4 group64 tensors to logical shape")

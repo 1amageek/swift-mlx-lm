@@ -32,10 +32,11 @@ LMIR (IR モジュール — backend 非依存)
     │   └── KVCacheSpecification (compiler internal: resolved K/V cache layout)
     │
     └── SwiftLM (consumer API — depends: LMArchitecture, MetalCompiler, ModelDeclarations)
-        ├── ModelBundleLoader (HF download → STAF → compile(inferencePolicy:) → ModelContainer)
-        ├── ModelContainer (generate, encode, decode)
-        ├── ModelInput, PreparedInput, ExecutablePrompt, Generation, GenerateParameters
-        └── InputMessage, InputImage, InputVideo, ModelConfiguration
+        ├── ModelBundleLoader (HF download → STAF → compile(inferencePolicy:) → LanguageModelContainer / TextEmbeddingContainer)
+        ├── LanguageModelContainer / LanguageModelContext
+        ├── TextEmbeddingContainer / TextEmbeddingContext
+        ├── ModelInput, PreparedPrompt, ExecutablePrompt, PromptSnapshot, GenerationParameters, GenerationEvent
+        └── InputMessage, InputImage, InputVideo, TextEmbeddingInput, ModelConfiguration
 ```
 
 ## Metal Backend 設計原則

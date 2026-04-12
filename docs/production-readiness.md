@@ -10,6 +10,7 @@ The release bar is:
 - no known crash path in prompt-state, sampling, or Metal residency paths
 - no material throughput regression against model-specific baselines
 - clear probes for fast diagnosis when a Metal execution path breaks
+- user-facing docs describe the current public API without stale names or stale flow guidance
 
 ## Correctness Gates
 
@@ -65,6 +66,22 @@ Probe coverage must include:
 - hidden override and deepstack staging paths
 
 Probe output must stay disabled by default.
+
+## Documentation Gate
+
+The public API documentation must stay consistent across:
+
+- `README.md`
+- `docs/using-swift-lm.md`
+- `Sources/SwiftLM/SwiftLM.docc/`
+
+Required expectations:
+
+- `Container / Context / Input` is the documented API shape for both generation and embeddings
+- prompt-time thinking control is documented under `PromptPreparationOptions`
+- output-time reasoning visibility is documented under `GenerationParameters.reasoning` / `ReasoningOptions`
+- staged generation APIs are described as advanced, not as the default entry point
+- embedding docs use `TextEmbeddingInput` as the preferred request value
 
 ## Test Execution Rules
 

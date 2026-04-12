@@ -3,6 +3,9 @@ public enum GenerationEvent: Sendable {
     /// A text event containing one or more decoded tokens.
     case text(String)
     /// A reasoning event extracted using the active chat template's reasoning tags.
+    ///
+    /// This case is surfaced when ``GenerationParameters/reasoning`` uses
+    /// ``ReasoningOptions/separate``.
     case reasoning(String)
     /// Completion information (token count, timing, etc.).
     case completed(CompletionInfo)

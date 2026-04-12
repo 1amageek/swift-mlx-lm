@@ -37,6 +37,14 @@ public struct InputMessage: Sendable {
         InputMessage(role: .assistant, content: content)
     }
 
+    public static func tool(_ content: String) -> InputMessage {
+        InputMessage(role: .tool, content: content)
+    }
+
+    public static func tool(_ content: [Content]) -> InputMessage {
+        InputMessage(role: .tool, content: content)
+    }
+
     var containsImageContent: Bool {
         content.contains { item in
             if case .image = item {

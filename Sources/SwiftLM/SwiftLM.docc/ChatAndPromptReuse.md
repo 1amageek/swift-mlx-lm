@@ -2,24 +2,23 @@
 
 ## Chat Input
 
-Use ``ModelInput`` with ``InputMessage`` values to generate from a conversation:
+Use ``ModelInput`` with ``InputMessage`` values to generate from a conversation.
+For most applications, start from ``LanguageModelContainer/generate(_:parameters:)``:
 
 ```swift
-let context = try LanguageModelContext(container)
-let prepared = try await context.prepare(
+for await event in try await container.generate(
     ModelInput(chat: [
         .system("You are a concise assistant."),
         .user("Summarize the benefits of zero-copy model loading.")
     ])
-)
-let executable = try ExecutablePrompt(preparedPrompt: prepared, using: context)
-
-for await event in try context.generate(from: executable) {
+) {
     if let chunk = event.text {
         print(chunk, terminator: "")
     }
 }
 ```
+
+Use ``LanguageModelContext`` and ``ExecutablePrompt`` only when you need explicit prompt staging or prompt snapshot reuse.
 
 When `chat_template.jinja` or `tokenizer_config.json["chat_template"]` is available, `SwiftLM` renders the model's chat template automatically. Otherwise it falls back to a simple role-prefixed transcript.
 

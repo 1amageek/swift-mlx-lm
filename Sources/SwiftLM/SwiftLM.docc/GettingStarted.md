@@ -56,10 +56,11 @@ let embeddings = try await ModelBundleLoader().loadTextEmbeddings(
     repo: "google/embeddinggemma-300m"
 )
 
-let context = try TextEmbeddingContext(embeddings)
-let vector = try context.embed(
-    "swift metal inference",
-    promptName: embeddings.defaultPromptName
+let vector = try embeddings.embed(
+    TextEmbeddingInput(
+        "swift metal inference",
+        promptName: embeddings.defaultPromptName
+    )
 )
 
 print(vector.count)
@@ -67,17 +68,15 @@ print(vector.count)
 
 ``TextEmbeddingContainer`` is the immutable loaded bundle and factory for execution state. ``TextEmbeddingContext`` owns the isolated mutable prefill runtime used for embedding execution.
 
+For most applications, start from ``TextEmbeddingContainer/embed(_:)`` and pass a ``TextEmbeddingInput`` value. Use ``TextEmbeddingContext`` only when you want explicit ownership of reusable mutable embedding state.
+
+For more details, see <doc:TextEmbeddings>.
+
 ## Generate from Text
 
 ```swift
-let context = try LanguageModelContext(container)
-let input = try await context.prepare(
-    ModelInput(prompt: "Write a haiku about Metal shaders.")
-)
-let executable = try ExecutablePrompt(preparedPrompt: input, using: context)
-
-let stream = try context.generate(
-    from: executable,
+let stream = try await container.generate(
+    ModelInput(prompt: "Write a haiku about Metal shaders."),
     parameters: GenerationParameters(
         maxTokens: 128,
         streamChunkTokenCount: 8,
@@ -98,7 +97,9 @@ for await event in stream {
 
 ``LanguageModelContainer`` is the immutable loaded bundle and factory for execution state. ``LanguageModelContext`` owns mutable decode state such as KV position, prompt snapshots, and generation progress.
 
-``LanguageModelContext/generate(from:parameters:)`` returns an `AsyncStream` of ``GenerationEvent`` values. ``LanguageModelContainer/generate(_:parameters:)`` and ``LanguageModelContainer/generate(from:parameters:)`` are one-shot convenience APIs that create a fresh context internally. The public generation entry points throw when the prompt cannot be executed.
+For most applications, start from ``LanguageModelContainer/generate(_:parameters:)``. Use ``LanguageModelContext/generate(_:parameters:)`` when you want explicit ownership of mutable generation state, and use ``ExecutablePrompt`` only when you need manual prompt staging.
+
+`LanguageModelContext.generate(from:parameters:)` returns an `AsyncStream` of ``GenerationEvent`` values. ``LanguageModelContainer/generate(_:parameters:)`` and ``LanguageModelContainer/generate(from:parameters:)`` are one-shot convenience APIs that create a fresh context internally. The public generation entry points throw when the prompt cannot be executed.
 
 `ModelInput` is the primary prompt type. It now supports Qwen3-VL style image-bearing and video-bearing chat prompts during preparation and execution when the loaded bundle includes compatible vision weights.
 

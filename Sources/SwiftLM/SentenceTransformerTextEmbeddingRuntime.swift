@@ -24,7 +24,7 @@ struct SentenceTransformerTextEmbeddingRuntime: Sendable {
     private let prompts: [String: String]
     private let pooling: SentenceTransformerMetadata.Pooling
     private let denseLayers: [DenseLayer]
-    private let normalizeOutput: Bool
+    private let postprocessors: [SentenceEmbeddingPostprocessor]
 
     init(resources: ModelBundleResources, weights: STAFWeightStore) throws {
         let metadata = try SentenceTransformerMetadata.load(from: resources)
@@ -40,8 +40,8 @@ struct SentenceTransformerTextEmbeddingRuntime: Sendable {
         self.availablePromptNames = metadata.availablePromptNames
         self.defaultPromptName = metadata.defaultPromptName
         self.pooling = metadata.pooling
-        self.normalizeOutput = metadata.normalizeOutput
-        self.denseLayers = try metadata.denseModules.map { module in
+        self.postprocessors = metadata.postprocessors
+        self.denseLayers = try metadata.denseLayers.map { module in
             let weights = try weightStore.floatTensor(named: module.weightName)
             let shape = try weightStore.shape(named: module.weightName)
             guard shape.count == 2 else {
@@ -122,10 +122,7 @@ struct SentenceTransformerTextEmbeddingRuntime: Sendable {
         for layer in denseLayers {
             embedding = try applyDense(layer, to: embedding)
         }
-        if normalizeOutput {
-            embedding = l2Normalize(embedding)
-        }
-        return embedding
+        return applyPostprocessors(to: embedding)
     }
 
     private func pool(
@@ -218,5 +215,14 @@ struct SentenceTransformerTextEmbeddingRuntime: Sendable {
         guard squaredNorm > 0 else { return values }
         let scale = 1 / squaredNorm.squareRoot()
         return values.map { $0 * scale }
+    }
+
+    private func applyPostprocessors(to values: [Float]) -> [Float] {
+        postprocessors.reduce(values) { partial, postprocessor in
+            switch postprocessor {
+            case .l2Normalize:
+                return l2Normalize(partial)
+            }
+        }
     }
 }

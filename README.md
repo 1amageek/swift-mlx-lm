@@ -21,8 +21,31 @@ The public API is centered on:
 - `TextEmbeddingContainer`
 - `TextEmbeddingContext`
 - `ModelInput`
+- `TextEmbeddingInput`
 - `GenerationParameters`
 - `PromptSnapshot`
+
+## API Shape
+
+`swift-lm` uses a consistent public API shape:
+
+- container types own immutable loaded bundles
+- context types own reusable mutable runtime state
+- input value types carry request data
+
+For generation, that means:
+
+- `LanguageModelContainer`
+- `LanguageModelContext`
+- `ModelInput`
+
+For embeddings, that means:
+
+- `TextEmbeddingContainer`
+- `TextEmbeddingContext`
+- `TextEmbeddingInput`
+
+This split keeps prompt/render configuration, generation policy, and runtime ownership separate.
 
 ## Quick Start
 
@@ -33,7 +56,6 @@ let container = try await ModelBundleLoader().load(
     repo: "LiquidAI/LFM2.5-1.2B-Instruct"
 )
 
-let context = try LanguageModelContext(container)
 let input = ModelInput(
     chat: [
         .system("You are a concise assistant."),
@@ -42,10 +64,8 @@ let input = ModelInput(
     promptOptions: .init(isThinkingEnabled: true)
 )
 
-let prepared = try await context.prepare(input)
-let executable = try ExecutablePrompt(preparedPrompt: prepared, using: context)
-let stream = try context.generate(
-    from: executable,
+let stream = try await container.generate(
+    input,
     parameters: GenerationParameters(
         maxTokens: 128,
         streamChunkTokenCount: 8,
@@ -68,6 +88,9 @@ for await event in stream {
 ```
 
 `LanguageModelContainer` is the immutable loaded bundle and factory for execution state. `LanguageModelContext` owns mutable decode state such as KV position, prompt snapshots, and generation progress.
+
+For most applications, start from `LanguageModelContainer.generate(_:, parameters:)`.
+Use `LanguageModelContext`, `PreparedPrompt`, and `ExecutablePrompt` only when you need explicit prompt staging or prompt snapshot reuse.
 
 ## Public API
 
@@ -92,12 +115,57 @@ let embeddings = try await ModelBundleLoader().loadTextEmbeddings(
     repo: "google/embeddinggemma-300m"
 )
 
+let vector = try embeddings.embed(
+    TextEmbeddingInput(
+        "swift metal inference",
+        promptName: embeddings.defaultPromptName
+    )
+)
+print(vector.count)
+```
+
+Recommended flow for most apps:
+
+```swift
+let embeddings = try await ModelBundleLoader().loadTextEmbeddings(
+    repo: "google/embeddinggemma-300m"
+)
+
+let vector = try embeddings.embed(
+    TextEmbeddingInput(
+        "swift metal inference",
+        promptName: embeddings.defaultPromptName
+    )
+)
+```
+
+Context-owned flow when you want explicit mutable state:
+
+```swift
 let context = try TextEmbeddingContext(embeddings)
-let vector = try context.embed("swift metal inference", promptName: embeddings.defaultPromptName)
+let vector = try context.embed(
+    TextEmbeddingInput(
+        "swift metal inference",
+        promptName: embeddings.defaultPromptName
+    )
+)
 print(vector.count)
 ```
 
 As with language generation, `TextEmbeddingContainer` is immutable and shareable, while `TextEmbeddingContext` owns isolated mutable runtime state for embedding execution.
+
+For most applications, start from `TextEmbeddingContainer.embed(_:)`.
+Use `TextEmbeddingContext` only when you want explicit ownership of reusable mutable embedding state.
+
+`TextEmbeddingInput` is the primary public request value for embedding APIs.
+The existing `embed(_ text:promptName:)` overloads remain as convenience entry points.
+
+Internally, sentence-transformers embedding pipelines are modeled as:
+
+- structural stages: pooling and dense layers
+- postprocessors: output-only modifiers such as L2 normalization
+
+This keeps embedding structure separate from output modifiers without exposing a fluent modifier API publicly.
 
 ### Prompt Preparation
 
@@ -118,6 +186,35 @@ As with language generation, `TextEmbeddingContainer` is immutable and shareable
 
 This separation matters because prompt-template variables affect rendered input, while reasoning visibility affects output presentation.
 
+### Thinking and Reasoning
+
+`swift-lm` intentionally separates prompt-time thinking control from output-time reasoning visibility.
+
+- `PromptPreparationOptions.isThinkingEnabled`
+  - Affects chat template rendering for bundles that expose `enable_thinking`
+- `PromptPreparationOptions.templateVariables`
+  - Provides additional template-only render inputs
+- `GenerationParameters.reasoning`
+  - Controls how reasoning is surfaced in generation output
+
+Example:
+
+```swift
+let input = ModelInput(
+    chat: [
+        .user("Solve this carefully.")
+    ],
+    promptOptions: .init(isThinkingEnabled: true)
+)
+
+let parameters = GenerationParameters(
+    maxTokens: 128,
+    reasoning: .separate
+)
+```
+
+When `reasoning` is `.separate`, the stream may emit `.reasoning(String)` events in addition to visible `.text(String)` events.
+
 ### Generation
 
 `LanguageModelContext.generate(from:parameters:)` returns an `AsyncStream<GenerationEvent>`.
@@ -132,6 +229,46 @@ This separation matters because prompt-template variables affect rendered input,
 
 - `generate(_ input: ModelInput, parameters:)`
 - `generate(from: ExecutablePrompt, parameters:)`
+
+`LanguageModelContext` also exposes:
+
+- `generate(_ input: ModelInput, parameters:)` for context-owned generation without manual staging
+- `generate(from: ExecutablePrompt, parameters:)` for explicit prompt staging
+- `generate(from: PromptSnapshot, parameters:)` for prefix reuse
+
+Recommended flow for most apps:
+
+```swift
+let stream = try await container.generate(
+    ModelInput(chat: [
+        .user("Summarize the benefits of zero-copy model loading.")
+    ]),
+    parameters: GenerationParameters(maxTokens: 128, temperature: 0)
+)
+```
+
+Context-owned flow when you want to keep mutable state explicitly:
+
+```swift
+let context = try LanguageModelContext(container)
+let stream = try await context.generate(
+    ModelInput(chat: [
+        .user("Hello")
+    ]),
+    parameters: GenerationParameters(maxTokens: 64)
+)
+```
+
+Advanced flow when you need explicit prompt staging:
+
+```swift
+let context = try LanguageModelContext(container)
+let prepared = try await context.prepare(ModelInput(prompt: "Hello"))
+let executable = try ExecutablePrompt(preparedPrompt: prepared, using: context)
+let stream = try context.generate(from: executable)
+```
+
+`LanguageModelContext.generate(from:parameters:)` is the low-level execution entry point used after explicit staging.
 
 ### Prompt Reuse
 
@@ -168,6 +305,23 @@ Mutable cache control lives on the context:
 ```swift
 context.resetState()
 ```
+
+### Generation Parameters
+
+`GenerationParameters` currently exposes:
+
+- `maxTokens`
+- `streamChunkTokenCount`
+- `temperature`
+- `topP`
+- `topK`
+- `minP`
+- `repetitionPenalty`
+- `presencePenalty`
+- `repetitionContextSize`
+- `reasoning`
+
+For predictable behavior, set `maxTokens` explicitly. If `maxTokens` is `nil`, the runtime uses its default cap.
 
 ## Multimodal Support
 

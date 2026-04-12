@@ -12,11 +12,16 @@ import Jinja
 /// prompt snapshot restore, and generation progress. Initialize it with a
 /// ``LanguageModelContainer`` when you need isolated inference state.
 ///
+/// Most applications should call ``LanguageModelContainer/generate(_:parameters:)``
+/// and let the container create a fresh context internally. Use
+/// `LanguageModelContext` when you need explicit ownership of conversation state,
+/// prompt snapshots, or staged prompt execution.
+///
 /// ```swift
 /// let container = try await ModelBundleLoader().load(repo: "mlx-community/Qwen2.5-0.5B-Instruct")
 /// let context = try LanguageModelContext(container)
-/// let stream = try context.generate(
-///     from: ExecutablePrompt(tokenIDs: context.encode("Hello")),
+/// let stream = try await context.generate(
+///     ModelInput(prompt: "Hello"),
 ///     parameters: GenerationParameters(maxTokens: 100)
 /// )
 /// for await generation in stream {
@@ -775,7 +780,9 @@ public final class LanguageModelContext: @unchecked Sendable {
 
     /// Generate text from an executable prompt.
     ///
-    /// Returns an AsyncStream of GenerationEvent values.
+    /// This is the lowest-level public generation entry point. Prefer
+    /// ``generate(_:parameters:)`` unless you need explicit `ExecutablePrompt`
+    /// control.
     public func generate(
         from prompt: ExecutablePrompt,
         parameters: GenerationParameters = GenerationParameters()
@@ -859,6 +866,9 @@ public final class LanguageModelContext: @unchecked Sendable {
     }
 
     /// Prepare, validate, and generate from a public prompt shape in one step.
+    ///
+    /// This is the recommended entry point when you already own a
+    /// `LanguageModelContext` and want generation without explicit prompt staging.
     public func generate(
         _ input: ModelInput,
         parameters: GenerationParameters = GenerationParameters()

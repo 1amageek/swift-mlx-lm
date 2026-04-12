@@ -3,7 +3,7 @@ import MetalCompiler
 /// A reusable snapshot of decode state for a prepared prompt prefix.
 ///
 /// Build a prompt snapshot with one of `PromptSnapshot`'s initializers and reuse it with
-/// ``LanguageModelContext/generate(from:parameters:)``.
+/// `LanguageModelContext.generate(from:parameters:)`.
 ///
 /// `PromptSnapshot` is context-affine runtime state. Reuse it only with the same
 /// `LanguageModelContext` instance and the same loaded model bundle that produced it.

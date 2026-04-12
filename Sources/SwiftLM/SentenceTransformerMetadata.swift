@@ -38,7 +38,7 @@ struct SentenceTransformerMetadata: Sendable {
         }
     }
 
-    struct DenseModule: Sendable {
+    struct DenseLayerSpec: Sendable {
         let weightName: String
         let biasName: String
         let inputDimension: Int?
@@ -50,8 +50,8 @@ struct SentenceTransformerMetadata: Sendable {
     let defaultPromptName: String?
     let similarityFunctionName: String?
     let pooling: Pooling
-    let denseModules: [DenseModule]
-    let normalizeOutput: Bool
+    let denseLayers: [DenseLayerSpec]
+    let postprocessors: [SentenceEmbeddingPostprocessor]
 
     var availablePromptNames: [String] {
         prompts.keys.sorted()
@@ -69,9 +69,9 @@ struct SentenceTransformerMetadata: Sendable {
 
         var sawTransformer = false
         var pooling: Pooling?
-        var denseModules: [DenseModule] = []
+        var denseLayers: [DenseLayerSpec] = []
         var denseIndex = 0
-        var normalizeOutput = false
+        var postprocessors: [SentenceEmbeddingPostprocessor] = []
 
         for module in modules {
             switch module.kind {
@@ -84,8 +84,8 @@ struct SentenceTransformerMetadata: Sendable {
                     path: module.path
                 )
             case .dense:
-                denseModules.append(
-                    try loadDenseModule(
+                denseLayers.append(
+                    try loadDenseLayerSpec(
                         from: resources.directory,
                         modelType: resources.modelType,
                         path: module.path,
@@ -94,7 +94,9 @@ struct SentenceTransformerMetadata: Sendable {
                 )
                 denseIndex += 1
             case .normalize:
-                normalizeOutput = true
+                if postprocessors.contains(.l2Normalize) == false {
+                    postprocessors.append(.l2Normalize)
+                }
             }
         }
 
@@ -114,8 +116,8 @@ struct SentenceTransformerMetadata: Sendable {
             defaultPromptName: promptConfig.defaultPromptName,
             similarityFunctionName: promptConfig.similarityFunctionName,
             pooling: pooling,
-            denseModules: denseModules,
-            normalizeOutput: normalizeOutput
+            denseLayers: denseLayers,
+            postprocessors: postprocessors
         )
     }
 
@@ -266,12 +268,12 @@ struct SentenceTransformerMetadata: Sendable {
         return Pooling(strategy: strategy, includePrompt: includePrompt)
     }
 
-    private static func loadDenseModule(
+    private static func loadDenseLayerSpec(
         from directory: URL,
         modelType: String,
         path: String,
         denseIndex: Int
-    ) throws -> DenseModule {
+    ) throws -> DenseLayerSpec {
         let configURL = directory
             .appendingPathComponent(path)
             .appendingPathComponent("config.json")
@@ -285,7 +287,7 @@ struct SentenceTransformerMetadata: Sendable {
                     "Missing dense config: \(configURL.path)"
                 )
             }
-            return DenseModule(
+            return DenseLayerSpec(
                 weightName: "dense.\(denseIndex).weight",
                 biasName: "dense.\(denseIndex).bias",
                 inputDimension: nil,
@@ -303,7 +305,7 @@ struct SentenceTransformerMetadata: Sendable {
 
         let activationName = json["activation_function"] as? String
             ?? "torch.nn.modules.linear.Identity"
-        return DenseModule(
+        return DenseLayerSpec(
             weightName: "dense.\(denseIndex).weight",
             biasName: "dense.\(denseIndex).bias",
             inputDimension: json["in_features"] as? Int,
