@@ -88,7 +88,7 @@ public struct AffineQ4Group64Format: QuantizationFormat {
     public var blockStructName: String { "BlockQ4Affine64" }
     public var gemvKernelName: String { "gemv_q4_g64" }
     public func gemmKernelName(bufferPrecision: BufferPrecision) -> String {
-        "gemm_q4_g64"
+        "gemv_q4_g64"
     }
     public var weightsPerBlock: Int { 64 }
     public var bytesPerBlock: Int { 4 + 32 }  // scale(2) + zero(2) + 64*4bit/8
@@ -112,7 +112,7 @@ public struct AffineQ4Group128Format: QuantizationFormat {
     public var blockStructName: String { "BlockQ4Affine128" }
     public var gemvKernelName: String { "gemv_q4_g128" }
     public func gemmKernelName(bufferPrecision: BufferPrecision) -> String {
-        "gemm_q4_g128"
+        "gemv_q4_g128"
     }
     public var weightsPerBlock: Int { 128 }
     public var bytesPerBlock: Int { 4 + 64 }
