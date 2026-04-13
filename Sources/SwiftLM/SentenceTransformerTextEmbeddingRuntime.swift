@@ -1,5 +1,6 @@
 import Foundation
 import Darwin
+import Metal
 import MetalCompiler
 import Tokenizers
 
@@ -224,5 +225,71 @@ struct SentenceTransformerTextEmbeddingRuntime: Sendable {
                 return l2Normalize(partial)
             }
         }
+    }
+
+    // MARK: - GPU Post-Processing Accessors
+
+    /// Bridge pooling strategy to MetalCompiler's GPU type.
+    var gpuPoolingStrategy: EmbeddingPoolingStrategy {
+        switch pooling.strategy {
+        case .mean: return .mean
+        case .cls: return .cls
+        case .max: return .max
+        case .lastToken: return .lastToken
+        }
+    }
+
+    /// Create GPU-resident dense layer descriptors from CPU weight data.
+    func gpuDenseLayerDescriptors(device: MTLDevice) throws -> [EmbeddingDenseLayerDescriptor] {
+        try denseLayers.map { layer in
+            let weightByteCount = layer.weights.count * MemoryLayout<Float>.stride
+            guard let weightBuffer = device.makeBuffer(
+                bytes: layer.weights,
+                length: weightByteCount,
+                options: .storageModeShared
+            ) else {
+                throw ModelBundleLoaderError.invalidConfig(
+                    "Failed to allocate GPU weight buffer for dense layer"
+                )
+            }
+            weightBuffer.label = "swift-lm.embedding.dense.weight.\(layer.inputDimension)x\(layer.outputDimension)"
+
+            var biasBuffer: MTLBuffer?
+            if let bias = layer.bias {
+                let biasByteCount = bias.count * MemoryLayout<Float>.stride
+                guard let buffer = device.makeBuffer(
+                    bytes: bias,
+                    length: biasByteCount,
+                    options: .storageModeShared
+                ) else {
+                    throw ModelBundleLoaderError.invalidConfig(
+                        "Failed to allocate GPU bias buffer for dense layer"
+                    )
+                }
+                buffer.label = "swift-lm.embedding.dense.bias.\(layer.outputDimension)"
+                biasBuffer = buffer
+            }
+
+            let activation: EmbeddingDenseActivation
+            switch layer.activation {
+            case .identity: activation = .identity
+            case .tanh: activation = .tanh
+            case .relu: activation = .relu
+            case .gelu: activation = .gelu
+            }
+
+            return EmbeddingDenseLayerDescriptor(
+                weightBuffer: weightBuffer,
+                biasBuffer: biasBuffer,
+                inputDimension: layer.inputDimension,
+                outputDimension: layer.outputDimension,
+                activation: activation
+            )
+        }
+    }
+
+    /// Whether L2 normalization is enabled as a post-processor.
+    var hasL2Normalize: Bool {
+        postprocessors.contains(.l2Normalize)
     }
 }

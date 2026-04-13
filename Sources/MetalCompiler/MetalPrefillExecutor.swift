@@ -981,6 +981,51 @@ struct MetalPrefillExecutor: @unchecked Sendable {
         }
     }
 
+    // MARK: - Embedding Access (Package)
+
+    /// Encode all prefill steps onto an existing encoder for embedding workloads.
+    ///
+    /// This is a package-access wrapper around ``encodePrefillSteps`` that allows
+    /// ``MetalPrefillModel`` to encode prefill and post-processing in a single
+    /// command buffer.
+    package func encodePrefillStepsForEmbedding(
+        encoder: MTL4ComputeCommandEncoder,
+        argumentTable: MTL4ArgumentTable,
+        prefillPlan: MetalPrefillPlan,
+        basePosition: Int,
+        sequenceLength: Int
+    ) {
+        encodePrefillSteps(
+            encoder: encoder,
+            argumentTable: argumentTable,
+            prefillPlan: prefillPlan,
+            basePosition: basePosition,
+            sequenceLength: sequenceLength
+        )
+    }
+
+    /// Populate CPU-side input buffers for embedding prefill.
+    ///
+    /// Must be called before encoding prefill steps.
+    package func preparePrefillInputsForEmbedding(
+        prefillPlan: MetalPrefillPlan,
+        position: Int,
+        tokens: [Int32]
+    ) {
+        populatePrefillInputs(
+            prefillPlan: prefillPlan,
+            position: position,
+            tokens: tokens,
+            ropePositionAxesByTokenIndex: nil
+        )
+        writeRuntimeConstants(
+            prefillPlan: prefillPlan,
+            basePosition: position,
+            sequenceLength: tokens.count,
+            hiddenConversionElementCount: 0
+        )
+    }
+
     // MARK: - Input Population
 
     private func populatePrefillInputs(
@@ -1294,8 +1339,7 @@ struct MetalPrefillExecutor: @unchecked Sendable {
             MetalDecodeEncoder.encodeStep(
                 step: step,
                 encoder: encoder,
-                argumentTable: argumentTable,
-                visibilityOptions: .device
+                argumentTable: argumentTable
             )
         }
     }

@@ -15,19 +15,22 @@ public final class TextEmbeddingContainer: @unchecked Sendable {
     let tokenizer: any Tokenizer
     let runtime: SentenceTransformerTextEmbeddingRuntime
     let modelConfiguration: ModelConfiguration
+    let postProcessor: MetalEmbeddingPostProcessor?
 
     init(
         prefillPlan: MetalPrefillPlan,
         device: MTLDevice,
         tokenizer: any Tokenizer,
         runtime: SentenceTransformerTextEmbeddingRuntime,
-        configuration: ModelConfiguration
+        configuration: ModelConfiguration,
+        postProcessor: MetalEmbeddingPostProcessor? = nil
     ) {
         self.prefillPlan = prefillPlan
         self.device = device
         self.tokenizer = tokenizer
         self.runtime = runtime
         self.modelConfiguration = configuration
+        self.postProcessor = postProcessor
     }
 
     public var configuration: ModelConfiguration {
@@ -82,15 +85,18 @@ public final class TextEmbeddingContext: @unchecked Sendable {
     private let tokenizer: any Tokenizer
     private let runtime: SentenceTransformerTextEmbeddingRuntime
     private let modelConfiguration: ModelConfiguration
+    private let workspace: MetalEmbeddingWorkspace?
 
     public convenience init(_ container: TextEmbeddingContainer) throws {
         let isolatedPlan = try container.prefillPlan.makeRuntimeIsolatedCopy(device: container.device)
         let prefillModel = try MetalPrefillModel(plan: isolatedPlan, device: container.device)
+        let workspace = try container.postProcessor?.makeWorkspace(device: container.device)
         self.init(
             prefillModel: prefillModel,
             tokenizer: container.tokenizer,
             runtime: container.runtime,
-            configuration: container.modelConfiguration
+            configuration: container.modelConfiguration,
+            workspace: workspace
         )
     }
 
@@ -98,12 +104,14 @@ public final class TextEmbeddingContext: @unchecked Sendable {
         prefillModel: MetalPrefillModel,
         tokenizer: any Tokenizer,
         runtime: SentenceTransformerTextEmbeddingRuntime,
-        configuration: ModelConfiguration
+        configuration: ModelConfiguration,
+        workspace: MetalEmbeddingWorkspace? = nil
     ) {
         self.prefillModel = prefillModel
         self.tokenizer = tokenizer
         self.runtime = runtime
         self.modelConfiguration = configuration
+        self.workspace = workspace
     }
 
     public var configuration: ModelConfiguration {
@@ -122,6 +130,17 @@ public final class TextEmbeddingContext: @unchecked Sendable {
             tokenizer: tokenizer
         )
         let tokenIDs = prepared.tokenIDs.map(Int32.init)
+
+        // GPU path: prefill + pool + dense + L2 in a single command buffer
+        if let workspace {
+            return try prefillModel.captureEmbeddingVector(
+                tokens: tokenIDs,
+                workspace: workspace,
+                promptTokenCount: prepared.promptTokenCount
+            )
+        }
+
+        // CPU fallback: read hidden states, process on CPU
         let hiddenStates = try prefillModel.finalHiddenStates(tokens: tokenIDs)
         return try runtime.embed(
             hiddenStates: hiddenStates,
@@ -143,5 +162,9 @@ public final class TextEmbeddingContext: @unchecked Sendable {
 
     internal var debugPrefillPlan: MetalPrefillPlan {
         prefillModel.prefillPlan
+    }
+
+    internal var debugWorkspace: MetalEmbeddingWorkspace? {
+        workspace
     }
 }

@@ -270,8 +270,7 @@ struct DecodeBarrierDiagnosticTests {
             MetalDecodeEncoder.encodeSteps(
                 plan: model.decodePlan,
                 encoder: encoder,
-                argumentTable: argumentTable,
-                visibilityOptions: visibilityOptions
+                argumentTable: argumentTable
             )
         }
         model.position += 1

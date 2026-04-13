@@ -1004,14 +1004,13 @@ public struct MetalInferenceModel: @unchecked Sendable {
                     encoder: encoder,
                     argumentTable: argumentTable,
                     runtimeConstantBuffer: prefillPlan.buffers.runtimeConstantBuffer,
-                    sequenceLength: tokens.count,
-                    visibilityOptions: visibilityOptions
+                    sequenceLength: tokens.count
                 )
             }
             encoder.barrier(
                 afterEncoderStages: .dispatch,
                 beforeEncoderStages: .blit,
-                visibilityOptions: resolvedMetalVisibilityOptions(visibilityOptions)
+                visibilityOptions: visibilityOptions.isEmpty ? MTL4VisibilityOptions.device : visibilityOptions
             )
             for elementOffset in stride(from: 0, to: clampedCount, by: chunkElementCount) {
                 let chunkCount = min(chunkElementCount, clampedCount - elementOffset)
@@ -1027,7 +1026,7 @@ public struct MetalInferenceModel: @unchecked Sendable {
             encoder.barrier(
                 afterEncoderStages: .blit,
                 beforeEncoderStages: .dispatch,
-                visibilityOptions: resolvedMetalVisibilityOptions(visibilityOptions)
+                visibilityOptions: visibilityOptions.isEmpty ? MTL4VisibilityOptions.device : visibilityOptions
             )
         }
 
@@ -1090,8 +1089,7 @@ public struct MetalInferenceModel: @unchecked Sendable {
                         encoder: encoder,
                         argumentTable: argumentTable,
                         runtimeConstantBuffer: prefillPlan.buffers.runtimeConstantBuffer,
-                        sequenceLength: tokens.count,
-                        visibilityOptions: visibilityOptions
+                        sequenceLength: tokens.count
                     )
                 }
             }
@@ -1103,8 +1101,7 @@ public struct MetalInferenceModel: @unchecked Sendable {
                 encoder: encoder,
                 argumentTable: argumentTable,
                 runtimeConstantBuffer: prefillPlan.buffers.runtimeConstantBuffer,
-                sequenceLength: tokens.count,
-                visibilityOptions: visibilityOptions
+                sequenceLength: tokens.count
             )
         }
 
@@ -1189,8 +1186,7 @@ public struct MetalInferenceModel: @unchecked Sendable {
                         encoder: encoder,
                         argumentTable: argumentTable,
                         runtimeConstantBuffer: prefillPlan.buffers.runtimeConstantBuffer,
-                        sequenceLength: tokens.count,
-                        visibilityOptions: visibilityOptions
+                        sequenceLength: tokens.count
                     )
                 }
             }
@@ -1456,8 +1452,7 @@ public struct MetalInferenceModel: @unchecked Sendable {
                             encoder: encoder,
                             argumentTable: argumentTable,
                             runtimeConstantBuffer: prefillPlan.buffers.runtimeConstantBuffer,
-                            sequenceLength: tokens.count,
-                            visibilityOptions: resolvedStepVisibilityOptions
+                            sequenceLength: tokens.count
                         )
                         if !currentProbes.isEmpty {
                             try Self.encodePrefillProbes(
@@ -1518,8 +1513,7 @@ public struct MetalInferenceModel: @unchecked Sendable {
                     encoder: encoder,
                     argumentTable: argumentTable,
                     runtimeConstantBuffer: prefillPlan.buffers.runtimeConstantBuffer,
-                    sequenceLength: tokens.count,
-                    visibilityOptions: resolvedStepVisibilityOptions
+                    sequenceLength: tokens.count
                 )
 
                 if !currentProbes.isEmpty {
@@ -1630,8 +1624,7 @@ public struct MetalInferenceModel: @unchecked Sendable {
                 MetalDecodeEncoder.encodeStep(
                     step: step,
                     encoder: encoder,
-                    argumentTable: argumentTable,
-                    visibilityOptions: visibilityOptions
+                    argumentTable: argumentTable
                 )
 
                 if !currentProbes.isEmpty {
@@ -1669,7 +1662,7 @@ public struct MetalInferenceModel: @unchecked Sendable {
         encoder.barrier(
             afterEncoderStages: .dispatch,
             beforeEncoderStages: .blit,
-            visibilityOptions: resolvedMetalVisibilityOptions(visibilityOptions)
+            visibilityOptions: visibilityOptions.isEmpty ? MTL4VisibilityOptions.device : visibilityOptions
         )
         for probe in probes {
             guard let binding = step.bindings.buffers.first(where: { $0.index == probe.bindingIndex }) else {
@@ -1700,7 +1693,7 @@ public struct MetalInferenceModel: @unchecked Sendable {
         encoder.barrier(
             afterEncoderStages: .blit,
             beforeEncoderStages: .dispatch,
-            visibilityOptions: resolvedMetalVisibilityOptions(visibilityOptions)
+            visibilityOptions: visibilityOptions.isEmpty ? MTL4VisibilityOptions.device : visibilityOptions
         )
     }
 #endif
@@ -1840,8 +1833,7 @@ public struct MetalInferenceModel: @unchecked Sendable {
                 MetalDecodeEncoder.encodeStep(
                     step: step,
                     encoder: encoder,
-                    argumentTable: argumentTable,
-                    visibilityOptions: .device
+                    argumentTable: argumentTable
                 )
             }
         }
@@ -1953,8 +1945,7 @@ public struct MetalInferenceModel: @unchecked Sendable {
         encoder: MTL4ComputeCommandEncoder,
         argumentTable: MTL4ArgumentTable,
         runtimeConstantBuffer: MTLBuffer,
-        sequenceLength: Int,
-        visibilityOptions: MTL4VisibilityOptions = []
+        sequenceLength: Int
     ) {
         switch step.mode {
         case .batch:
@@ -1968,15 +1959,13 @@ public struct MetalInferenceModel: @unchecked Sendable {
             step.descriptor.encode(
                 on: encoder,
                 argumentTable: argumentTable,
-                visibilityOptions: visibilityOptions,
                 gridSize: gridSize
             )
         case .lastToken:
             step.bindStaticArguments(argumentTable: argumentTable, position: sequenceLength - 1)
             step.descriptor.encode(
                 on: encoder,
-                argumentTable: argumentTable,
-                visibilityOptions: visibilityOptions
+                argumentTable: argumentTable
             )
         case .perPosition:
             for positionOffset in 0..<sequenceLength {
@@ -1990,8 +1979,7 @@ public struct MetalInferenceModel: @unchecked Sendable {
                 }
                 step.descriptor.encode(
                     on: encoder,
-                    argumentTable: argumentTable,
-                    visibilityOptions: visibilityOptions
+                    argumentTable: argumentTable
                 )
             }
         }
@@ -2010,7 +1998,7 @@ public struct MetalInferenceModel: @unchecked Sendable {
         encoder.barrier(
             afterEncoderStages: .dispatch,
             beforeEncoderStages: .blit,
-            visibilityOptions: resolvedMetalVisibilityOptions(visibilityOptions)
+            visibilityOptions: visibilityOptions.isEmpty ? MTL4VisibilityOptions.device : visibilityOptions
         )
         for probe in probes {
             guard let binding = step.bindings.buffers.first(where: { $0.index == probe.bindingIndex }) else {
@@ -2040,7 +2028,7 @@ public struct MetalInferenceModel: @unchecked Sendable {
         encoder.barrier(
             afterEncoderStages: .blit,
             beforeEncoderStages: .dispatch,
-            visibilityOptions: resolvedMetalVisibilityOptions(visibilityOptions)
+            visibilityOptions: visibilityOptions.isEmpty ? MTL4VisibilityOptions.device : visibilityOptions
         )
     }
 #endif

@@ -75,6 +75,37 @@ struct MetalKernelSourceCatalog {
         var needsSSMHelpers = false
         var ssmConvSiluWeightFormats: [MetalSourceGenerator.WeightFormat] = []
 
+        // Generate batched Q4 GEMM kernels from original (pre-expansion) entries.
+        // Both explicit batchedProjection entries and implicit batching via
+        // fusedSwiGLUProjection (which the step builder decomposes into
+        // batchedProjection at dispatch time) must be handled here.
+        if bufferPrecision == .float32 {
+            for entry in entries {
+                let batchedRole: String
+                let batchedCount: Int
+                switch entry.kind {
+                case .batchedProjection(let batched):
+                    batchedRole = batched.projections[0].field
+                    batchedCount = batched.projections.count
+                case .fusedSwiGLUProjection(let fused):
+                    batchedRole = fused.gateField
+                    batchedCount = 2
+                default:
+                    continue
+                }
+                let weightFormat = weightFormatResolver.resolve(role: batchedRole, entry: entry)
+                if let batchedQ4Name = batchedQuantizedGEMMKernelName(for: weightFormat, count: batchedCount) {
+                    if generatedNames.insert(batchedQ4Name).inserted,
+                       let source = batchedQuantizedGEMMSource(
+                        named: batchedQ4Name, weightFormat: weightFormat,
+                        count: batchedCount, bufferPrecision: bufferPrecision
+                       ) {
+                        sources.append(source)
+                    }
+                }
+            }
+        }
+
         for entry in sourceEntries {
             let name: String
             switch entry.kind {
@@ -443,6 +474,17 @@ struct MetalKernelSourceCatalog {
                     }
                 }
                 if bufferPrecision == .float32 {
+                    // Sequence-aware fused kernel: single dispatch for prefill
+                    let seqFusedName = weightFormat == .bfloat16
+                        ? "fused_copy_rms_norm_seq_bf16_f32"
+                        : "fused_copy_rms_norm_seq_f32"
+                    if generatedNames.insert(seqFusedName).inserted {
+                        sources.append(MetalSourceGenerator.generateFusedCopyRMSNormSequence(
+                            name: seqFusedName,
+                            bufferPrecision: bufferPrecision,
+                            weightFormat: weightFormat))
+                    }
+                    // Fallback individual kernels (kept for compatibility)
                     let copyName = "copy_buffer_seq_f32"
                     let normName = weightFormat == .bfloat16 ? "rms_norm_seq_bf16_f32_inplace" : "rms_norm_seq_f32_inplace"
                     if generatedNames.insert(copyName).inserted {
@@ -458,24 +500,71 @@ struct MetalKernelSourceCatalog {
                     }
                 }
 
-            case .fusedResidualAddCopyNorm:
+            case .fusedResidualAddCopyNorm(let fusedOp):
                 let weightFormat = weightFormatResolver.resolve(role: "scale", entry: entry)
-                let kernelName = weightFormat == .bfloat16 ? "fused_residual_add_copy_rms_norm_bf16" : "fused_residual_add_copy_rms_norm"
-                if generatedNames.insert(kernelName).inserted {
-                    sources.append(MetalSourceGenerator.generateFusedResidualAddCopyRMSNorm(
-                        name: kernelName,
-                        bufferPrecision: bufferPrecision,
-                        weightFormat: weightFormat))
-                    let argumentKernelName = MetalKernelNameResolver.argumentTableVariantKernelName(for: kernelName)
-                    if generatedNames.insert(argumentKernelName).inserted {
-                        sources.append(MetalSourceGenerator.generateFusedResidualAddCopyRMSNormArgumentTableVariant(
-                            name: argumentKernelName,
-                            argumentBufferIndex: MetalInferenceCompiler.argumentTableBindingIndex,
+
+                if fusedOp.preNorm != nil {
+                    // PreNorm variant: 4→1 fusion (preNorm + add + copy + outputNorm)
+                    let kernelName = weightFormat == .bfloat16
+                        ? "fused_pre_norm_residual_add_copy_rms_norm_bf16"
+                        : "fused_pre_norm_residual_add_copy_rms_norm"
+                    if generatedNames.insert(kernelName).inserted {
+                        sources.append(MetalSourceGenerator.generateFusedPreNormResidualAddCopyRMSNorm(
+                            name: kernelName,
                             bufferPrecision: bufferPrecision,
                             weightFormat: weightFormat))
+                        let argumentKernelName = MetalKernelNameResolver.argumentTableVariantKernelName(for: kernelName)
+                        if generatedNames.insert(argumentKernelName).inserted {
+                            sources.append(MetalSourceGenerator.generateFusedPreNormResidualAddCopyRMSNormArgumentTableVariant(
+                                name: argumentKernelName,
+                                argumentBufferIndex: MetalInferenceCompiler.argumentTableBindingIndex,
+                                bufferPrecision: bufferPrecision,
+                                weightFormat: weightFormat))
+                        }
+                    }
+                    if bufferPrecision == .float32 {
+                        let seqFusedName = weightFormat == .bfloat16
+                            ? "fused_pre_norm_residual_add_copy_rms_norm_seq_bf16_f32"
+                            : "fused_pre_norm_residual_add_copy_rms_norm_seq_f32"
+                        if generatedNames.insert(seqFusedName).inserted {
+                            sources.append(MetalSourceGenerator.generateFusedPreNormResidualAddCopyRMSNormSequence(
+                                name: seqFusedName,
+                                bufferPrecision: bufferPrecision,
+                                weightFormat: weightFormat))
+                        }
+                    }
+                } else {
+                    // Standard variant (no preNorm)
+                    let kernelName = weightFormat == .bfloat16 ? "fused_residual_add_copy_rms_norm_bf16" : "fused_residual_add_copy_rms_norm"
+                    if generatedNames.insert(kernelName).inserted {
+                        sources.append(MetalSourceGenerator.generateFusedResidualAddCopyRMSNorm(
+                            name: kernelName,
+                            bufferPrecision: bufferPrecision,
+                            weightFormat: weightFormat))
+                        let argumentKernelName = MetalKernelNameResolver.argumentTableVariantKernelName(for: kernelName)
+                        if generatedNames.insert(argumentKernelName).inserted {
+                            sources.append(MetalSourceGenerator.generateFusedResidualAddCopyRMSNormArgumentTableVariant(
+                                name: argumentKernelName,
+                                argumentBufferIndex: MetalInferenceCompiler.argumentTableBindingIndex,
+                                bufferPrecision: bufferPrecision,
+                                weightFormat: weightFormat))
+                        }
                     }
                 }
                 if bufferPrecision == .float32 {
+                    if fusedOp.preNorm == nil {
+                        // Sequence-aware fused kernel: single dispatch for prefill (no preNorm)
+                        let seqFusedName = weightFormat == .bfloat16
+                            ? "fused_residual_add_copy_rms_norm_seq_bf16_f32"
+                            : "fused_residual_add_copy_rms_norm_seq_f32"
+                        if generatedNames.insert(seqFusedName).inserted {
+                            sources.append(MetalSourceGenerator.generateFusedResidualAddCopyRMSNormSequence(
+                                name: seqFusedName,
+                                bufferPrecision: bufferPrecision,
+                                weightFormat: weightFormat))
+                        }
+                    }
+                    // Fallback individual kernels (kept for compatibility)
                     let addName = "residual_add_seq_f32"
                     let inplaceAddName = "residual_add_inplace_seq_f32"
                     let copyName = "copy_buffer_seq_f32"
@@ -542,21 +631,66 @@ struct MetalKernelSourceCatalog {
                     }
                 }
 
-            case .fusedResidualAddNorm:
+            case .fusedResidualAddNorm(let fusedOp):
                 let weightFormat = weightFormatResolver.resolve(role: "scale", entry: entry)
-                let kernelName = weightFormat == .bfloat16 ? "fused_residual_add_rms_norm_bf16" : "fused_residual_add_rms_norm"
-                if generatedNames.insert(kernelName).inserted {
-                    sources.append(MetalSourceGenerator.generateFusedResidualAddRMSNorm(
-                        name: kernelName,
-                        bufferPrecision: bufferPrecision,
-                        weightFormat: weightFormat))
-                    let argumentKernelName = MetalKernelNameResolver.argumentTableVariantKernelName(for: kernelName)
-                    if generatedNames.insert(argumentKernelName).inserted {
-                        sources.append(MetalSourceGenerator.generateFusedResidualAddRMSNormArgumentTableVariant(
-                            name: argumentKernelName,
-                            argumentBufferIndex: MetalInferenceCompiler.argumentTableBindingIndex,
+
+                if fusedOp.preNorm != nil {
+                    // PreNorm variant: 3→1 fusion (preNorm + add + outputNorm, no copy)
+                    // Decode kernel not needed for this pattern (only occurs at model end)
+                    if bufferPrecision == .float32 {
+                        let seqFusedName = weightFormat == .bfloat16
+                            ? "fused_pre_norm_residual_add_rms_norm_seq_bf16_f32"
+                            : "fused_pre_norm_residual_add_rms_norm_seq_f32"
+                        if generatedNames.insert(seqFusedName).inserted {
+                            sources.append(MetalSourceGenerator.generateFusedPreNormResidualAddRMSNormSequence(
+                                name: seqFusedName,
+                                bufferPrecision: bufferPrecision,
+                                weightFormat: weightFormat))
+                        }
+                    }
+                } else {
+                    let kernelName = weightFormat == .bfloat16 ? "fused_residual_add_rms_norm_bf16" : "fused_residual_add_rms_norm"
+                    if generatedNames.insert(kernelName).inserted {
+                        sources.append(MetalSourceGenerator.generateFusedResidualAddRMSNorm(
+                            name: kernelName,
                             bufferPrecision: bufferPrecision,
                             weightFormat: weightFormat))
+                        let argumentKernelName = MetalKernelNameResolver.argumentTableVariantKernelName(for: kernelName)
+                        if generatedNames.insert(argumentKernelName).inserted {
+                            sources.append(MetalSourceGenerator.generateFusedResidualAddRMSNormArgumentTableVariant(
+                                name: argumentKernelName,
+                                argumentBufferIndex: MetalInferenceCompiler.argumentTableBindingIndex,
+                                bufferPrecision: bufferPrecision,
+                                weightFormat: weightFormat))
+                        }
+                    }
+                }
+                if bufferPrecision == .float32 {
+                    if fusedOp.preNorm == nil {
+                        let seqFusedName = weightFormat == .bfloat16
+                            ? "fused_residual_add_rms_norm_seq_bf16_f32"
+                            : "fused_residual_add_rms_norm_seq_f32"
+                        if generatedNames.insert(seqFusedName).inserted {
+                            sources.append(MetalSourceGenerator.generateFusedResidualAddRMSNormSequence(
+                                name: seqFusedName,
+                                bufferPrecision: bufferPrecision,
+                                weightFormat: weightFormat))
+                        }
+                    }
+                    // Fallback individual kernels
+                    let addName = "residual_add_seq_f32"
+                    let inplaceAddName = "residual_add_inplace_seq_f32"
+                    if generatedNames.insert(addName).inserted {
+                        sources.append(MetalSourceGenerator.generateResidualAdd(name: addName, bufferPrecision: bufferPrecision))
+                    }
+                    if generatedNames.insert(inplaceAddName).inserted {
+                        sources.append(MetalSourceGenerator.generateResidualAddInPlace(name: inplaceAddName, bufferPrecision: bufferPrecision))
+                    }
+                    let normName = weightFormat == .bfloat16 ? "rms_norm_seq_bf16_f32_inplace" : "rms_norm_seq_f32_inplace"
+                    if generatedNames.insert(normName).inserted {
+                        sources.append(MetalSourceGenerator.generateReduction(
+                            name: normName, dimension: 0, epsilon: 0,
+                            bufferPrecision: bufferPrecision, weightFormat: weightFormat))
                     }
                 }
 
@@ -705,6 +839,21 @@ struct MetalKernelSourceCatalog {
                 }
                 if bufferPrecision == .float32 {
                     let weightFormat = weightFormatResolver.resolve(role: "q_layernorm", entry: entry)
+                    // Batched prefill kernel for QK norm (single dispatch for Q+K)
+                    if batch.fragments.count == 2,
+                       batch.fragments.allSatisfy({ $0 is QKNormFragment }),
+                       case .perHead = batch.dispatchDimension {
+                        let batchedSeqName = weightFormat == .bfloat16
+                            ? "batched_qk_rms_norm_seq_bf16_f32"
+                            : "batched_qk_rms_norm_seq_f32"
+                        if generatedNames.insert(batchedSeqName).inserted {
+                            sources.append(MetalSourceGenerator.generateBatchedQKNormSequence(
+                                name: batchedSeqName,
+                                bufferPrecision: bufferPrecision,
+                                weightFormat: weightFormat))
+                        }
+                    }
+                    // Fallback individual kernel
                     let normName = "qk_rms_norm_seq_f32"
                     if generatedNames.insert(normName).inserted {
                         sources.append(MetalSourceGenerator.generateQKNormSeq(
@@ -909,6 +1058,39 @@ struct MetalKernelSourceCatalog {
                 bufferPrecision: bufferPrecision,
                 groupSize: groupSize
             )
+        default:
+            return nil
+        }
+    }
+
+    // MARK: - Batched Quantized GEMM (Prefill)
+
+    private func batchedQuantizedGEMMKernelName(
+        for weightFormat: MetalSourceGenerator.WeightFormat,
+        count: Int
+    ) -> String? {
+        switch weightFormat {
+        case .quantized4Bit(let groupSize):
+            return "batched_gemm_q4_g\(groupSize)_\(count)"
+        default:
+            return nil
+        }
+    }
+
+    private func batchedQuantizedGEMMSource(
+        named kernelName: String,
+        weightFormat: MetalSourceGenerator.WeightFormat,
+        count: Int,
+        bufferPrecision: MetalSourceGenerator.BufferPrecision
+    ) -> String? {
+        guard case .quantized4Bit(let groupSize) = weightFormat else { return nil }
+        switch count {
+        case 2:
+            return MetalSourceGenerator.generateBatchedQuantizedGEMM_Q4_2(
+                name: kernelName, bufferPrecision: bufferPrecision, groupSize: groupSize)
+        case 3:
+            return MetalSourceGenerator.generateBatchedQuantizedGEMM_Q4_3(
+                name: kernelName, bufferPrecision: bufferPrecision, groupSize: groupSize)
         default:
             return nil
         }

@@ -24,9 +24,11 @@ struct DispatchEntryDiagnosticsFormatter {
         case .fusedCopyNorm(let f):
             kind = "fusedCopyNorm(dim=\(f.dimension), eps=\(f.epsilon))"
         case .fusedResidualAddCopyNorm(let f):
-            kind = "fusedResidualAddCopyNorm(dim=\(f.dimension), eps=\(f.epsilon))"
+            let preNormTag = f.preNorm != nil ? ", preNorm" : ""
+            kind = "fusedResidualAddCopyNorm(dim=\(f.dimension), eps=\(f.epsilon)\(preNormTag))"
         case .fusedResidualAddNorm(let f):
-            kind = "fusedResidualAddNorm(dim=\(f.dimension), eps=\(f.epsilon))"
+            let preNormTag = f.preNorm != nil ? ", preNorm" : ""
+            kind = "fusedResidualAddNorm(dim=\(f.dimension), eps=\(f.epsilon)\(preNormTag))"
         case .fusedSwiGLUProjection(let f):
             kind = "fusedSwiGLUProjection(gate=\(f.gateField), up=\(f.upField), in=\(f.inputDimension), out=\(f.outputDimension))"
         case .batchedProjection(let b):

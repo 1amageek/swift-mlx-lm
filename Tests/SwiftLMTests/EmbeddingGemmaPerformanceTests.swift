@@ -50,6 +50,19 @@ struct EmbeddingGemmaPerformanceTests {
         return "steps=\(labels.count),lookupEntries=\(lookup.count),projectionEntries=\(projections.count),lookupKernels=\(lookup.joined(separator: ",")),projectionKernels=\(projections.joined(separator: ",")),summary=\(summary)"
     }
 
+    private func printKernelFrequency(in container: TextEmbeddingContainer) {
+        var frequency: [String: Int] = [:]
+        for step in container.prefillPlan.steps {
+            let name = step.metadata.kernelName ?? step.pipeline.label ?? "<unknown>"
+            frequency[name, default: 0] += 1
+        }
+        let sorted = frequency.sorted { $0.value > $1.value }
+        print("[KernelFrequency] total=\(container.prefillPlan.steps.count)")
+        for (name, count) in sorted {
+            print("  \(count)x \(name)")
+        }
+    }
+
     private func assertThroughput(for variant: EmbeddingGemmaVariant) async throws {
         guard let container = try await EmbeddingGemmaTestSupport.realEmbeddingGemmaContainer(variant: variant) else {
             print("[Skip] No \(variant.rawValue) EmbeddingGemma snapshot found")
@@ -70,10 +83,13 @@ struct EmbeddingGemmaPerformanceTests {
                 + "usesMPP=\(container.prefillPlan.usesMPP) "
                 + "kernels=\(kernelSummary)"
         )
+        printKernelFrequency(in: container)
 
         for input in inputs {
-            let vector = try context.embed(input)
-            #expect(vector.count == 768)
+            try autoreleasepool {
+                let vector = try context.embed(input)
+                #expect(vector.count == 768)
+            }
         }
 
         let clock = ContinuousClock()
@@ -81,8 +97,10 @@ struct EmbeddingGemmaPerformanceTests {
         let duration = try clock.measure {
             for _ in 0..<iterations {
                 for input in inputs {
-                    let vector = try context.embed(input)
-                    checksum += vector[0]
+                    try autoreleasepool {
+                        let vector = try context.embed(input)
+                        checksum += vector[0]
+                    }
                 }
             }
         }

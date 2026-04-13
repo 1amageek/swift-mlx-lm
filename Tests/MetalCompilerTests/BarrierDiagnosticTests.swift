@@ -72,24 +72,16 @@ struct BarrierDiagnosticTests {
         let barrierSteps = steps.filter { $0.barrierPolicy.isBarrier }.count
         let elided = totalSteps - barrierSteps
 
-        let resourceBarrierSteps = steps.filter {
-            if case .resourceBarrier = $0.barrierPolicy { return true }
+        let deviceBarrierSteps = steps.filter {
+            if case .barrier(let vis) = $0.barrierPolicy { return vis == .device }
             return false
         }.count
-        let scopeBarrierSteps = barrierSteps - resourceBarrierSteps
-        let avgResources: Double = {
-            let counts = steps.compactMap { step -> Int? in
-                if case .resourceBarrier(let r) = step.barrierPolicy { return r.count }
-                return nil
-            }
-            guard !counts.isEmpty else { return 0 }
-            return Double(counts.reduce(0, +)) / Double(counts.count)
-        }()
+        let noneVisibilityBarrierSteps = barrierSteps - deviceBarrierSteps
 
         print("\n========== BARRIER ANALYSIS: \(label) ==========")
         print("Total steps: \(totalSteps), Barriers: \(barrierSteps), Elided: \(elided)")
         print("Barrier rate: \(String(format: "%.1f%%", Double(barrierSteps) / Double(totalSteps) * 100))")
-        print("Resource barriers: \(resourceBarrierSteps), Scope barriers: \(scopeBarrierSteps), Avg resources/barrier: \(String(format: "%.1f", avgResources))")
+        print("Device visibility: \(deviceBarrierSteps), None visibility: \(noneVisibilityBarrierSteps)")
         print("Fusion: \(compiled.unfusedEntryCount) unfused → \(compiled.fusedEntryCount) fused")
         print("")
 

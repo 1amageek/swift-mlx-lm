@@ -7,6 +7,11 @@ struct MetalEntryCollector {
         using context: CompileContext,
         kernelContext: KernelContext
     ) -> (walkContext: WalkContext, unfusedCount: Int, fusedEntries: [DispatchEntry]) {
+        let fusionContext = FusionContext(
+            device: context.device,
+            hiddenSize: context.hiddenSize,
+            maximumSequenceLength: context.maximumSequenceLength
+        )
         var walkContext = WalkContext()
         walkRegion(
             context.graph.rootRegion,
@@ -14,10 +19,11 @@ struct MetalEntryCollector {
             layerIndex: nil,
             hiddenSize: context.hiddenSize,
             context: &walkContext,
-            kernelContext: kernelContext
+            kernelContext: kernelContext,
+            fusionContext: fusionContext
         )
         let unfusedCount = walkContext.entries.count
-        let fusedEntries = optimizer.optimizeGraph(walkContext.entries)
+        let fusedEntries = optimizer.optimizeGraph(walkContext.entries, context: fusionContext)
         return (walkContext, unfusedCount, fusedEntries)
     }
 
@@ -27,7 +33,8 @@ struct MetalEntryCollector {
         layerIndex: Int?,
         hiddenSize: Int,
         context: inout WalkContext,
-        kernelContext: KernelContext
+        kernelContext: KernelContext,
+        fusionContext: FusionContext
     ) {
         var implicitLayerIndex = 0
         for (operationIndex, operation) in region.operations.enumerated() {
@@ -43,7 +50,8 @@ struct MetalEntryCollector {
                     layerIndex: layerIndex,
                     hiddenSize: hiddenSize,
                     context: &context,
-                    kernelContext: kernelContext
+                    kernelContext: kernelContext,
+                    fusionContext: fusionContext
                 )
                 context.emit(.structuralAdd(dimension: hiddenSize), layerIndex: layerIndex)
 
@@ -56,7 +64,8 @@ struct MetalEntryCollector {
                         layerIndex: baseLayerIndex.map { $0 + iteration } ?? iteration,
                         hiddenSize: hiddenSize,
                         context: &context,
-                        kernelContext: kernelContext
+                        kernelContext: kernelContext,
+                        fusionContext: fusionContext
                     )
                 }
                 if layerIndex == nil {
@@ -72,7 +81,8 @@ struct MetalEntryCollector {
                         layerIndex: currentLayer,
                         hiddenSize: hiddenSize,
                         context: &context,
-                        kernelContext: kernelContext
+                        kernelContext: kernelContext,
+                        fusionContext: fusionContext
                     )
                 } else {
                     walkRegion(
@@ -81,7 +91,8 @@ struct MetalEntryCollector {
                         layerIndex: layerIndex,
                         hiddenSize: hiddenSize,
                         context: &context,
-                        kernelContext: kernelContext
+                        kernelContext: kernelContext,
+                        fusionContext: fusionContext
                     )
                 }
 
@@ -93,7 +104,8 @@ struct MetalEntryCollector {
                         layerIndex: layerIndex,
                         hiddenSize: hiddenSize,
                         context: &context,
-                        kernelContext: kernelContext
+                        kernelContext: kernelContext,
+                        fusionContext: fusionContext
                     )
                 }
 
@@ -124,7 +136,7 @@ struct MetalEntryCollector {
                     context: &context,
                     kernelContext: kernelContext
                 )
-                let optimized = optimizer.optimizeFragment(primitives)
+                let optimized = optimizer.optimizeFragment(primitives, context: fusionContext)
                 let startIndex = context.entries.count
                 let compositeID = context.nextCompositeID
                 context.nextCompositeID += 1

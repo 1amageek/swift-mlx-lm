@@ -57,6 +57,82 @@ public struct MetalPrefillModel: @unchecked Sendable {
         )
     }
 
+    /// Run prefill and GPU post-processing, returning the final embedding vector.
+    ///
+    /// Prefill and post-processing (pooling + dense GEMV + L2 normalize) run in a
+    /// single command buffer. The GPU reads final hidden states directly from the
+    /// prefill output buffer (which may be `.storageModePrivate` scratch), avoiding
+    /// any CPU-side memcpy that would fail on compressed private storage.
+    public mutating func captureEmbeddingVector(
+        tokens: [Int32],
+        workspace: MetalEmbeddingWorkspace,
+        promptTokenCount: Int
+    ) throws -> [Float] {
+        guard !tokens.isEmpty else { return [] }
+        guard tokens.count <= prefillPlan.maximumSequenceLength else {
+            throw MetalCompilerError.deviceSetupFailed(
+                "Prefill token count exceeds maximum sequence length"
+            )
+        }
+
+        try resetState()
+
+        let sequenceLength = tokens.count
+        prefillExecutor.preparePrefillInputsForEmbedding(
+            prefillPlan: prefillPlan,
+            position: 0,
+            tokens: tokens
+        )
+
+        let hiddenBuffer = prefillPlan.finalHiddenBuffer
+        let hiddenBaseOffset = prefillPlan.finalHiddenBaseOffset
+        let hiddenRowStride = prefillPlan.finalHiddenRowStride
+        let elementSize = max(prefillPlan.buffers.bufferPrecision.byteSize, 1)
+        let hiddenDimension = prefillPlan.buffers.hidden.length
+            / max(prefillPlan.maximumSequenceLength, 1)
+            / elementSize
+
+        // Combine all residency: prefill buffers + workspace + post-processor weights.
+        // The weight buffers MUST be resident — without them, GPU page table faults
+        // silently zero all kernel outputs in the command buffer.
+        let embeddingResidency = try MetalResidencyLease.required(
+            device: submission.device,
+            label: "swift-lm.embedding.workspace",
+            buffers: workspace.allResidencyBuffers
+        )
+        embeddingResidency.add(to: submission.queue)
+        let combinedResidency = MetalResidencyLease.combined(
+            label: "swift-lm.embedding.combined",
+            leases: [stableResidency, embeddingResidency]
+        )
+
+        // Single command buffer: prefill produces hidden states, then post-processing
+        // reads them directly on GPU. The barrier inside workspace.encode ensures
+        // prefill dispatches complete before post-processing reads the hidden buffer.
+        try submission.withCompute(ephemeralResidency: combinedResidency) { encoder, argumentTable in
+            prefillExecutor.encodePrefillStepsForEmbedding(
+                encoder: encoder,
+                argumentTable: argumentTable,
+                prefillPlan: prefillPlan,
+                basePosition: 0,
+                sequenceLength: sequenceLength
+            )
+
+            workspace.encode(
+                encoder: encoder,
+                argumentTable: argumentTable,
+                hiddenBuffer: hiddenBuffer,
+                hiddenBaseOffset: hiddenBaseOffset,
+                hiddenRowStride: hiddenRowStride,
+                hiddenDimension: hiddenDimension,
+                sequenceLength: sequenceLength,
+                promptTokenCount: promptTokenCount
+            )
+        }
+
+        return workspace.readResult(hiddenDimension: hiddenDimension)
+    }
+
     public mutating func finalHiddenStates(tokens: [Int32]) throws -> [[Float]] {
         guard !tokens.isEmpty else { return [] }
         guard tokens.count <= prefillPlan.maximumSequenceLength else {

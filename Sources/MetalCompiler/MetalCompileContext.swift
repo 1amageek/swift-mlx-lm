@@ -119,6 +119,32 @@ enum FusedSwiGLUProjectionFamily {
     }
 }
 
+/// Hardware and model constraints that determine fusion feasibility and benefit.
+///
+/// Hard constraints (from MTLDevice) determine whether a fusion is possible.
+/// Model constraints determine the shared memory footprint of fused kernels.
+/// The optimizer uses these to make device-aware fusion decisions.
+public struct FusionContext: Sendable {
+    /// Maximum threadgroup memory in bytes (e.g., 32768 for Apple Silicon).
+    public let threadgroupMemoryLimit: Int
+    /// Maximum threads per threadgroup (e.g., 1024 for Apple Silicon).
+    public let maxThreadsPerThreadgroup: Int
+    /// SIMD execution width (e.g., 32 for Apple Silicon).
+    public let simdWidth: Int
+    /// Model hidden dimension — affects shared memory per fused reduction.
+    public let hiddenSize: Int
+    /// Maximum sequence length — affects compute/dispatch overhead ratio.
+    public let maximumSequenceLength: Int
+
+    public init(device: MTLDevice, hiddenSize: Int, maximumSequenceLength: Int) {
+        self.threadgroupMemoryLimit = device.maxThreadgroupMemoryLength
+        self.maxThreadsPerThreadgroup = device.maxThreadsPerThreadgroup.width
+        self.simdWidth = 32
+        self.hiddenSize = hiddenSize
+        self.maximumSequenceLength = maximumSequenceLength
+    }
+}
+
 struct CompileContext {
     let graph: ModelGraph
     let hiddenSize: Int

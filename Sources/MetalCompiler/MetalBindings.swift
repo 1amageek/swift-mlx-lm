@@ -1,13 +1,6 @@
 import Metal
 import LMIR
 
-@inline(__always)
-func resolvedMetalVisibilityOptions(
-    _ visibilityOptions: MTL4VisibilityOptions
-) -> MTL4VisibilityOptions {
-    visibilityOptions.isEmpty ? .device : visibilityOptions
-}
-
 public enum MetalArgumentBindingPolicy: Sendable, Equatable {
     case inlineBindings
     case argumentTable
@@ -18,17 +11,22 @@ public enum MetalConstantBindingPolicy: Sendable, Equatable {
     case residentConstantBuffer
 }
 
-public enum MetalBarrierPolicy: @unchecked Sendable, Equatable {
+public enum MetalBarrierPolicy: Sendable, Equatable {
+    /// No barrier needed before this dispatch.
     case none
-    case bufferBarrier
-    case resourceBarrier(resources: [MTLResource])
+    /// Stage-to-stage barrier with explicit visibility options.
+    ///
+    /// - `.device`: Full cache flush — required when writes target shared-mode buffers.
+    /// - `[]` (empty): Execution ordering only — sufficient for private-mode buffers
+    ///   where GPU caches remain coherent across dispatches within the same encoder.
+    case barrier(visibility: MTL4VisibilityOptions)
 
     public init(_ synchronizationKind: SynchronizationKind) {
         switch synchronizationKind {
         case .none:
             self = .none
         case .bufferBarrier:
-            self = .bufferBarrier
+            self = .barrier(visibility: .device)
         }
     }
 
@@ -36,7 +34,7 @@ public enum MetalBarrierPolicy: @unchecked Sendable, Equatable {
         switch self {
         case .none:
             return .none
-        case .bufferBarrier, .resourceBarrier:
+        case .barrier:
             return .bufferBarrier
         }
     }
@@ -44,19 +42,13 @@ public enum MetalBarrierPolicy: @unchecked Sendable, Equatable {
     public var isBarrier: Bool {
         switch self {
         case .none: return false
-        case .bufferBarrier, .resourceBarrier: return true
+        case .barrier: return true
         }
     }
 
-    public static func == (lhs: MetalBarrierPolicy, rhs: MetalBarrierPolicy) -> Bool {
-        switch (lhs, rhs) {
-        case (.none, .none): return true
-        case (.bufferBarrier, .bufferBarrier): return true
-        case (.resourceBarrier(let a), .resourceBarrier(let b)):
-            return Set(a.map { ObjectIdentifier($0 as AnyObject) })
-                == Set(b.map { ObjectIdentifier($0 as AnyObject) })
-        default: return false
-        }
+    /// Convenience for the legacy `.bufferBarrier` pattern — barrier with `.device` visibility.
+    public static var bufferBarrier: MetalBarrierPolicy {
+        .barrier(visibility: .device)
     }
 }
 
@@ -281,27 +273,18 @@ public struct MetalBindingTable: @unchecked Sendable {
 extension MetalBarrierPolicy {
     /// Encode a barrier on a Metal 4 compute encoder.
     ///
-    /// Metal 4 has no resource-scoped barrier equivalent to Metal 3's
-    /// `memoryBarrier(resources:)`. Both `.bufferBarrier` and `.resourceBarrier`
-    /// emit the same stage-to-stage barrier. The optimizer's conflict set
-    /// determines WHETHER a barrier is needed (eliminating unnecessary barriers);
-    /// the resource list itself is not expressible at encoding time in Metal 4.
-    func encode(on encoder: MTL4ComputeCommandEncoder, visibilityOptions: MTL4VisibilityOptions = []) {
-        let resolvedVisibilityOptions = resolvedMetalVisibilityOptions(visibilityOptions)
+    /// The visibility option is embedded in the policy itself — the barrier optimizer
+    /// determines both WHETHER a barrier is needed and WHAT visibility is required
+    /// based on buffer storage modes (private vs shared).
+    func encode(on encoder: MTL4ComputeCommandEncoder) {
         switch self {
         case .none:
             return
-        case .bufferBarrier:
+        case .barrier(let visibility):
             encoder.barrier(
                 afterEncoderStages: .dispatch,
                 beforeEncoderStages: .dispatch,
-                visibilityOptions: resolvedVisibilityOptions
-            )
-        case .resourceBarrier:
-            encoder.barrier(
-                afterEncoderStages: .dispatch,
-                beforeEncoderStages: .dispatch,
-                visibilityOptions: resolvedVisibilityOptions
+                visibilityOptions: visibility
             )
         }
     }
@@ -445,13 +428,9 @@ public struct MetalDispatchDescriptor: @unchecked Sendable {
     public func encode(
         on encoder: MTL4ComputeCommandEncoder,
         argumentTable: MTL4ArgumentTable,
-        visibilityOptions: MTL4VisibilityOptions = [],
         gridSize overrideGridSize: MTLSize? = nil
     ) {
-        barrierPolicy.encode(
-            on: encoder,
-            visibilityOptions: resolvedMetalVisibilityOptions(visibilityOptions)
-        )
+        barrierPolicy.encode(on: encoder)
         encoder.setArgumentTable(argumentTable)
         encoder.setComputePipelineState(pipeline)
         if threadgroupMemoryLength > 0 {

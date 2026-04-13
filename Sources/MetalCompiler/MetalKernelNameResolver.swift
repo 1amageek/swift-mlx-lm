@@ -176,13 +176,23 @@ struct MetalKernelNameResolver {
             return weightFormat == .bfloat16
                 ? "fused_copy_rms_norm_bf16"
                 : "fused_copy_rms_norm"
-        case .fusedResidualAddCopyNorm:
+        case .fusedResidualAddCopyNorm(let fusedOp):
             let weightFormat = weightFormatResolver.resolve(role: "scale", entry: entry)
+            if fusedOp.preNorm != nil {
+                return weightFormat == .bfloat16
+                    ? "fused_pre_norm_residual_add_copy_rms_norm_bf16"
+                    : "fused_pre_norm_residual_add_copy_rms_norm"
+            }
             return weightFormat == .bfloat16
                 ? "fused_residual_add_copy_rms_norm_bf16"
                 : "fused_residual_add_copy_rms_norm"
-        case .fusedResidualAddNorm:
+        case .fusedResidualAddNorm(let fusedOp):
             let weightFormat = weightFormatResolver.resolve(role: "scale", entry: entry)
+            if fusedOp.preNorm != nil {
+                return weightFormat == .bfloat16
+                    ? "fused_pre_norm_residual_add_rms_norm_bf16"
+                    : "fused_pre_norm_residual_add_rms_norm"
+            }
             return weightFormat == .bfloat16
                 ? "fused_residual_add_rms_norm_bf16"
                 : "fused_residual_add_rms_norm"
@@ -197,6 +207,25 @@ struct MetalKernelNameResolver {
             return weightFormat == .bfloat16 ? baseName + "_bf16" : baseName
 
         case .batchedProjection(let batched):
+            let count = batched.projections.count
+
+            // Prefill with quantized weights: use batched Q4 GEMM kernel
+            if isPrefill,
+               let firstProjection = batched.projections.first,
+               let stafWeightStore,
+               let binding = entry.parameterBindings.first(where: { $0.role == firstProjection.field }),
+               let tensorInfo = stafWeightStore.tensor(for: binding.tensorName) {
+                switch tensorInfo.format.schemeIdentifier {
+                case .q4Group64ScaleF16:
+                    return "batched_gemm_q4_g64_\(count)"
+                case .q4Group128ScaleF16:
+                    return "batched_gemm_q4_g128_\(count)"
+                default:
+                    break
+                }
+            }
+
+            // Decode / dense weights: existing batched GEMV
             let resolvedWeightFormat: WeightFormat
             if let firstProjection = batched.projections.first {
                 resolvedWeightFormat = resolveWeightFormat(
@@ -207,7 +236,7 @@ struct MetalKernelNameResolver {
             } else {
                 resolvedWeightFormat = kernelContext.weightFormat
             }
-            return "batched_gemv\(batched.projections.count)"
+            return "batched_gemv\(count)"
                 + (resolvedWeightFormat == .bfloat16 ? "_bf16" : "")
 
         case .batchedFragment(let batch):

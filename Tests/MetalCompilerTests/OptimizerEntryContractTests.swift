@@ -3898,10 +3898,8 @@ struct OptimizerEntryContractTests {
         switch policy {
         case .none:
             return "none"
-        case .bufferBarrier:
-            return "buffer"
-        case .resourceBarrier(let resources):
-            return "resource[\(resources.count)]"
+        case .barrier(let visibility):
+            return visibility == .device ? "device" : "none-visibility"
         }
     }
 

@@ -28,18 +28,23 @@ public protocol DispatchOptimizer: Sendable {
     /// - Batch consecutive non-output projections into a single dispatch
     /// - Batch consecutive in-place fragments with same dispatchDimension
     /// - Return primitives unmodified
+    ///
+    /// - Parameter context: Device and model constraints for feasibility checks.
     func optimizeFragment(
-        _ primitives: [CollectedPrimitive]
+        _ primitives: [CollectedPrimitive],
+        context: FusionContext
     ) -> [OptimizedEntry]
 
     /// Optimize the complete dispatch list after IR walk.
     ///
-    /// Handles cross-fragment fusion that requires seeing the full sequence:
-    /// - structuralAdd + structuralCopy + fusable reduction → 3-to-1
-    /// - structuralCopy + fusable reduction → 2-to-1
-    /// - structuralAdd + fusable reduction → 2-to-1
+    /// Uses greedy largest-first algorithm: patterns sorted by size descending,
+    /// each checked for structural match AND device feasibility.
+    /// For non-overlapping, monotonically-better patterns this is provably optimal.
+    ///
+    /// - Parameter context: Device and model constraints for feasibility checks.
     func optimizeGraph(
-        _ entries: [DispatchEntry]
+        _ entries: [DispatchEntry],
+        context: FusionContext
     ) -> [DispatchEntry]
 }
 

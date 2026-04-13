@@ -11,24 +11,18 @@ enum MetalDecodeEncoder {
     /// Buffer bindings use `MTL4ArgumentTable.setAddress(gpuAddress)`.
     /// Constant bindings in `.resident` mode use buffer gpuAddress;
     /// `.inline` constants use a pre-allocated constant data buffer.
+    ///
+    /// Barrier visibility is embedded in each step's `MetalBarrierPolicy` — the
+    /// optimizer sets `.device` for shared-buffer conflicts and `[]` (none) for
+    /// private-buffer-only conflicts.
     static func encodeSteps(
         plan: MetalDispatchPlan,
         encoder: MTL4ComputeCommandEncoder,
-        argumentTable: MTL4ArgumentTable,
-        visibilityOptions: MTL4VisibilityOptions = []
+        argumentTable: MTL4ArgumentTable
     ) {
-        let resolvedVisibilityOptions = resolvedMetalVisibilityOptions(visibilityOptions)
         for step in plan.steps {
             bindArgumentTable(step: step, argumentTable: argumentTable)
-
-            if step.barrierPolicy.isBarrier {
-                encoder.barrier(
-                    afterEncoderStages: .dispatch,
-                    beforeEncoderStages: .dispatch,
-                    visibilityOptions: resolvedVisibilityOptions
-                )
-            }
-
+            step.barrierPolicy.encode(on: encoder)
             encoder.setArgumentTable(argumentTable)
             encoder.setComputePipelineState(step.pipeline)
             if step.threadgroupMemoryLength > 0 {
@@ -45,20 +39,10 @@ enum MetalDecodeEncoder {
     static func encodeStep(
         step: MetalDispatchStep,
         encoder: MTL4ComputeCommandEncoder,
-        argumentTable: MTL4ArgumentTable,
-        visibilityOptions: MTL4VisibilityOptions = []
+        argumentTable: MTL4ArgumentTable
     ) {
-        let resolvedVisibilityOptions = resolvedMetalVisibilityOptions(visibilityOptions)
         bindArgumentTable(step: step, argumentTable: argumentTable)
-
-        if step.barrierPolicy.isBarrier {
-            encoder.barrier(
-                afterEncoderStages: .dispatch,
-                beforeEncoderStages: .dispatch,
-                visibilityOptions: resolvedVisibilityOptions
-            )
-        }
-
+        step.barrierPolicy.encode(on: encoder)
         encoder.setArgumentTable(argumentTable)
         encoder.setComputePipelineState(step.pipeline)
         if step.threadgroupMemoryLength > 0 {

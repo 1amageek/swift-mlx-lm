@@ -247,6 +247,22 @@ public struct ModelBundleLoader: Sendable {
             device: device
         )
 
+        // Compile GPU post-processing pipeline (pool + dense + L2)
+        let postProcessor: MetalEmbeddingPostProcessor?
+        do {
+            let denseDescriptors = try runtime.gpuDenseLayerDescriptors(device: device)
+            postProcessor = try MetalEmbeddingPostProcessor.compile(
+                device: device,
+                poolingStrategy: runtime.gpuPoolingStrategy,
+                denseLayers: denseDescriptors,
+                l2NormalizeEnabled: runtime.hasL2Normalize
+            )
+        } catch {
+            // Log but fall back to CPU path if GPU post-processor compilation fails
+            print("[ModelBundleLoader] GPU embedding post-processor unavailable, using CPU fallback: \(error)")
+            postProcessor = nil
+        }
+
         var configuration = ModelConfiguration(
             name: resources.modelType,
             inputCapabilities: .textOnly,
@@ -269,7 +285,8 @@ public struct ModelBundleLoader: Sendable {
             device: device,
             tokenizer: tokenizer,
             runtime: runtime,
-            configuration: configuration
+            configuration: configuration,
+            postProcessor: postProcessor
         )
     }
 

@@ -337,11 +337,10 @@ struct MetalDispatchStepBuilder {
             )
             let barrierPolicy: MetalBarrierPolicy
             if requiresBarrier {
-                let resources = step.bufferAccesses.conflictingResources(
-                    from: pendingReads,
-                    pendingWrites: pendingWrites
-                )
-                barrierPolicy = resources.isEmpty ? .bufferBarrier : .resourceBarrier(resources: resources)
+                let visibility: MTL4VisibilityOptions =
+                    MetalBufferAccesses.pendingWritesInvolveSharedBuffer(pendingWrites)
+                    ? .device : []
+                barrierPolicy = .barrier(visibility: visibility)
             } else {
                 barrierPolicy = .none
             }
@@ -719,7 +718,7 @@ struct DecodeRoutingPlanner {
             accessPolicyResolver: accessPolicyResolver
         )
 
-        func fusedNormBindings(dimension: Int, epsilon: Float) -> (
+        func fusedNormBindings(dimension: Int, epsilon: Float, weightBias: Float) -> (
             buffers: [(index: Int, buffer: MTLBuffer, offset: Int)],
             bytes: [(index: Int, value: [UInt8])]
         ) {
@@ -738,6 +737,7 @@ struct DecodeRoutingPlanner {
                 bytes: [
                     uint32Binding(4, UInt32(dimension)),
                     floatBinding(5, epsilon),
+                    floatBinding(6, weightBias),
                 ]
             )
         }
@@ -746,13 +746,57 @@ struct DecodeRoutingPlanner {
         case .fusedCopyNorm(let fusedOperation):
             return fusedNormBindings(
                 dimension: fusedOperation.dimension,
-                epsilon: fusedOperation.epsilon
+                epsilon: fusedOperation.epsilon,
+                weightBias: fusedOperation.weightBias
             )
 
         case .fusedResidualAddCopyNorm(let fusedOperation):
+            if let preNorm = fusedOperation.preNorm {
+                // PreNorm variant: [0]=hidden, [1]=residual, [2]=preNormWeight,
+                // [3]=outputNormWeight, [4]=scratch,
+                // bytes: [5]=dim, [6]=preNormEps, [7]=preNormWeightBias,
+                // [8]=outputEps, [9]=outputWeightBias
+                let preNormWeightResolver = WeightResolver(
+                    entry: DispatchEntry(
+                        index: entry.index,
+                        kind: entry.kind,
+                        parameterBindings: preNorm.parameterBindings,
+                        layerIndex: entry.layerIndex),
+                    stafWeightStore: stafWeightStore,
+                    fallbackBuffer: bufferSet.hidden,
+                    fallbackWeightFormat: fallbackWeightFormat,
+                    minimumFallbackLength: minimumFallbackLength,
+                    logsMisses: true,
+                    executionPhase: .decode,
+                    accessPolicyResolver: accessPolicyResolver
+                )
+                let (preNormWeightBuffer, preNormWeightOffset) = preNormWeightResolver.resolve(role: "scale")
+                let (outputWeightBuffer, outputWeightOffset) = weightResolver.resolve(role: "scale")
+                routingState.lastOutputIsHidden = false
+                routingState.currentInputOffset = 0
+                routingState.projectionIndex = 0
+                refreshCompositeInputSource()
+                return (
+                    buffers: [
+                        (0, bufferSet.hidden, 0),
+                        (1, bufferSet.residual, 0),
+                        (2, preNormWeightBuffer, preNormWeightOffset),
+                        (3, outputWeightBuffer, outputWeightOffset),
+                        (4, bufferSet.scratch, 0),
+                    ],
+                    bytes: [
+                        uint32Binding(5, UInt32(fusedOperation.dimension)),
+                        floatBinding(6, preNorm.epsilon),
+                        floatBinding(7, preNorm.weightBias),
+                        floatBinding(8, fusedOperation.epsilon),
+                        floatBinding(9, fusedOperation.weightBias),
+                    ]
+                )
+            }
             return fusedNormBindings(
                 dimension: fusedOperation.dimension,
-                epsilon: fusedOperation.epsilon
+                epsilon: fusedOperation.epsilon,
+                weightBias: fusedOperation.weightBias
             )
 
         case .projection(let projection, let isOutput):
@@ -927,6 +971,45 @@ struct DecodeRoutingPlanner {
             return (buffers: bindings.buffers, bytes: bindings.bytes)
 
         case .fusedResidualAddNorm(let fusedOperation):
+            if let preNorm = fusedOperation.preNorm {
+                // PreNorm variant (no copy): same buffer layout as AddCopyNorm preNorm
+                // but output goes to scratch (no residual copy)
+                let preNormWeightResolver = WeightResolver(
+                    entry: DispatchEntry(
+                        index: entry.index,
+                        kind: entry.kind,
+                        parameterBindings: preNorm.parameterBindings,
+                        layerIndex: entry.layerIndex),
+                    stafWeightStore: stafWeightStore,
+                    fallbackBuffer: bufferSet.hidden,
+                    fallbackWeightFormat: fallbackWeightFormat,
+                    minimumFallbackLength: minimumFallbackLength,
+                    logsMisses: true,
+                    executionPhase: .decode,
+                    accessPolicyResolver: accessPolicyResolver
+                )
+                let (preNormWeightBuffer, preNormWeightOffset) = preNormWeightResolver.resolve(role: "scale")
+                let (outputWeightBuffer, outputWeightOffset) = weightResolver.resolve(role: "scale")
+                routingState.lastOutputIsHidden = false
+                routingState.currentInputOffset = 0
+                routingState.projectionIndex = 0
+                return (
+                    buffers: [
+                        (0, bufferSet.hidden, 0),
+                        (1, bufferSet.residual, 0),
+                        (2, preNormWeightBuffer, preNormWeightOffset),
+                        (3, outputWeightBuffer, outputWeightOffset),
+                        (4, bufferSet.scratch, 0),
+                    ],
+                    bytes: [
+                        uint32Binding(5, UInt32(fusedOperation.dimension)),
+                        floatBinding(6, preNorm.epsilon),
+                        floatBinding(7, preNorm.weightBias),
+                        floatBinding(8, fusedOperation.epsilon),
+                        floatBinding(9, fusedOperation.weightBias),
+                    ]
+                )
+            }
             let (weightBuffer, weightOffset) = weightResolver.resolve(role: "scale")
             routingState.lastOutputIsHidden = false
             routingState.currentInputOffset = 0
@@ -941,6 +1024,7 @@ struct DecodeRoutingPlanner {
                 bytes: [
                     uint32Binding(4, UInt32(fusedOperation.dimension)),
                     floatBinding(5, fusedOperation.epsilon),
+                    floatBinding(6, fusedOperation.weightBias),
                 ]
             )
 

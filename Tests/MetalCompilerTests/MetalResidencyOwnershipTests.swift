@@ -16,12 +16,14 @@ struct MetalResidencyOwnershipTests {
         let b = try #require(device.makeBuffer(length: 256, options: .storageModeShared))
         let c = try #require(device.makeBuffer(length: 256, options: .storageModeShared))
 
-        let lhs = MetalBarrierPolicy.resourceBarrier(resources: [a, b])
-        let sameResourcesDifferentOrder = MetalBarrierPolicy.resourceBarrier(resources: [b, a])
-        let differentResourcesSameCount = MetalBarrierPolicy.resourceBarrier(resources: [a, c])
+        let deviceBarrier = MetalBarrierPolicy.barrier(visibility: .device)
+        let noneBarrier = MetalBarrierPolicy.barrier(visibility: [])
+        let anotherDeviceBarrier = MetalBarrierPolicy.barrier(visibility: .device)
+        _ = (a, b, c)  // suppress unused warnings
 
-        #expect(lhs == sameResourcesDifferentOrder)
-        #expect(lhs != differentResourcesSameCount)
+        #expect(deviceBarrier == anotherDeviceBarrier)
+        #expect(deviceBarrier != noneBarrier)
+        #expect(noneBarrier != .none)
     }
 
     @Test("binding table supplemental residency buffers include resident constants and prepared/encoded argument buffers")
@@ -227,7 +229,7 @@ struct MetalResidencyOwnershipTests {
                 gridSize: MTLSize(width: 1, height: 1, depth: 1),
                 threadgroupSize: MTLSize(width: 1, height: 1, depth: 1),
                 threadgroupMemoryLength: 0,
-                barrierPolicy: .resourceBarrier(resources: [hidden, scratch])
+                barrierPolicy: .barrier(visibility: .device)
             ),
             bindings: stepBindings,
             bufferAccesses: MetalBufferAccesses(
@@ -313,12 +315,10 @@ struct MetalResidencyOwnershipTests {
         #expect(clonedPreparedBuffer !== preparedArgumentBuffer)
 
         switch clonedStep.barrierPolicy {
-        case .resourceBarrier(let resources):
-            let clonedResources = resources.compactMap { $0 as? MTLBuffer }
-            #expect(clonedResources.contains { $0 === cloned.decodePlan.buffers.hidden })
-            #expect(clonedResources.contains { $0 === cloned.decodePlan.buffers.scratch })
-        case .none, .bufferBarrier:
-            Issue.record("Expected resource-scoped barrier")
+        case .barrier(let visibility):
+            #expect(visibility == .device, "Expected .device visibility barrier")
+        case .none:
+            Issue.record("Expected barrier, got .none")
         }
 
         #expect(clonedStep.bufferAccesses.reads.contains(BufferRegion(buffer: cloned.decodePlan.buffers.hidden, offset: 0)))

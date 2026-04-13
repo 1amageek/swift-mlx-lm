@@ -316,25 +316,8 @@ private struct MetalCompiledModelRuntimeCloner {
     }
 
     private func clonedBarrierPolicy(_ policy: MetalBarrierPolicy) -> MetalBarrierPolicy {
-        switch policy {
-        case .none:
-            return .none
-        case .bufferBarrier:
-            return .bufferBarrier
-        case .resourceBarrier(let resources):
-            var seen = Set<ObjectIdentifier>()
-            let mappedResources = resources.compactMap { resource -> MTLResource? in
-                let mappedResource: MTLResource
-                if let buffer = resource as? MTLBuffer {
-                    mappedResource = mappedBuffer(buffer)
-                } else {
-                    mappedResource = resource
-                }
-                let identity = ObjectIdentifier(mappedResource as AnyObject)
-                return seen.insert(identity).inserted ? mappedResource : nil
-            }
-            return .resourceBarrier(resources: mappedResources)
-        }
+        // Visibility options are value types — no resource identity to remap.
+        policy
     }
 
     private func clonedBufferAccesses(_ accesses: MetalBufferAccesses) -> MetalBufferAccesses {

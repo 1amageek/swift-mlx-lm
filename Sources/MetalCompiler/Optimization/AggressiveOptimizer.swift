@@ -17,7 +17,7 @@ public struct AggressiveOptimizer: DispatchOptimizer {
 
     // MARK: - Fragment-Level Optimization
 
-    public func optimizeFragment(_ primitives: [CollectedPrimitive]) -> [OptimizedEntry] {
+    public func optimizeFragment(_ primitives: [CollectedPrimitive], context: FusionContext) -> [OptimizedEntry] {
         var result: [OptimizedEntry] = []
         var i = 0
 
@@ -74,7 +74,27 @@ public struct AggressiveOptimizer: DispatchOptimizer {
                 }
             }
 
-            // Rule 2: Batch consecutive in-place, fusable fragments with same dispatchDimension
+            // Rule 2a: Batch consecutive QKNorm fragments into a single dispatch.
+            if primitives[i].fragment is QKNormFragment,
+               i + 1 < primitives.count,
+               primitives[i + 1].fragment is QKNormFragment {
+                let batch = [primitives[i], primitives[i + 1]]
+                let combinedHeadCount = batch.reduce(0) { total, p in
+                    if case .perHead(let count) = p.fragment.dispatchDimension { return total + count }
+                    return total
+                }
+                let mergedBindings = batch.flatMap { $0.parameterBindings }
+                result.append(.batchedFragment(
+                    BatchedFragment(
+                        fragments: batch.map { $0.fragment },
+                        dispatchDimension: .perHead(headCount: combinedHeadCount)),
+                    parameterBindings: mergedBindings,
+                    layerIndex: primitives[i].layerIndex))
+                i += 2
+                continue
+            }
+
+            // Rule 2b: Batch consecutive in-place, fusable fragments with same dispatchDimension
             if primitives[i].fragment.isFusable
                 && primitives[i].fragment.isInPlace
                 && supportsInPlaceBatching(primitives[i].fragment)
@@ -116,7 +136,7 @@ public struct AggressiveOptimizer: DispatchOptimizer {
 
     // MARK: - Graph-Level Optimization
 
-    public func optimizeGraph(_ entries: [DispatchEntry]) -> [DispatchEntry] {
+    public func optimizeGraph(_ entries: [DispatchEntry], context: FusionContext) -> [DispatchEntry] {
         var result = entries
         var changed = true
 
@@ -126,15 +146,67 @@ public struct AggressiveOptimizer: DispatchOptimizer {
 
             while index < result.count {
                 // Check if the fragment at an index is a fusable reduction
-                func isFusableReduction(at i: Int) -> (dimension: Int, epsilon: Float)? {
+                func isFusableReduction(at i: Int) -> (dimension: Int, epsilon: Float, weightBias: Float)? {
                     guard case .fragment(let frag) = result[i].kind,
                           frag.isFusable,
                           case .reduction(let dim) = frag.dispatchDimension,
-                          let epsilon = frag.normEpsilon,
-                          (frag.normWeightBias ?? 0) == 0 else {
+                          let epsilon = frag.normEpsilon else {
                         return nil
                     }
-                    return (dim, epsilon)
+                    return (dim, epsilon, frag.normWeightBias ?? 0)
+                }
+
+                // Pattern 0a: fusable reduction + structuralAdd + structuralCopy + fusable reduction → 4→1
+                if index + 3 < result.count,
+                   let preNormReduction = isFusableReduction(at: index),
+                   case .structuralAdd(let addDimension) = result[index + 1].kind,
+                   case .structuralCopy = result[index + 2].kind,
+                   let outputReduction = isFusableReduction(at: index + 3) {
+                    let reductionThreads = min(context.hiddenSize, context.maxThreadsPerThreadgroup)
+                    let sharedMemoryNeeded = reductionThreads * MemoryLayout<Float>.size
+                    if sharedMemoryNeeded <= context.threadgroupMemoryLimit {
+                        let preNorm = FusedResidualAddCopyNorm.PreNorm(
+                            epsilon: preNormReduction.epsilon,
+                            weightBias: preNormReduction.weightBias,
+                            parameterBindings: result[index].parameterBindings)
+                        let fused = DispatchEntry(
+                            index: result[index].index,
+                            kind: .fusedResidualAddCopyNorm(FusedResidualAddCopyNorm(
+                                dimension: addDimension, epsilon: outputReduction.epsilon,
+                                weightBias: outputReduction.weightBias, preNorm: preNorm)),
+                            parameterBindings: result[index + 3].parameterBindings,
+                            layerIndex: result[index].layerIndex,
+                            compositeID: nil)
+                        result.replaceSubrange(index...index + 3, with: [fused])
+                        changed = true
+                        continue
+                    }
+                }
+
+                // Pattern 0b: fusable reduction + structuralAdd + fusable reduction → 3→1 (no copy, with preNorm)
+                if index + 2 < result.count,
+                   let preNormReduction = isFusableReduction(at: index),
+                   case .structuralAdd(let addDimension) = result[index + 1].kind,
+                   let outputReduction = isFusableReduction(at: index + 2) {
+                    let reductionThreads = min(context.hiddenSize, context.maxThreadsPerThreadgroup)
+                    let sharedMemoryNeeded = reductionThreads * MemoryLayout<Float>.size
+                    if sharedMemoryNeeded <= context.threadgroupMemoryLimit {
+                        let preNorm = FusedResidualAddCopyNorm.PreNorm(
+                            epsilon: preNormReduction.epsilon,
+                            weightBias: preNormReduction.weightBias,
+                            parameterBindings: result[index].parameterBindings)
+                        let fused = DispatchEntry(
+                            index: result[index].index,
+                            kind: .fusedResidualAddNorm(FusedResidualAddNorm(
+                                dimension: addDimension, epsilon: outputReduction.epsilon,
+                                weightBias: outputReduction.weightBias, preNorm: preNorm)),
+                            parameterBindings: result[index + 2].parameterBindings,
+                            layerIndex: result[index].layerIndex,
+                            compositeID: nil)
+                        result.replaceSubrange(index...index + 2, with: [fused])
+                        changed = true
+                        continue
+                    }
                 }
 
                 // Pattern 1: structuralAdd + structuralCopy + fusable reduction → 3→1
@@ -145,7 +217,8 @@ public struct AggressiveOptimizer: DispatchOptimizer {
                     let fused = DispatchEntry(
                         index: result[index].index,
                         kind: .fusedResidualAddCopyNorm(FusedResidualAddCopyNorm(
-                            dimension: addDimension, epsilon: reduction.epsilon)),
+                            dimension: addDimension, epsilon: reduction.epsilon,
+                            weightBias: reduction.weightBias)),
                         parameterBindings: result[index + 2].parameterBindings,
                         layerIndex: result[index].layerIndex,
                         compositeID: nil)
@@ -161,7 +234,8 @@ public struct AggressiveOptimizer: DispatchOptimizer {
                     let fused = DispatchEntry(
                         index: result[index].index,
                         kind: .fusedCopyNorm(FusedCopyNorm(
-                            dimension: reduction.dimension, epsilon: reduction.epsilon)),
+                            dimension: reduction.dimension, epsilon: reduction.epsilon,
+                            weightBias: reduction.weightBias)),
                         parameterBindings: result[index + 1].parameterBindings,
                         layerIndex: result[index].layerIndex,
                         compositeID: nil)
@@ -177,7 +251,8 @@ public struct AggressiveOptimizer: DispatchOptimizer {
                     let fused = DispatchEntry(
                         index: result[index].index,
                         kind: .fusedResidualAddNorm(FusedResidualAddNorm(
-                            dimension: addDimension, epsilon: reduction.epsilon)),
+                            dimension: addDimension, epsilon: reduction.epsilon,
+                            weightBias: reduction.weightBias)),
                         parameterBindings: result[index + 1].parameterBindings,
                         layerIndex: result[index].layerIndex,
                         compositeID: nil)

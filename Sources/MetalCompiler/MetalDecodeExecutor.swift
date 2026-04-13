@@ -25,8 +25,7 @@ struct MetalDecodeExecutor: Sendable {
                 MetalDecodeEncoder.encodeSteps(
                     plan: plan,
                     encoder: encoder,
-                    argumentTable: argumentTable,
-                    visibilityOptions: .device
+                    argumentTable: argumentTable
                 )
             }
             position += 1
@@ -59,8 +58,7 @@ struct MetalDecodeExecutor: Sendable {
                 MetalDecodeEncoder.encodeSteps(
                     plan: plan,
                     encoder: encoder,
-                    argumentTable: argumentTable,
-                    visibilityOptions: .device
+                    argumentTable: argumentTable
                 )
             }
             position += 1

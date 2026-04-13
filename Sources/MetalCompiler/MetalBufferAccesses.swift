@@ -83,4 +83,15 @@ public struct MetalBufferAccesses: @unchecked Sendable {
     public func conflictingResources(from pendingWrites: Set<BufferRegion>) -> [MTLResource] {
         conflictingResources(from: [], pendingWrites: pendingWrites)
     }
+
+    /// Whether any of the pending writes target a shared-mode buffer.
+    ///
+    /// Used to determine Metal 4 barrier visibility:
+    /// - Shared writes → `.device` (flush GPU caches to device memory)
+    /// - Private-only writes → `[]` (execution ordering only, GPU caches are coherent)
+    public static func pendingWritesInvolveSharedBuffer(
+        _ pendingWrites: Set<BufferRegion>
+    ) -> Bool {
+        pendingWrites.contains { $0.rawBuffer.storageMode == .shared }
+    }
 }

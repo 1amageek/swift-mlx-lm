@@ -560,4 +560,78 @@ public static func generateBatchedPerHead2ArgumentTableVariant(
     """
 }
 
+/// Generate batched QK norm for prefill (sequence mode).
+///
+/// Single dispatch applies per-head RMS norm to both Q and K projections.
+/// Threadgroups [0..qHeadCount) → Q data/weights, [qHeadCount..total) → K data/weights.
+///
+/// Grid: (qHeadCount + kHeadCount, sequenceLength, 1)
+/// Threadgroup: (SIMD_WIDTH, 1, 1) — one SIMD group per head.
+public static func generateBatchedQKNormSequence(
+    name: String,
+    bufferPrecision: BufferPrecision,
+    weightFormat: WeightFormat
+) -> String {
+    let bt = bufferPrecision.metalType
+    let wt = weightFormat.bufferType
+    let readWeight = { (expr: String) in weightFormat.readExpression(expr) }
+
+    return """
+    kernel void \(name)(
+        device \(bt)* qData              [[buffer(0)]],
+        device \(bt)* kData              [[buffer(1)]],
+        device const \(wt)* qWeight      [[buffer(2)]],
+        device const \(wt)* kWeight      [[buffer(3)]],
+        constant uint& qHeadCount        [[buffer(4)]],
+        constant uint& kHeadCount        [[buffer(5)]],
+        constant uint& headDimension     [[buffer(6)]],
+        constant float& epsilon          [[buffer(7)]],
+        constant float& weightBias       [[buffer(8)]],
+        constant uint& sequenceLength    [[buffer(9)]],
+        constant uint& qTotalDimension   [[buffer(10)]],
+        constant uint& kTotalDimension   [[buffer(11)]],
+        uint2 gid                        [[threadgroup_position_in_grid]],
+        uint tid                         [[thread_index_in_threadgroup]]
+    ) {
+        uint head = gid.x;
+        uint seqPos = gid.y;
+        if (seqPos >= sequenceLength) return;
+
+        device \(bt)* data;
+        device const \(wt)* weight;
+        uint localHead;
+        uint totalDim;
+
+        if (head < qHeadCount) {
+            data = qData; weight = qWeight; localHead = head; totalDim = qTotalDimension;
+        } else {
+            localHead = head - qHeadCount;
+            if (localHead >= kHeadCount) return;
+            data = kData; weight = kWeight; totalDim = kTotalDimension;
+        }
+
+        uint offset = seqPos * totalDim + localHead * headDimension;
+
+        float sumSq = 0.0f;
+        for (uint i = tid; i < headDimension; i += SIMD_WIDTH) {
+            float v = float(data[offset + i]);
+            sumSq += v * v;
+        }
+        sumSq = simd_sum(sumSq);
+
+        threadgroup float sharedRMS[1];
+        if (tid == 0) {
+            sharedRMS[0] = rsqrt(sumSq / float(headDimension) + epsilon);
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        float rms = sharedRMS[0];
+        for (uint i = tid; i < headDimension; i += SIMD_WIDTH) {
+            float affine = \(readWeight("weight[i]")) + weightBias;
+            data[offset + i] = \(bt)(float(data[offset + i]) * rms * affine);
+        }
+    }
+    """
+}
+
 }

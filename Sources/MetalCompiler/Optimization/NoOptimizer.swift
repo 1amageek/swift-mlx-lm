@@ -7,11 +7,11 @@ public struct NoOptimizer: DispatchOptimizer {
 
     public init() {}
 
-    public func optimizeFragment(_ primitives: [CollectedPrimitive]) -> [OptimizedEntry] {
+    public func optimizeFragment(_ primitives: [CollectedPrimitive], context: FusionContext) -> [OptimizedEntry] {
         primitives.map { .single($0) }
     }
 
-    public func optimizeGraph(_ entries: [DispatchEntry]) -> [DispatchEntry] {
+    public func optimizeGraph(_ entries: [DispatchEntry], context: FusionContext) -> [DispatchEntry] {
         entries
     }
 }

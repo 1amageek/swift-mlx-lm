@@ -1,3 +1,4 @@
+import LMIR
 import Metal
 
 /// Metal dispatch types used by the compiler.
@@ -276,13 +277,30 @@ public enum MetalDispatchDimension: Sendable, Equatable {
 
 // MARK: - Fused Operations
 
-/// Fused operation: residualAdd + copy + RMSNorm → single dispatch.
+/// Fused operation: [optional preNorm] + residualAdd + copy + RMSNorm → single dispatch.
+///
+/// When `preNorm` is non-nil, the kernel applies an in-place RMS norm to hidden
+/// before the residual add. This absorbs the post-norm from the preceding residual
+/// body (e.g., post_attn_norm + add + copy + pre_mlp_norm → 4→1).
 public struct FusedResidualAddCopyNorm: Sendable {
     public let dimension: Int
     public let epsilon: Float
-    public init(dimension: Int, epsilon: Float) {
+    public let weightBias: Float
+    /// Optional pre-norm applied in-place to hidden before the residual add.
+    public let preNorm: PreNorm?
+
+    /// Parameters for an in-place pre-norm applied before the residual add.
+    public struct PreNorm: Sendable {
+        public let epsilon: Float
+        public let weightBias: Float
+        public let parameterBindings: [ParameterBinding]
+    }
+
+    public init(dimension: Int, epsilon: Float, weightBias: Float = 0, preNorm: PreNorm? = nil) {
         self.dimension = dimension
         self.epsilon = epsilon
+        self.weightBias = weightBias
+        self.preNorm = preNorm
     }
 }
 
@@ -290,20 +308,28 @@ public struct FusedResidualAddCopyNorm: Sendable {
 public struct FusedCopyNorm: Sendable {
     public let dimension: Int
     public let epsilon: Float
-    public init(dimension: Int, epsilon: Float) {
+    public let weightBias: Float
+    public init(dimension: Int, epsilon: Float, weightBias: Float = 0) {
         self.dimension = dimension
         self.epsilon = epsilon
+        self.weightBias = weightBias
     }
 }
 
-/// Fused operation: residualAdd + RMSNorm → single dispatch (no copy).
+/// Fused operation: [optional preNorm] + residualAdd + RMSNorm → single dispatch (no copy).
 /// Used at model end where no next residual is needed.
 public struct FusedResidualAddNorm: Sendable {
     public let dimension: Int
     public let epsilon: Float
-    public init(dimension: Int, epsilon: Float) {
+    public let weightBias: Float
+    /// Optional pre-norm applied in-place to hidden before the residual add.
+    public let preNorm: FusedResidualAddCopyNorm.PreNorm?
+
+    public init(dimension: Int, epsilon: Float, weightBias: Float = 0, preNorm: FusedResidualAddCopyNorm.PreNorm? = nil) {
         self.dimension = dimension
         self.epsilon = epsilon
+        self.weightBias = weightBias
+        self.preNorm = preNorm
     }
 }
 
