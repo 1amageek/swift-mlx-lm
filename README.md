@@ -468,6 +468,247 @@ The key design constraints are:
 - `safetensors` is canonical and STAF is a regenerable execution cache
 - Decode hot-path cost matters more than convenience abstractions
 
+## Adding a New ModelComponent
+
+A ModelComponent declares a computation in the IR graph. The full chain is:
+
+```text
+ModelComponent (declaration) → OperationAttributes (IR) → MetalCompilable (bridge) → Fragment (Metal)
+```
+
+### Step 1: Define OperationAttributes in LMIR
+
+Create `Sources/LMIR/IR/MyOpAttributes.swift`. This is the backend-independent IR node that stores all parameters needed for compilation. It must not reference Metal, MLX, or any backend type.
+
+```swift
+public struct MyOpAttributes: OperationAttributes, Codable, Equatable {
+    public let dimension: Int
+    public let epsilon: Float
+
+    public init(dimension: Int, epsilon: Float) {
+        self.dimension = dimension
+        self.epsilon = epsilon
+    }
+}
+```
+
+### Step 2: Define ModelComponent in LMArchitecture
+
+Create `Sources/LMArchitecture/Declaration/Components/MyOp.swift`. This is the user-facing DSL entry point.
+
+- Set `typealias Attributes` to the IR type from Step 1
+- Implement the `attributes` property to construct the IR node
+- Use `precondition()` for parameter validation
+- Override `operationSignature` only if the operation is not unary (default is 1 operand → 1 result)
+
+```swift
+public struct MyOp: ModelComponent {
+    public typealias Attributes = MyOpAttributes
+
+    public let dimension: Int
+    public let epsilon: Float
+
+    public init(dimension: Int, epsilon: Float = 1e-6) {
+        precondition(dimension > 0, "dimension must be positive")
+        self.dimension = dimension
+        self.epsilon = epsilon
+    }
+
+    public var attributes: MyOpAttributes {
+        MyOpAttributes(dimension: dimension, epsilon: epsilon)
+    }
+}
+```
+
+### Step 3: Add MetalCompilable conformance in MetalCompiler
+
+Create `Sources/MetalCompiler/Compilable/MyOpFragment.swift`. This bridges the IR attributes to Metal fragments using retroactive conformance.
+
+```swift
+extension MyOpAttributes: MetalCompilable {
+    func fragment(context: KernelContext) -> some MetalKernelFragment {
+        // Return already-optimized fragment composition.
+        // Component-internal optimization decisions are made here.
+        Reduction(dimension: dimension, epsilon: epsilon, weightBias: 0)
+    }
+}
+```
+
+For operations that expand to multiple fragments, use `@MetalKernelFragmentBuilder`:
+
+```swift
+extension MyOpAttributes: MetalCompilable {
+    @MetalKernelFragmentBuilder
+    func fragment(context: KernelContext) -> some MetalKernelFragment {
+        BatchedProjection(projections: [
+            .init(field: "gate_proj", inputDimension: inputSize, outputDimension: intermediateSize),
+            .init(field: "up_proj", inputDimension: inputSize, outputDimension: intermediateSize),
+        ])
+        ElementwiseFragment(count: intermediateSize, kind: .swiglu)
+        LinearFragment(field: "down_proj", inputDimension: intermediateSize, outputDimension: outputSize)
+    }
+}
+```
+
+### Step 4: Use in model declarations
+
+The new component is now available in `ModelDeclarations`:
+
+```swift
+struct MyModel: ModelArchitecture {
+    var body: some ModelComponent {
+        TokenEmbedding(vocabularySize: vocabSize, dimension: hiddenSize)
+        Repeat(count: layerCount) {
+            Residual {
+                MyOp(dimension: hiddenSize)
+                Attention(hiddenSize: hiddenSize, headCount: headCount, ...)
+            }
+        }
+        OutputHead(inputSize: hiddenSize, vocabSize: vocabSize)
+    }
+}
+```
+
+No changes are needed in the compiler, kernel generator, or dispatch planner. The compiler discovers `MetalCompilable` conformance automatically via capability query.
+
+## Adding a New Fragment
+
+A Fragment is a reusable Metal kernel building block. Fragments are consumed by `MetalCompilable` conformances and composed by the compiler into optimized dispatch plans.
+
+### Step 1: Implement PrimitiveMetalKernelFragment
+
+Create `Sources/MetalCompiler/Primitives/MyFragment.swift`.
+
+```swift
+public struct MyFragment: PrimitiveMetalKernelFragment {
+    public let dimension: Int
+
+    // GPU dispatch pattern
+    public var dispatchDimension: MetalDispatchDimension {
+        .reduction(dimension: dimension)
+    }
+
+    // Kernel identifier for pipeline cache
+    public func kernelName(context: KernelContext) -> String {
+        "my_fragment_\(context.bufferPrecision.suffix)"
+    }
+
+    // Complete MSL kernel source (required for all fragments)
+    public func kernelSource(
+        name: String,
+        bufferPrecision: BufferPrecision,
+        weightFormat: WeightFormat
+    ) -> String {
+        """
+        kernel void \(name)(
+            device const \(bufferPrecision.typeName)* input [[buffer(0)]],
+            device \(bufferPrecision.typeName)* output [[buffer(1)]],
+            uint gid [[thread_position_in_grid]]
+        ) {
+            output[gid] = my_operation(input[gid]);
+        }
+        """
+    }
+
+    // Decode-time buffer bindings (must declare writeBufferIndices)
+    public func decodeBindings(context: BufferBindingContext) -> FragmentBindings {
+        FragmentBindings(
+            bindings: [
+                .init(index: 0, resource: context.inputBuffer),
+                .init(index: 1, resource: context.outputBuffer),
+            ],
+            writeBufferIndices: [1]  // Required for barrier optimization
+        )
+    }
+
+    // Prefill-time dispatch steps
+    public func prefillSteps(context: PrefillBindingContext) throws -> FragmentPrefillSteps {
+        // Return dispatch steps for prefill execution
+    }
+}
+```
+
+### Step 2: Declare FusionContract (if fusable)
+
+If adjacent fragments should be automatically fused into a single GPU dispatch, declare a `FusionContract` and implement `kernelBody()`.
+
+```swift
+extension MyFragment {
+    public var fusionContract: FusionContract? {
+        FusionContract(
+            ports: [
+                FusionPort(name: "input", direction: .input, role: .buffer,
+                          accessPattern: .singlePass, bufferIntent: .dataFlow),
+                FusionPort(name: "output", direction: .output, role: .buffer,
+                          accessPattern: .singlePass, bufferIntent: .dataFlow),
+            ],
+            parallelism: .perRow(dimension: dimension),
+            threadgroupMemoryBytes: 0
+        )
+    }
+
+    // Composable MSL code snippet (no kernel signature, no buffer declarations)
+    public func kernelBody(
+        bufferPrecision: BufferPrecision,
+        weightFormat: WeightFormat
+    ) -> String? {
+        """
+        float value = input[gid];
+        value = my_operation(value);
+        output[gid] = value;
+        """
+    }
+}
+```
+
+The compiler automatically detects fusable neighbors by comparing `FusionContract` properties:
+- Parallelism compatibility (e.g., `.perRow(dim)` matches `.perRow(dim)`)
+- Output→input port connection
+- Combined threadgroup memory within hardware limits
+
+Fragments that are inherently non-fusable (FlashAttention, SSM recurrence, etc.) return `nil` from `fusionContract` and provide complete kernels via `kernelSource()` only.
+
+### Step 3: Conform to capability protocols (if applicable)
+
+Fragments opt into capability protocols based on their nature. The compiler queries these via `as?` capability casts instead of inspecting concrete types.
+
+| Protocol | When to conform | What it enables |
+|---|---|---|
+| `ProjectionDescribing` | Weight × input projections (GEMV/GEMM) | Buffer sizing, weight resolution, quantization planning, output marking |
+| `ConvStateRequiring` | Temporal convolution with persistent state | Conv state buffer allocation |
+| `RecurrentStateRequiring` | Sequential recurrence with persistent state | Recurrent state buffer allocation |
+| `PerLayerInputCapable` | Per-layer external input injection | Per-layer input buffer sizing |
+
+```swift
+extension MyFragment: ProjectionDescribing {
+    public var projectionFields: [ProjectionFieldDescriptor] {
+        [ProjectionFieldDescriptor(field: "weight",
+                                   inputDimension: inputDimension,
+                                   outputDimension: outputDimension)]
+    }
+    public var isOutputProjection: Bool { isOutput }
+    public func withOutputProjectionEnabled() -> any PrimitiveMetalKernelFragment {
+        var copy = self
+        copy.isOutput = true
+        return copy
+    }
+}
+```
+
+Only conform to protocols that match the fragment's actual semantics. No changes to the compiler are needed.
+
+### What NOT to change
+
+Adding a new fragment requires zero modifications to:
+
+- `MetalSourceGenerator` (no `generateXxx()` methods)
+- `MetalKernelSourceCatalog` (no switch cases)
+- `MetalPrefillStepBuilder` (no switch cases)
+- `MetalDispatchStepBuilder` (no switch cases)
+- `MetalEntryCollector` (no type inspection)
+
+The compiler operates entirely through protocol interfaces: `PrimitiveMetalKernelFragment` for kernel generation and dispatch, `FusionContract` for automatic fusion, and capability protocols for resource planning.
+
 ## Repository Notes
 
 - `Sources/SwiftLM/SwiftLM.docc` contains the DocC sources
