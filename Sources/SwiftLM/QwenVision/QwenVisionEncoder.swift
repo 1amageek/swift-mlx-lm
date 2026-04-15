@@ -19,6 +19,7 @@ final class QwenVisionEncoder {
     private let temporalPatchSize: Int
     private let spatialMergeSize: Int
     private let numPositionEmbeddings: Int
+    private let ropeTheta: Float
     private let hiddenAct: String
 
     init(configuration: ModelVisionConfiguration, weights: QwenVisionWeightStore) throws {
@@ -67,6 +68,7 @@ final class QwenVisionEncoder {
         self.temporalPatchSize = temporalPatchSize
         self.spatialMergeSize = spatialMergeSize
         self.numPositionEmbeddings = numPositionEmbeddings
+        self.ropeTheta = configuration.ropeTheta ?? 10_000.0
         self.hiddenAct = configuration.hiddenAct ?? "gelu"
     }
 
@@ -138,10 +140,6 @@ final class QwenVisionEncoder {
         )
     }
 
-    private func patchEmbed(images: [PreparedPrompt.Multimodal.Image]) throws -> [Float] {
-        try patchEmbed(samples: images.map(VisionSample.init))
-    }
-
     private func patchEmbed(samples: [VisionSample]) throws -> [Float] {
         let inputDimension = inChannels * temporalPatchSize * patchSize * patchSize
         let rowCount = samples.reduce(0) { partialResult, sample in
@@ -180,8 +178,7 @@ final class QwenVisionEncoder {
 
             let mergedHeight = height / spatialMergeSize
             let mergedWidth = width / spatialMergeSize
-            for frame in 0..<temporal {
-                _ = frame
+            for _ in 0..<temporal {
                 for blockRow in 0..<mergedHeight {
                     for blockColumn in 0..<mergedWidth {
                         for intraRow in 0..<spatialMergeSize {
@@ -208,12 +205,9 @@ final class QwenVisionEncoder {
     private func makeRotaryEmbeddings(for gridTHW: [[Int]]) -> (cos: [Float], sin: [Float]) {
         let headDimension = hiddenSize / headCount
         let freqCount = headDimension / 4
-        let maxHW = gridTHW.reduce(0) { partialResult, grid in
-            max(partialResult, max(grid[1], grid[2]))
-        }
-        let invFreq = (0..<freqCount).map { index -> Float in
+        let invFreq = (0..<freqCount).map { [ropeTheta] index -> Float in
             let exponent = Float(index * 2) / Float(headDimension / 2)
-            return 1.0 / powf(10000.0, exponent)
+            return 1.0 / powf(ropeTheta, exponent)
         }
 
         var cos: [Float] = []
@@ -227,8 +221,7 @@ final class QwenVisionEncoder {
             let width = grid[2]
             let mergedHeight = height / spatialMergeSize
             let mergedWidth = width / spatialMergeSize
-            for frame in 0..<temporal {
-                _ = frame
+            for _ in 0..<temporal {
                 for blockRow in 0..<mergedHeight {
                     for blockColumn in 0..<mergedWidth {
                         for intraRow in 0..<spatialMergeSize {
@@ -253,7 +246,6 @@ final class QwenVisionEncoder {
             }
         }
 
-        _ = maxHW
         return (cos: cos, sin: sin)
     }
 

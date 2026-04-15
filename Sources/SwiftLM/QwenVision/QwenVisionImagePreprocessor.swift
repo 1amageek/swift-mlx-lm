@@ -157,7 +157,7 @@ struct QwenVisionImagePreprocessor {
                         let patchOriginY = (blockY * mergeSize + mergeY) * patchSize
                         let patchOriginX = (blockX * mergeSize + mergeX) * patchSize
                         for channel in 0..<3 {
-                            for temporal in 0..<temporalPatchSize {
+                            for _ in 0..<temporalPatchSize {
                                 for patchY in 0..<patchSize {
                                     for patchX in 0..<patchSize {
                                         let sourceY = patchOriginY + patchY
@@ -165,9 +165,6 @@ struct QwenVisionImagePreprocessor {
                                         let sourceIndex = ((sourceY * width + sourceX) * 3) + channel
                                         let value = normalizedPixels[sourceIndex]
                                         flattened.append(value)
-                                        if temporal + 1 < temporalPatchSize {
-                                            continue
-                                        }
                                     }
                                 }
                             }

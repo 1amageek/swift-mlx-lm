@@ -627,6 +627,48 @@ swift build
 
 Vision encoder と text decoder は独立したモデル。IR に vision encoder を含めない。
 
+### アーキテクチャ概要
+
+Vision encoder は CPU 上で実行する純粋な Swift 実装。Metal kernel は使わない。画像を patch embedding → transformer layers → pooling → text space projection の順で処理し、text decoder の embedding 空間に射影する。
+
+### Gemma4 Vision Encoder
+
+Gemma4 の vision encoder は `vision_config` セクションで構成される。
+
+```
+Image → PatchEmbedding → PositionEmbedding(additive, learnable table)
+      → N × VisionLayer(sandwich norm + MHA + SwiGLU MLP)
+      → AveragePooling(kernel_size × kernel_size)
+      → RMSNorm → Linear(vision_hidden → text_hidden)
+      → [embedding vectors]
+```
+
+#### config.json → 実装のマッピング
+
+| config.json field | 用途 |
+|---|---|
+| `vision_config.hidden_size` | Vision encoder の hidden dimension |
+| `vision_config.intermediate_size` | MLP intermediate dimension |
+| `vision_config.num_attention_heads` | MHA head count (= num_key_value_heads) |
+| `vision_config.num_hidden_layers` | Transformer layer count |
+| `vision_config.patch_size` | Image patch size (pixels) |
+| `vision_config.pooling_kernel_size` | Average pooling kernel |
+| `vision_config.position_embedding_size` | Max grid positions per axis |
+| `vision_config.rope_parameters.rope_theta` | Vision RoPE base frequency (Gemma4 E2B: 100.0) |
+| `vision_config.standardize` | Post-pooling standardization |
+| `text_config.hidden_size` | Projection output dimension (text embedding space) |
+
+#### 設計上の注意
+
+- Vision-to-text 射影の出力次元は `text_config.hidden_size` から取得する。`vision_config` に `out_hidden_size` / `output_proj_dims` は存在しない
+- `processor_class` は `preprocessor_config.json`、`processor_config.json`、`tokenizer_config.json` のいずれかから読む
+- RoPE theta は config から読む。ハードコードしない — Gemma4 vision は 100.0 (text の 10000.0 と異なる)
+- `use_clipped_linears` は training stability 機能であり、推論時は無視する
+
+### QwenVision Encoder
+
+Qwen3.5 の vision encoder は画像・動画の両方をサポートし、temporal/spatial grid で管理する。deepstack visual indexes による multi-scale feature 抽出を含む。詳細は `Sources/SwiftLM/QwenVision/` を参照。
+
 ## Metal 4 (Primary Target)
 
 **Metal 4 を優先して使用する。** Xcode 26 + Metal 4 が利用可能な環境を前提とし、新規実装は Metal 4 API を最初に採用する。Metal 3 fallback は互換性が必要な場合のみ。

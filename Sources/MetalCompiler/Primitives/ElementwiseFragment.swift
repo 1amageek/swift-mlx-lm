@@ -39,16 +39,17 @@ public struct ElementwiseFragment: PrimitiveMetalKernelFragment {
     }
 
     public func kernelBody(bufferPrecision: BufferPrecision, weightFormat: WeightFormat) -> String? {
+        let bt = bufferPrecision.metalType
         switch kind {
         case .swiglu:
             return """
             float g = float(gate[idx]);
-            output[idx] = g * (1.0f / (1.0f + exp(-g))) * float(up[idx]);
+            output[idx] = \(bt)(g * (1.0f / (1.0f + exp(-g))) * float(up[idx]));
             """
         case .geluGated:
             return """
             float g = float(gate[idx]);
-            output[idx] = 0.5f * g * (1.0f + precise::tanh(0.7978845608f * (g + 0.044715f * g * g * g))) * float(up[idx]);
+            output[idx] = \(bt)(0.5f * g * (1.0f + precise::tanh(0.7978845608f * (g + 0.044715f * g * g * g))) * float(up[idx]));
             """
         }
     }

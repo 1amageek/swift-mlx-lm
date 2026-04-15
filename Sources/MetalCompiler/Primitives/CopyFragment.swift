@@ -36,9 +36,10 @@ public struct CopyFragment: PrimitiveMetalKernelFragment {
     }
 
     public func kernelBody(bufferPrecision: BufferPrecision, weightFormat: WeightFormat) -> String? {
-        """
-        residual[idx] = data[idx];
-        output[idx] = data[idx];
+        let bt = bufferPrecision.metalType
+        return """
+        residual[idx] = \(bt)(data[idx]);
+        output[idx] = \(bt)(data[idx]);
         """
     }
 

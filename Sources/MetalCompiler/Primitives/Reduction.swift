@@ -59,6 +59,7 @@ public struct Reduction: PrimitiveMetalKernelFragment {
 
     public func kernelBody(bufferPrecision: BufferPrecision, weightFormat: WeightFormat) -> String? {
         let readWeight = { (expr: String) in weightFormat.readExpression(expr) }
+        let bt = bufferPrecision.metalType
 
         return """
         float sumSquared = 0.0f;
@@ -82,7 +83,7 @@ public struct Reduction: PrimitiveMetalKernelFragment {
 
         float _rms_scale = shared[0];
         for (uint i = tid; i < dimension; i += threadgroupSize) {
-            output[i] = float(data[i]) * _rms_scale * (\(readWeight("weight[i]")) + weightBias);
+            output[i] = \(bt)(float(data[i]) * _rms_scale * (\(readWeight("weight[i]")) + weightBias));
         }
         """
     }

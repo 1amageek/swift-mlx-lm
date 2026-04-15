@@ -31,9 +31,10 @@ public struct SigmoidGateFragment: PrimitiveMetalKernelFragment {
     }
 
     public func kernelBody(bufferPrecision: BufferPrecision, weightFormat: WeightFormat) -> String? {
-        """
+        let bt = bufferPrecision.metalType
+        return """
         float g = float(gate[idx]);
-        output[idx] = float(input[idx]) * (1.0f / (1.0f + exp(-g)));
+        output[idx] = \(bt)(float(input[idx]) * (1.0f / (1.0f + exp(-g))));
         """
     }
 

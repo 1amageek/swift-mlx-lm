@@ -317,6 +317,16 @@ struct HFConfigDecoder {
             positionEmbeddingSize: visionConfig?["position_embedding_size"] as? Int,
             defaultOutputLength: visionConfig?["default_output_length"] as? Int
                 ?? config["vision_soft_tokens_per_image"] as? Int,
+            ropeTheta: {
+                let ropeParams = visionConfig?["rope_parameters"] as? [String: Any]
+                if let theta = ropeParams?["rope_theta"] as? Double {
+                    return Float(theta)
+                }
+                if let theta = ropeParams?["rope_theta"] as? Int {
+                    return Float(theta)
+                }
+                return nil
+            }(),
             standardize: visionConfig?["standardize"] as? Bool,
             minimumPixelCount: minimumPixelCount,
             maximumPixelCount: maximumPixelCount,

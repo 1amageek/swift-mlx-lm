@@ -13,6 +13,5 @@ struct Gemma4Support {
             && vision.patchSize != nil
             && vision.poolingKernelSize != nil
             && vision.hiddenSize != nil
-            && vision.outHiddenSize != nil
     }
 }

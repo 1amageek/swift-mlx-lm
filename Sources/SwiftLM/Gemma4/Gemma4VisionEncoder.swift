@@ -6,12 +6,12 @@ final class Gemma4VisionEncoder {
     private let textHiddenSize: Int
     private let hiddenSize: Int
     private let intermediateSize: Int
-    private let outputDimension: Int
     private let headCount: Int
     private let layerCount: Int
     private let patchSize: Int
     private let poolingKernelSize: Int
     private let positionEmbeddingSize: Int
+    private let ropeTheta: Float
     private let hiddenAct: String
 
     init(
@@ -24,9 +24,6 @@ final class Gemma4VisionEncoder {
         }
         guard let intermediateSize = configuration.intermediateSize else {
             throw ModelBundleLoaderError.invalidConfig("Gemma4 vision intermediate_size is required")
-        }
-        guard let outputDimension = configuration.outHiddenSize else {
-            throw ModelBundleLoaderError.invalidConfig("Gemma4 vision output_proj_dims is required")
         }
         guard let headCount = configuration.headCount else {
             throw ModelBundleLoaderError.invalidConfig("Gemma4 vision num_attention_heads is required")
@@ -49,12 +46,12 @@ final class Gemma4VisionEncoder {
         self.textHiddenSize = textHiddenSize
         self.hiddenSize = hiddenSize
         self.intermediateSize = intermediateSize
-        self.outputDimension = outputDimension
         self.headCount = headCount
         self.layerCount = layerCount
         self.patchSize = patchSize
         self.poolingKernelSize = poolingKernelSize
         self.positionEmbeddingSize = positionEmbeddingSize
+        self.ropeTheta = configuration.ropeTheta ?? 10_000.0
         self.hiddenAct = configuration.hiddenAct ?? "gelu_pytorch_tanh"
     }
 
@@ -194,7 +191,7 @@ final class Gemma4VisionEncoder {
 
         var queryHeads = reshapeToHeads(query, tokenCount: tokenCount, headDimension: headDimension)
         var keyHeads = reshapeToHeads(key, tokenCount: tokenCount, headDimension: headDimension)
-        var valueHeads = reshapeToHeads(value, tokenCount: tokenCount, headDimension: headDimension)
+        let valueHeads = reshapeToHeads(value, tokenCount: tokenCount, headDimension: headDimension)
         let coordinates = patchCoordinates(gridTHW: gridTHW)
 
         for tokenIndex in 0..<tokenCount {
@@ -207,7 +204,6 @@ final class Gemma4VisionEncoder {
                     keyHeads[tokenIndex][headIndex],
                     weight: kNormWeight
                 )
-                valueHeads[tokenIndex][headIndex] = rmsNormVector(valueHeads[tokenIndex][headIndex], weight: nil)
                 queryHeads[tokenIndex][headIndex] = apply2DRotary(
                     queryHeads[tokenIndex][headIndex],
                     coordinate: coordinates[tokenIndex]
@@ -410,7 +406,7 @@ final class Gemma4VisionEncoder {
         let quarterDimension = max(1, halfDimension / 2)
         let frequencies = (0..<quarterDimension).map { index -> Float in
             let exponent = Float(index * 2) / Float(max(halfDimension, 1))
-            return 1.0 / powf(10_000.0, exponent)
+            return 1.0 / powf(ropeTheta, exponent)
         }
 
         var positionEmbedding = [Float]()

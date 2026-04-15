@@ -26,6 +26,7 @@ public struct ModelVisionConfiguration: Sendable, Equatable {
     public var spatialMergeSize: Int?
     public var positionEmbeddingSize: Int?
     public var defaultOutputLength: Int?
+    public var ropeTheta: Float?
     public var standardize: Bool?
     public var minimumPixelCount: Int?
     public var maximumPixelCount: Int?
@@ -59,6 +60,7 @@ public struct ModelVisionConfiguration: Sendable, Equatable {
         spatialMergeSize: Int? = nil,
         positionEmbeddingSize: Int? = nil,
         defaultOutputLength: Int? = nil,
+        ropeTheta: Float? = nil,
         standardize: Bool? = nil,
         minimumPixelCount: Int? = nil,
         maximumPixelCount: Int? = nil,
@@ -91,6 +93,7 @@ public struct ModelVisionConfiguration: Sendable, Equatable {
         self.spatialMergeSize = spatialMergeSize
         self.positionEmbeddingSize = positionEmbeddingSize
         self.defaultOutputLength = defaultOutputLength
+        self.ropeTheta = ropeTheta
         self.standardize = standardize
         self.minimumPixelCount = minimumPixelCount
         self.maximumPixelCount = maximumPixelCount

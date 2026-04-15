@@ -185,6 +185,7 @@ struct ModelBundleInspector {
         let candidates = [
             directory.appendingPathComponent("preprocessor_config.json"),
             directory.appendingPathComponent("processor_config.json"),
+            directory.appendingPathComponent("tokenizer_config.json"),
         ]
         for candidate in candidates {
             if let data = try loadOptionalData(from: candidate) {
