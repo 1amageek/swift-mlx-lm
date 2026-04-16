@@ -75,7 +75,13 @@ let package = Package(
         .testTarget(name: "SwiftLMTests", dependencies: [
             "SwiftLM",
             .product(name: "TestHeartbeat", package: "swift-testing-heartbeat"),
-        ], exclude: ["DSLLoweringTests.swift", "IRInvariantTests.swift", "PerformanceTests.swift", "ModelGraphTests.swift", "DimensionValidatorTests.swift"], resources: [
+        ], exclude: [
+            "Core/DSLLoweringTests.swift",
+            "Core/IRInvariantTests.swift",
+            "Core/PerformanceTests.swift",
+            "Core/ModelGraphTests.swift",
+            "Core/DimensionValidatorTests.swift",
+        ], resources: [
             .process("TestData")
         ], swiftSettings: metalProbeSwiftSettings),
     ]
