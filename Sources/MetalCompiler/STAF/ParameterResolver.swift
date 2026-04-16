@@ -5,14 +5,36 @@ import LMIR
 ///
 /// The resolver walks the graph, tracks layer indices from repeating blocks,
 /// and invokes the convention for each primitive operation. It owns no
-/// family-specific knowledge; that lives with the model declarations
-/// (`Sources/Models/<Family>/`).
+/// family-specific knowledge; that lives with the model declarations.
+///
+/// ## Module Layout
+///
+/// - `LMIR` defines the `WeightNamingConvention` protocol and
+///   `WeightNamingScope` enum (backend-independent IR concern).
+/// - `MetalCompiler` (this module) provides the IR-walking driver
+///   `ParameterResolver` but ships no built-in conventions. Family
+///   naming is not a compiler concern.
+/// - `ModelDeclarations` (`Sources/Models/<Family>/`) provides the
+///   concrete conformances — `LlamaFamilyNaming`, `Gemma4FamilyNaming`,
+///   `LFM2FamilyNaming`, etc. — alongside the corresponding
+///   `ModelComponent` declarations. Building a graph from any of these
+///   declarations already requires `ModelDeclarations`, so needing
+///   the matching convention from the same module is not an extra
+///   dependency.
 ///
 /// ```swift
+/// import MetalCompiler
+/// import ModelDeclarations        // source of Transformer + LlamaFamilyNaming
+///
 /// let graph = try ModelGraph(Transformer(config: config))
-/// let resolved = ParameterResolver().resolve(graph: graph, convention: .llamaFamily)
-/// // resolved.rootRegion now has parameterBindings on every primitive operation
+/// let resolved = ParameterResolver().resolve(
+///     graph: graph,
+///     convention: LlamaFamilyNaming()
+/// )
 /// ```
+///
+/// User-defined models provide their own `WeightNamingConvention`
+/// conformance; no change to `MetalCompiler` is required.
 public struct ParameterResolver: Sendable {
 
     public init() {}
