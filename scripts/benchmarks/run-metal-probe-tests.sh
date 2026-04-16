@@ -2,13 +2,12 @@
 set -euo pipefail
 
 destination="platform=macOS,arch=arm64"
-derived_data_path=""
-artifacts_root="${PWD}/.test-artifacts/qwen35-vision"
 build_timeout=120
 test_timeout=60
-include_real=0
-skip_build=0
+derived_data_path=""
+artifacts_root="${PWD}/.test-artifacts/metal-probes"
 custom_suites=()
+skip_build=0
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -16,21 +15,17 @@ while [ "$#" -gt 0 ]; do
       destination="$2"
       shift 2
       ;;
-    --derived-data-path)
-      derived_data_path="$2"
+    --timeout)
+      test_timeout="$2"
       shift 2
       ;;
     --build-timeout)
       build_timeout="$2"
       shift 2
       ;;
-    --test-timeout)
-      test_timeout="$2"
+    --derived-data-path)
+      derived_data_path="$2"
       shift 2
-      ;;
-    --include-real)
-      include_real=1
-      shift
       ;;
     --suite)
       custom_suites+=("$2")
@@ -42,15 +37,14 @@ while [ "$#" -gt 0 ]; do
       ;;
     --help|-h)
       cat <<'EOF'
-usage: scripts/run-qwen35-vision-tests.sh [options]
+usage: scripts/benchmarks/run-metal-probe-tests.sh [options]
 
 options:
   --destination <xcodebuild-destination>
-  --derived-data-path <path>
+  --timeout <seconds>
   --build-timeout <seconds>
-  --test-timeout <seconds>
+  --derived-data-path <path>
   --suite <Target/Suite>
-  --include-real
   --skip-build
 EOF
       exit 0
@@ -67,27 +61,16 @@ timestamp="$(date +%Y%m%d-%H%M%S)"
 run_dir="${artifacts_root}/${timestamp}"
 mkdir -p "$run_dir"
 
+if [ -z "$derived_data_path" ]; then
+  derived_data_path="${run_dir}/DerivedData"
+fi
+
 if [ "${#custom_suites[@]}" -gt 0 ]; then
   suites=("${custom_suites[@]}")
 else
   suites=(
-    "SwiftLMTests/LoadTests"
-    "SwiftLMTests/ReleaseSmokeTests"
-    "SwiftLMTests/QwenVisionCapabilityTests"
-    "SwiftLMTests/QwenVisionPromptProcessorTests"
-    "SwiftLMTests/QwenVisionExecutionLayoutTests"
-    "SwiftLMTests/QwenVisionEncoderTests"
-    "SwiftLMTests/QwenVisionExecutionTests"
-    "SwiftLMTests/QwenVisionIntegrationTests"
-  )
-fi
-
-if [ "$include_real" -eq 1 ]; then
-  suites+=(
-    "SwiftLMTests/QwenVisionRealBundleImageTests"
-    "SwiftLMTests/QwenVisionRealBundleVideoTests"
-    "SwiftLMTests/QwenVisionRealBundleMixedTests"
-    "SwiftLMTests/QwenVisionRealBundlePromptStateTests"
+    "MetalCompilerTests/OptimizerEntryContractTests"
+    "MetalCompilerTests/OptimizerAttentionProbeTests"
   )
 fi
 
@@ -99,6 +82,7 @@ common_args=(
   -parallel-testing-enabled NO
   -jobs 1
   -quiet
+  OTHER_SWIFT_FLAGS='$(inherited) -DENABLE_METAL_PROBES'
 )
 
 if [ -n "$derived_data_path" ]; then
@@ -107,28 +91,36 @@ if [ -n "$derived_data_path" ]; then
 fi
 
 if [ "$skip_build" -ne 1 ]; then
-  echo "[qwen35-vision] build-for-testing"
-  scripts/xcodebuild-test-timeout.sh "$build_timeout" -- \
+  echo "[metal-probes] build-for-testing"
+  scripts/xcodebuild/test-timeout.sh "$build_timeout" -- \
     xcodebuild build-for-testing "${common_args[@]}" \
     | tee "${run_dir}/build.log"
 fi
 
+xctestrun_path="$(find "${derived_data_path}/Build/Products" -maxdepth 1 -name '*.xctestrun' | head -n 1)"
+if [ -z "$xctestrun_path" ]; then
+  echo "No .xctestrun found under ${derived_data_path}/Build/Products" >&2
+  exit 66
+fi
+
 for suite in "${suites[@]}"; do
   suite_slug="${suite//\//-}"
-  echo "[qwen35-vision] ${suite}"
+  echo "[metal-probes] ${suite}"
   test_args=(
-    -scheme swift-lm-Package
+    -xctestrun "$xctestrun_path"
     -destination "$destination"
     CODE_SIGNING_ALLOWED=NO
     COMPILER_INDEX_STORE_ENABLE=NO
     -parallel-testing-enabled NO
+    -jobs 1
+    -quiet
   )
   if [ -n "$derived_data_path" ]; then
     test_args+=(-derivedDataPath "$derived_data_path")
   fi
-  scripts/xcodebuild-test-timeout.sh "$test_timeout" -- \
+  scripts/xcodebuild/test-timeout.sh "$test_timeout" -- \
     xcodebuild test-without-building "${test_args[@]}" -only-testing:"${suite}" \
     | tee "${run_dir}/${suite_slug}.log"
 done
 
-echo "[qwen35-vision] logs: ${run_dir}"
+echo "[metal-probes] logs: ${run_dir}"

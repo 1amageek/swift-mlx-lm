@@ -418,13 +418,13 @@ xcodebuild test -scheme swift-lm-Package -destination 'platform=macOS' -only-tes
 For Qwen3.5+ multimodal suites, prefer the low-memory runner:
 
 ```bash
-scripts/run-qwen35-vision-tests.sh
+scripts/benchmarks/run-qwen35-vision-tests.sh
 ```
 
 For generation pipeline benchmarks, prefer the split benchmark runner:
 
 ```bash
-scripts/run-generation-pipeline-benchmarks.sh
+scripts/benchmarks/run-generation-pipeline.sh
 ```
 
 When debugging real-model correctness, do not batch many heavy suites into one long `xcodebuild test` process. Build once, then run focused `test-without-building` invocations one suite at a time.
@@ -713,5 +713,5 @@ The compiler operates entirely through protocol interfaces: `PrimitiveMetalKerne
 
 - `Sources/SwiftLM/SwiftLM.docc` contains the DocC sources
 - [`AGENTS.md`](/Users/1amageek/Desktop/swift-lm/AGENTS.md) documents repository-specific testing and debugging procedure
-- [`DESIGN-Metal4.md`](/Users/1amageek/Desktop/swift-lm/DESIGN-Metal4.md) contains backend design notes; treat it as design guidance, not as a guarantee that every forward-looking idea is already shipped
-- [`DESIGN-Quantization.md`](/Users/1amageek/Desktop/swift-lm/DESIGN-Quantization.md) contains the forward-looking quantization architecture direction for schemes, layouts, kernel families, and policy boundaries
+- [`docs/design/metal4.md`](/Users/1amageek/Desktop/swift-lm/docs/design/metal4.md) contains backend design notes; treat it as design guidance, not as a guarantee that every forward-looking idea is already shipped
+- [`docs/design/quantization.md`](/Users/1amageek/Desktop/swift-lm/docs/design/quantization.md) contains the forward-looking quantization architecture direction for schemes, layouts, kernel families, and policy boundaries

@@ -2,7 +2,7 @@
 """Generate text-embedding reference vectors with mlx_embeddings.
 
 Usage:
-    python3 scripts/dump_text_embedding_reference.py \
+    python3 scripts/hf/dump_text_embedding_reference.py \
         --model-dir ~/.cache/huggingface/hub/.../snapshot \
         --dataset Tests/SwiftLMTests/TestData/text_embedding_smoke_dataset.json \
         --output /tmp/embedding_reference.json

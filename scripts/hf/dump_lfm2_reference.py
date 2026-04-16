@@ -7,7 +7,7 @@ The Swift ReferenceComparisonTests loads this file and compares
 against Metal inference output to identify divergence points.
 
 Usage:
-    python3 scripts/dump_lfm2_reference.py --output Tests/MetalCompilerTests/lfm2_reference.safetensors
+    python3 scripts/hf/dump_lfm2_reference.py --output Tests/MetalCompilerTests/lfm2_reference.safetensors
 """
 
 import argparse

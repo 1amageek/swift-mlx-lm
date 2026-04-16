@@ -9,7 +9,7 @@ import LMIR
 /// Compare Metal inference output against Python HuggingFace reference.
 ///
 /// Prerequisites:
-///   1. Generate reference: `python3 scripts/dump_lfm2_reference.py`
+///   1. Generate reference: `python3 scripts/hf/dump_lfm2_reference.py`
 ///   2. Have the STAF file in TestData/LFM2.5-1.2B-Thinking/model.staf
 @Suite("Reference Comparison", .serialized)
 struct ReferenceComparisonTests {
@@ -1044,7 +1044,7 @@ struct ReferenceComparisonTests {
 
         let refURL = URL(fileURLWithPath: Self.referencePath)
         guard FileManager.default.fileExists(atPath: refURL.path) else {
-            print("[RefComp] Reference not found — run: python3 scripts/dump_lfm2_reference.py")
+            print("[RefComp] Reference not found — run: python3 scripts/hf/dump_lfm2_reference.py")
             throw SetupError.noReference
         }
 

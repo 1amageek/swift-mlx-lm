@@ -11,8 +11,8 @@ This directory keeps non-API documentation that does not need to live at the rep
 - `releases/0.4.0.md` — release notes for embedding request values and public API guide alignment
 - `../Sources/SwiftLM/SwiftLM.docc/` — DocC catalog for API and guide documentation
 - `../AGENTS.md` — repository guidance for coding agents
-- `../DESIGN-Metal4.md` — forward-looking Metal 4 design notes
-- `../DESIGN-Quantization.md` — forward-looking quantization architecture notes
+- `design/metal4.md` — forward-looking Metal 4 design notes
+- `design/quantization.md` — forward-looking quantization architecture notes
 - `../Sources/MetalCompiler/STAF/README.md` — STAF format notes
 - `../Sources/MetalCompiler/STAF/KVCacheSpec.md` — KV cache layout specification
 

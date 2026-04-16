@@ -430,7 +430,7 @@ Common causes:
 
 - `../README.md` for project overview and architecture
 - `../Sources/MetalCompiler/STAF/README.md` for STAF cache details
-- `../DESIGN-Metal4.md` for forward-looking backend design notes
+- `design/metal4.md` for forward-looking backend design notes
 
 ## Validation Notes
 
@@ -452,10 +452,10 @@ The real-bundle suites are optional-local:
 [`QwenVisionRealBundlePromptStateTests.swift`](/Users/1amageek/Desktop/swift-lm/Tests/SwiftLMTests/QwenVisionRealBundlePromptStateTests.swift).
 Each skips cleanly when no local `Qwen3.5/VL` snapshot is available.
 
-When running the Qwen3.5+ multimodal matrix on a developer machine, prefer [`run-qwen35-vision-tests.sh`](/Users/1amageek/Desktop/swift-lm/scripts/run-qwen35-vision-tests.sh). It builds once and executes each suite with `test-without-building`, which reduces peak memory usage compared to one large `xcodebuild test` process.
+When running the Qwen3.5+ multimodal matrix on a developer machine, prefer [`scripts/benchmarks/run-qwen35-vision-tests.sh`](/Users/1amageek/Desktop/swift-lm/scripts/benchmarks/run-qwen35-vision-tests.sh). It builds once and executes each suite with `test-without-building`, which reduces peak memory usage compared to one large `xcodebuild test` process.
 
 Use `--suite` to narrow the run when you only need one area:
 
 ```bash
-scripts/run-qwen35-vision-tests.sh --suite SwiftLMTests/QwenVisionCapabilityTests
+scripts/benchmarks/run-qwen35-vision-tests.sh --suite SwiftLMTests/QwenVisionCapabilityTests
 ```

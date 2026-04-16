@@ -3,9 +3,10 @@ set -euo pipefail
 
 destination="platform=macOS,arch=arm64"
 derived_data_path=""
-artifacts_root="${PWD}/.test-artifacts/generation-pipeline-benchmarks"
+artifacts_root="${PWD}/.test-artifacts/qwen35-vision"
 build_timeout=120
-test_timeout=120
+test_timeout=60
+include_real=0
 skip_build=0
 custom_suites=()
 
@@ -27,6 +28,10 @@ while [ "$#" -gt 0 ]; do
       test_timeout="$2"
       shift 2
       ;;
+    --include-real)
+      include_real=1
+      shift
+      ;;
     --suite)
       custom_suites+=("$2")
       shift 2
@@ -37,7 +42,7 @@ while [ "$#" -gt 0 ]; do
       ;;
     --help|-h)
       cat <<'EOF'
-usage: scripts/run-generation-pipeline-benchmarks.sh [options]
+usage: scripts/benchmarks/run-qwen35-vision-tests.sh [options]
 
 options:
   --destination <xcodebuild-destination>
@@ -45,6 +50,7 @@ options:
   --build-timeout <seconds>
   --test-timeout <seconds>
   --suite <Target/Suite>
+  --include-real
   --skip-build
 EOF
       exit 0
@@ -65,10 +71,23 @@ if [ "${#custom_suites[@]}" -gt 0 ]; then
   suites=("${custom_suites[@]}")
 else
   suites=(
-    "SwiftLMTests/GenerationThroughputBenchmarkTests"
-    "SwiftLMTests/GenerationScalingBenchmarkTests"
-    "SwiftLMTests/GenerationScalingLongBenchmarkTests"
-    "SwiftLMTests/GenerationStreamingBenchmarkTests"
+    "SwiftLMTests/LoadTests"
+    "SwiftLMTests/ReleaseSmokeTests"
+    "SwiftLMTests/QwenVisionCapabilityTests"
+    "SwiftLMTests/QwenVisionPromptProcessorTests"
+    "SwiftLMTests/QwenVisionExecutionLayoutTests"
+    "SwiftLMTests/QwenVisionEncoderTests"
+    "SwiftLMTests/QwenVisionExecutionTests"
+    "SwiftLMTests/QwenVisionIntegrationTests"
+  )
+fi
+
+if [ "$include_real" -eq 1 ]; then
+  suites+=(
+    "SwiftLMTests/QwenVisionRealBundleImageTests"
+    "SwiftLMTests/QwenVisionRealBundleVideoTests"
+    "SwiftLMTests/QwenVisionRealBundleMixedTests"
+    "SwiftLMTests/QwenVisionRealBundlePromptStateTests"
   )
 fi
 
@@ -88,15 +107,15 @@ if [ -n "$derived_data_path" ]; then
 fi
 
 if [ "$skip_build" -ne 1 ]; then
-  echo "[generation-benchmarks] build-for-testing"
-  scripts/xcodebuild-test-timeout.sh "$build_timeout" -- \
+  echo "[qwen35-vision] build-for-testing"
+  scripts/xcodebuild/test-timeout.sh "$build_timeout" -- \
     xcodebuild build-for-testing "${common_args[@]}" \
     | tee "${run_dir}/build.log"
 fi
 
 for suite in "${suites[@]}"; do
   suite_slug="${suite//\//-}"
-  echo "[generation-benchmarks] ${suite}"
+  echo "[qwen35-vision] ${suite}"
   test_args=(
     -scheme swift-lm-Package
     -destination "$destination"
@@ -107,9 +126,9 @@ for suite in "${suites[@]}"; do
   if [ -n "$derived_data_path" ]; then
     test_args+=(-derivedDataPath "$derived_data_path")
   fi
-  scripts/xcodebuild-test-timeout.sh "$test_timeout" -- \
+  scripts/xcodebuild/test-timeout.sh "$test_timeout" -- \
     xcodebuild test-without-building "${test_args[@]}" -only-testing:"${suite}" \
     | tee "${run_dir}/${suite_slug}.log"
 done
 
-echo "[generation-benchmarks] logs: ${run_dir}"
+echo "[qwen35-vision] logs: ${run_dir}"

@@ -51,7 +51,7 @@ while [ "$run_index" -le "$repeats" ]; do
   log_file="${run_dir}/run-${run_index}.log"
   diag_file="${run_dir}/run-${run_index}.diag.txt"
   echo "[hang-guard] run ${run_index}/${repeats}" | tee "$log_file"
-  if ! scripts/xcodebuild-test-timeout.sh "$timeout_seconds" -- "$@" >>"$log_file" 2>&1; then
+  if ! scripts/xcodebuild/test-timeout.sh "$timeout_seconds" -- "$@" >>"$log_file" 2>&1; then
     {
       echo "command: $*"
       echo
