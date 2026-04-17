@@ -474,6 +474,18 @@ private struct PrefillStepPlanner {
                 selectedKernelName: selectedKernelName,
                 usesMPPForStep: usesMPPForStep
             )
+            let mppTileVariants: [PrefillTileVariant]
+            if mode == .batch && usesMPPForStep && !useDirectQuantizedGEMM {
+                mppTileVariants = makeMPPTileVariants(
+                    baseKernelName: selectedKernelName,
+                    gridWidth: gridSize.width,
+                    maxSequenceLength: maximumSequenceLength,
+                    threadgroupSize: threadgroupSize,
+                    threadgroupMemoryLength: 0,
+                    sync: .bufferBarrier)
+            } else {
+                mppTileVariants = []
+            }
             return dequantSteps + [MetalPrefillStep(
                 pipeline: selectedPipeline,
                 gridSize: gridSize,
@@ -506,7 +518,8 @@ private struct PrefillStepPlanner {
                     entryIndex: entry.index,
                     weightTensorName: weightTensorName,
                     bufferAccessPattern: gemmPattern
-                )
+                ),
+                tileVariants: mppTileVariants
             )]
         } else {
             let frag = entry.fragment
@@ -650,6 +663,24 @@ private struct PrefillStepPlanner {
         let firstDescriptor = resolveProjectionWeightDescriptor(
             role: batched.projections[0].field, entry: entry
         )
+
+        // BF16 / FP16 / FP32 dense weights → batched MPP GEMM (matmul2d-based).
+        // This path runs a single MPP kernel that processes all N projections
+        // sharing the same input A, removing the barriers and dispatch-encode
+        // cost that the per-projection fallback would incur.
+        if let mppStep = try buildBatchedMPPGEMMStep(
+            batched: batched,
+            entry: entry,
+            weightResolver: weightResolver,
+            firstDescriptor: firstDescriptor,
+            inputBuffer: inputBuffer,
+            inputOffset: inputOffset,
+            inputRowStride: inputRowStride,
+            scratchSlotSize: scratchSlotSize
+        ) {
+            return annotate([mppStep], entryIndex: entry.index, layerIndex: entry.layerIndex)
+        }
+
         if let batchedGEMM = resolveBatchedQuantizedGEMM(
                for: firstDescriptor.schemeIdentifier, count: batched.projections.count
            ),
@@ -874,6 +905,18 @@ private struct PrefillStepPlanner {
                 selectedKernelName: selectedKernelName,
                 usesMPPForStep: usesMPPForStep
             )
+            let batchedMPPTileVariants: [PrefillTileVariant]
+            if usesMPPForStep && !useDirectQuantizedGEMM {
+                batchedMPPTileVariants = makeMPPTileVariants(
+                    baseKernelName: selectedKernelName,
+                    gridWidth: gridSize.width,
+                    maxSequenceLength: maximumSequenceLength,
+                    threadgroupSize: threadgroupSize,
+                    threadgroupMemoryLength: 0,
+                    sync: .bufferBarrier)
+            } else {
+                batchedMPPTileVariants = []
+            }
             steps.append(
                 MetalPrefillStep(
                     pipeline: selectedPipeline,
@@ -905,7 +948,8 @@ private struct PrefillStepPlanner {
                         entryIndex: entry.index,
                         weightTensorName: weightTensorName,
                         bufferAccessPattern: gemmPattern
-                    )
+                    ),
+                    tileVariants: batchedMPPTileVariants
                 )
             )
         }
@@ -1191,6 +1235,201 @@ private struct PrefillStepPlanner {
                 fallbackReason: descriptor.fallbackReason ?? fallbackReason
             )
         )
+    }
+
+    /// Build tile-size variants for an MPP GEMM prefill step.
+    ///
+    /// Returns one `PrefillTileVariant` per emitted tile size (16/32/64) that
+    /// is present in the pipeline cache. Returns an empty array when the
+    /// variant kernels are not available (e.g. MPP library compile failed, or
+    /// the kernel name is a direct-quantized GEMM that does not emit variants),
+    /// in which case the caller uses the base descriptor unconditionally.
+    ///
+    /// Each variant's gridSize uses `(maxSeqLen + tileSize - 1) / tileSize`
+    /// for the tile dimension; the runtime further narrows the grid height
+    /// via `resolvedGridSize` using the actual sequence length.
+    private func makeMPPTileVariants(
+        baseKernelName: String,
+        gridWidth: Int,
+        maxSequenceLength: Int,
+        threadgroupSize: MTLSize,
+        threadgroupMemoryLength: Int,
+        sync: SynchronizationKind
+    ) -> [PrefillTileVariant] {
+        var variants: [PrefillTileVariant] = []
+        variants.reserveCapacity(MetalSourceGenerator.mppGEMMTileSizes.count)
+        for tileSize in MetalSourceGenerator.mppGEMMTileSizes {
+            let variantName = MetalSourceGenerator.mppGEMMVariantName(
+                baseName: baseKernelName, tileSize: tileSize)
+            guard let variantPipeline = planBuildContext.pipelineCache[variantName] else {
+                continue
+            }
+            let paddedHeight = ((maxSequenceLength + tileSize - 1) / tileSize)
+            let variantDescriptor = MetalDispatchDescriptor(
+                pipeline: variantPipeline,
+                gridSize: MTLSize(width: gridWidth, height: paddedHeight, depth: 1),
+                threadgroupSize: threadgroupSize,
+                threadgroupMemoryLength: threadgroupMemoryLength,
+                barrierPolicy: MetalBarrierPolicy(sync))
+            variants.append(PrefillTileVariant(
+                tileHeight: tileSize,
+                descriptor: variantDescriptor))
+        }
+        return variants
+    }
+
+    /// Build a single batched MPP GEMM step for BF16/FP16/FP32 dense weights.
+    ///
+    /// Returns nil when the pipeline is not available or the weight format is
+    /// not dense (quantized weights go through `buildBatchedProjectionPrefillSteps`'s
+    /// Q4 path or the per-projection fallback).
+    private mutating func buildBatchedMPPGEMMStep(
+        batched: BatchedProjection,
+        entry: DispatchEntry,
+        weightResolver: WeightResolver,
+        firstDescriptor: ProjectionWeightDescriptor,
+        inputBuffer: MTLBuffer,
+        inputOffset: Int,
+        inputRowStride: Int,
+        scratchSlotSize: Int
+    ) throws -> MetalPrefillStep? {
+        let count = batched.projections.count
+        guard count >= 2 else { return nil }
+
+        // Only handle dense weight schemes here.
+        let scheme = firstDescriptor.schemeIdentifier
+        let kernelName: String
+        switch scheme {
+        case .bf16RowMajor:
+            kernelName = "batched_gemm_bf16_f32s_\(count)"
+        case .fp16RowMajor:
+            kernelName = "batched_gemm_f16_f32s_\(count)"
+        case .fp32RowMajor:
+            kernelName = "batched_gemm_f32_f32s_\(count)"
+        default:
+            return nil
+        }
+
+        // Every projection's output dimension must be a multiple of N_TILE=32.
+        // If any projection violates this, fall through to the per-projection
+        // path so the edge handling stays correct.
+        let nTile = 32
+        for projection in batched.projections {
+            if projection.outputDimension % nTile != 0 { return nil }
+        }
+
+        // All projections must share the same input dimension (shared A).
+        let sharedInputDim = batched.projections[0].inputDimension
+        for projection in batched.projections where projection.inputDimension != sharedInputDim {
+            return nil
+        }
+
+        // Input row stride must match input dimension for MPP tensor_inline.
+        guard inputRowStride == sharedInputDim else { return nil }
+
+        guard let pipeline = planBuildContext.pipelineCache[kernelName] else {
+            return nil
+        }
+
+        // Build buffer bindings: input(0), weight0..N-1(1..N), output0..N-1(N+1..2N)
+        var bufferBindings: [(Int, MTLBuffer, Int)] = [(0, inputBuffer, inputOffset)]
+        var lastOutputOffset = routingState.currentInputOffset
+        var totalNTiles = 0
+
+        for (i, projection) in batched.projections.enumerated() {
+            let (weightBuffer, weightOffset) = weightResolver.resolve(role: projection.field)
+            bufferBindings.append((1 + i, weightBuffer, weightOffset))
+
+            let outputOffset = (routingState.projectionIndex + 1) * scratchSlotSize
+            lastOutputOffset = outputOffset
+            routingState.projectionIndex += 1
+            bufferBindings.append((1 + count + i, buffers.scratch, outputOffset))
+
+            totalNTiles += projection.outputDimension / nTile
+        }
+
+        // Bytes layout: inputDim(2N+1), outDim0..N-1(2N+2..3N+1), seqLen(3N+2), rowStride(3N+3)
+        let dimBase = 1 + 2 * count
+        var bytesBindings: [(index: Int, value: [UInt8])] = [
+            uint32Binding(dimBase, UInt32(sharedInputDim)),
+        ]
+        for (i, projection) in batched.projections.enumerated() {
+            bytesBindings.append(uint32Binding(dimBase + 1 + i, UInt32(projection.outputDimension)))
+        }
+        let seqLenIndex = dimBase + 1 + count
+        bytesBindings.append(uint32Binding(seqLenIndex, UInt32(maximumSequenceLength)))
+        bytesBindings.append(uint32Binding(seqLenIndex + 1, UInt32(inputRowStride)))
+
+        // Grid:
+        //   width  = total N-tiles across all projections (linear mapping)
+        //   height = paddedSeqLen / M_TILE (set to maximumSequenceLength here;
+        //            runtime will tile down via bindAndAdjustGridHeightTiled)
+        //   depth  = 1
+        let mTile = 64
+        let paddedMaxSeqLen = ((maximumSequenceLength + mTile - 1) / mTile) * mTile
+        let gridSize = MTLSize(
+            width: totalNTiles,
+            height: paddedMaxSeqLen / mTile,
+            depth: 1
+        )
+
+        // Threadgroup: SIMD_WIDTH * 4 (execution_simdgroups<4>)
+        let simdWidth = max(pipeline.threadExecutionWidth, 1)
+        let threads = min(simdWidth * 4, pipeline.maxTotalThreadsPerThreadgroup)
+        let threadgroupSize = MTLSize(width: threads, height: 1, depth: 1)
+
+        // Buffer access pattern: reads input + all weights, writes all outputs.
+        let readIndices = Set(0...count)
+        let writeIndices = Set((count + 1)...(2 * count))
+
+        let batchedTileVariants = makeMPPTileVariants(
+            baseKernelName: kernelName,
+            gridWidth: totalNTiles,
+            maxSequenceLength: maximumSequenceLength,
+            threadgroupSize: threadgroupSize,
+            threadgroupMemoryLength: 0,
+            sync: .bufferBarrier)
+
+        let step = MetalPrefillStep(
+            pipeline: pipeline,
+            gridSize: gridSize,
+            threadgroupSize: threadgroupSize,
+            bufferBindings: bufferBindings,
+            bytesBindings: bytesBindings,
+            threadgroupMemoryLength: 0,
+            sync: .bufferBarrier,
+            mode: .batch,
+            sequenceLengthPolicy: .bindAndAdjustGridHeightTiled(index: seqLenIndex, tileHeight: mTile),
+            positionBufferIndex: nil,
+            perPositionStrides: [:],
+            metadata: .init(
+                kernelName: kernelName,
+                entryIndex: entry.index,
+                weightTensorName: nil,
+                bufferAccessPattern: .init(reads: readIndices, writes: writeIndices)
+            ),
+            tileVariants: batchedTileVariants
+        )
+
+        routingState.lastOutputIsHidden = false
+        routingState.currentInputOffset = lastOutputOffset
+
+        // Record quantization classification for each projection so the
+        // observability plan reflects the MPP batched kernel choice.
+        for projection in batched.projections {
+            let descriptor = resolveProjectionWeightDescriptor(role: projection.field, entry: entry)
+            recordProjectionQuantization(
+                entry: entry,
+                descriptor: descriptor,
+                mode: .batch,
+                inputRowStride: inputRowStride,
+                inputDimension: projection.inputDimension,
+                selectedKernelName: kernelName,
+                usesMPPForStep: true
+            )
+        }
+
+        return step
     }
 
     private func resolveProjectionWeightDescriptor(

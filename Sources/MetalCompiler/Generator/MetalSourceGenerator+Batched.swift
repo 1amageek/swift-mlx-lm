@@ -634,4 +634,148 @@ public static func generateBatchedQKNormSequence(
     """
 }
 
+/// Fused per-head QK RMS norm + RoPE for prefill (sequence mode).
+///
+/// Merges two sequential dispatches — `batched_qk_rms_norm_seq_f32` + `rope_seq_f32` —
+/// into a single dispatch, saving one barrier per layer. RoPE reads the values
+/// written by the norm phase in the same thread (safe when pairCount % SIMD_WIDTH == 0,
+/// with a device-memory barrier as a guard when the assumption is violated).
+///
+/// Grid: (qHeadCount + kHeadCount, sequenceLength, 1)
+/// Threadgroup: (SIMD_WIDTH, 1, 1) — one SIMD group per head.
+public static func generateBatchedQKNormRoPESequence(
+    name: String,
+    bufferPrecision: BufferPrecision,
+    weightFormat: WeightFormat
+) -> String {
+    let bt = bufferPrecision.metalType
+    let wt = weightFormat.bufferType
+    let readWeight = { (expr: String) in weightFormat.readExpression(expr) }
+
+    return """
+    inline uint2 \(name)_mrope_mapping(
+        uint halfDimIndex,
+        uint temporalSections,
+        uint heightSections,
+        uint widthSections,
+        bool interleaved
+    ) {
+        if (temporalSections == 0 && heightSections == 0 && widthSections == 0) {
+            return uint2(0, halfDimIndex);
+        }
+        if (!interleaved) {
+            if (halfDimIndex < temporalSections) return uint2(0, halfDimIndex);
+            if (halfDimIndex < temporalSections + heightSections) {
+                return uint2(1, halfDimIndex - temporalSections);
+            }
+            return uint2(2, halfDimIndex - temporalSections - heightSections);
+        }
+        if ((halfDimIndex % 3) == 1 && halfDimIndex < heightSections * 3) {
+            return uint2(1, halfDimIndex);
+        }
+        if ((halfDimIndex % 3) == 2 && halfDimIndex < widthSections * 3) {
+            return uint2(2, halfDimIndex);
+        }
+        return uint2(0, halfDimIndex);
+    }
+
+    kernel void \(name)(
+        device \(bt)* qData                    [[buffer(0)]],
+        device \(bt)* kData                    [[buffer(1)]],
+        device const \(wt)* qWeight            [[buffer(2)]],
+        device const \(wt)* kWeight            [[buffer(3)]],
+        device const uint* positionAxesBuffer  [[buffer(4)]],
+        constant uint& qHeadCount              [[buffer(5)]],
+        constant uint& kHeadCount              [[buffer(6)]],
+        constant uint& headDimension           [[buffer(7)]],
+        constant uint& ropeDimension           [[buffer(8)]],
+        constant float& epsilon                [[buffer(9)]],
+        constant float& weightBias             [[buffer(10)]],
+        constant float& ropeBase               [[buffer(11)]],
+        constant uint& temporalSections        [[buffer(12)]],
+        constant uint& heightSections          [[buffer(13)]],
+        constant uint& widthSections           [[buffer(14)]],
+        constant uint& mropeInterleaved        [[buffer(15)]],
+        constant uint& sequenceLength          [[buffer(16)]],
+        constant uint& qTotalDimension         [[buffer(17)]],
+        constant uint& kTotalDimension         [[buffer(18)]],
+        constant uint& proportionalRoPE        [[buffer(19)]],
+        uint2 gid                              [[threadgroup_position_in_grid]],
+        uint tid                               [[thread_index_in_threadgroup]]
+    ) {
+        uint head = gid.x;
+        uint seqPos = gid.y;
+        if (seqPos >= sequenceLength) return;
+
+        device \(bt)* data;
+        device const \(wt)* weight;
+        uint localHead;
+        uint totalDim;
+
+        if (head < qHeadCount) {
+            data = qData; weight = qWeight; localHead = head; totalDim = qTotalDimension;
+        } else {
+            localHead = head - qHeadCount;
+            if (localHead >= kHeadCount) return;
+            data = kData; weight = kWeight; totalDim = kTotalDimension;
+        }
+
+        uint offset = seqPos * totalDim + localHead * headDimension;
+
+        // Phase 1: per-head RMS norm (in-place).
+        float sumSq = 0.0f;
+        for (uint i = tid; i < headDimension; i += SIMD_WIDTH) {
+            float v = float(data[offset + i]);
+            sumSq += v * v;
+        }
+        sumSq = simd_sum(sumSq);
+
+        threadgroup float sharedRMS[1];
+        if (tid == 0) {
+            sharedRMS[0] = rsqrt(sumSq / float(headDimension) + epsilon);
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        float rms = sharedRMS[0];
+        for (uint i = tid; i < headDimension; i += SIMD_WIDTH) {
+            float affine = \(readWeight("weight[i]")) + weightBias;
+            data[offset + i] = \(bt)(float(data[offset + i]) * rms * affine);
+        }
+
+        // Ensure norm writes are visible before RoPE reads. Same-thread order is
+        // already guaranteed when pairCount % SIMD_WIDTH == 0 (typical case), but
+        // we keep the barrier to cover kernels where this assumption does not hold.
+        simdgroup_barrier(mem_flags::mem_device);
+
+        // Phase 2: RoPE rotation (in-place).
+        const bool useProportional = proportionalRoPE != 0;
+        const uint pairCount = useProportional ? (headDimension / 2) : (ropeDimension / 2);
+        const uint rotatedPairs = ropeDimension / 2;
+        for (uint i = tid; i < pairCount; i += SIMD_WIDTH) {
+            const uint2 ropeMapping = \(name)_mrope_mapping(
+                i,
+                temporalSections,
+                heightSections,
+                widthSections,
+                mropeInterleaved != 0
+            );
+            const uint axis = ropeMapping.x;
+            uint position = positionAxesBuffer[seqPos * 3 + axis];
+            float cosTheta = 1.0f;
+            float sinTheta = 0.0f;
+            if (!useProportional || i < rotatedPairs) {
+                const float thetaDenominator = useProportional ? float(headDimension) : float(ropeDimension);
+                const float theta = float(position) / pow(ropeBase, float(2 * ropeMapping.y) / thetaDenominator);
+                cosTheta = cos(theta);
+                sinTheta = sin(theta);
+            }
+            float x0 = float(data[offset + i]);
+            float x1 = float(data[offset + i + pairCount]);
+            data[offset + i] = \(bt)(x0 * cosTheta - x1 * sinTheta);
+            data[offset + i + pairCount] = \(bt)(x1 * cosTheta + x0 * sinTheta);
+        }
+    }
+    """
+}
+
 }

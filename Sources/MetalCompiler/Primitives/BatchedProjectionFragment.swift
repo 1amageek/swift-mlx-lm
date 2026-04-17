@@ -16,12 +16,22 @@ extension BatchedProjection: PrimitiveMetalKernelFragment {
         let count = projections.count
         let isPrefill = context.bufferPrecision == .float32
 
-        // Prefill with quantized weights: batched Q4 GEMM kernel
+        // Prefill paths:
+        //   Q4 packed weights → block-level batched GEMM kernel.
+        //   Dense weights (BF16/FP16/FP32) → MPP matmul2d-based batched kernel.
         if isPrefill {
             switch context.weightFormat {
             case .quantized4Bit(let groupSize):
                 return "batched_gemm_q4_g\(groupSize)_\(count)"
-            default:
+            case .bfloat16:
+                return "batched_gemm_bf16_f32s_\(count)"
+            case .float16:
+                return "batched_gemm_f16_f32s_\(count)"
+            case .float32:
+                return "batched_gemm_f32_f32s_\(count)"
+            case .quantized8Bit:
+                // No batched Q8 prefill kernel yet — fragment is decomposed into
+                // per-projection dispatches upstream.
                 break
             }
         }

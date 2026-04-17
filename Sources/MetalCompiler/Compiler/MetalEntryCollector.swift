@@ -67,7 +67,8 @@ struct MetalEntryCollector {
                     windowLeft: attn.windowLeft,
                     windowRight: attn.windowRight,
                     sharedKVSourceLayerIndex: attn.sharedKVSourceLayerIndex,
-                    directScratchMode: true
+                    directScratchMode: true,
+                    suppressPrefillRoPE: attn.suppressPrefillRoPE
                 )
                 result[i] = DispatchEntry(
                     index: result[i].index,

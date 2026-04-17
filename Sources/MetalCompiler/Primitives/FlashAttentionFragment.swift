@@ -28,6 +28,12 @@ public struct FlashAttentionFragment: PrimitiveMetalKernelFragment {
     /// Set by the optimizer when the model graph has no OutputHead.
     public let directScratchMode: Bool
 
+    /// When true, the prefill RoPE dispatch is skipped — RoPE has already been
+    /// applied to Q/K scratch upstream (e.g. by BatchedQKNormRoPEFragment).
+    /// The decode path is unaffected: inline RoPE in `rope_flash_attn_decode`
+    /// always runs when `hasInlineRoPE` is true.
+    public let suppressPrefillRoPE: Bool
+
     public init(headCount: Int, kvHeadCount: Int, headDimension: Int,
                 attentionScale: Float? = nil,
                 ropeDimension: Int = 0, ropeBase: Float = 0,
@@ -38,7 +44,8 @@ public struct FlashAttentionFragment: PrimitiveMetalKernelFragment {
                 windowLeft: Int? = nil,
                 windowRight: Int? = nil,
                 sharedKVSourceLayerIndex: Int? = nil,
-                directScratchMode: Bool = false) {
+                directScratchMode: Bool = false,
+                suppressPrefillRoPE: Bool = false) {
         self.headCount = headCount
         self.kvHeadCount = kvHeadCount
         self.headDimension = headDimension
@@ -53,6 +60,7 @@ public struct FlashAttentionFragment: PrimitiveMetalKernelFragment {
         self.windowRight = windowRight
         self.sharedKVSourceLayerIndex = sharedKVSourceLayerIndex
         self.directScratchMode = directScratchMode
+        self.suppressPrefillRoPE = suppressPrefillRoPE
     }
 
     /// Whether this fragment includes inline RoPE computation.
@@ -214,7 +222,8 @@ public struct FlashAttentionFragment: PrimitiveMetalKernelFragment {
 
         // Step 0 (inline RoPE only): Apply RoPE to Q and K in scratch buffers.
         // This replaces the separate RoPEFragment prefill step.
-        if hasInlineRoPE {
+        // Skipped when RoPE was already fused upstream (BatchedQKNormRoPEFragment).
+        if hasInlineRoPE && !suppressPrefillRoPE {
             steps.append(try makeRoPEStep(context: context, scratchSlotSize: scratchSlotSize))
         }
 
@@ -327,7 +336,8 @@ public struct FlashAttentionFragment: PrimitiveMetalKernelFragment {
         var steps: [MetalPrefillStep] = []
 
         // Step 0 (inline RoPE): same as cache path — applies to Q and K in scratch.
-        if hasInlineRoPE {
+        // Skipped when RoPE was already fused upstream (BatchedQKNormRoPEFragment).
+        if hasInlineRoPE && !suppressPrefillRoPE {
             steps.append(try makeRoPEStep(context: context, scratchSlotSize: scratchSlotSize))
         }
 
@@ -340,11 +350,13 @@ public struct FlashAttentionFragment: PrimitiveMetalKernelFragment {
         let minimumThreads = max(headDimension, simdWidth)
         let roundedThreads = ((minimumThreads + simdWidth - 1) / simdWidth) * simdWidth
         let threads = min(roundedThreads, attnPipeline.maxTotalThreadsPerThreadgroup)
-        let attnGridSize = headCount * context.maximumSequenceLength
 
+        // 2D grid: width = headCount, height = maximumSequenceLength (adjusted to actual
+        // sequenceLength at dispatch via .bindAndAdjustGridHeight). This avoids dispatching
+        // ~(maxSeqLen/actualSeqLen) empty threadgroups that only read bindings and return.
         steps.append(MetalPrefillStep(
             pipeline: attnPipeline,
-            gridSize: MTLSize(width: attnGridSize, height: 1, depth: 1),
+            gridSize: MTLSize(width: headCount, height: context.maximumSequenceLength, depth: 1),
             threadgroupSize: MTLSize(width: threads, height: 1, depth: 1),
             bufferBindings: [
                 (0, context.buffers.scratch, querySlotIndex * scratchSlotSize),
@@ -367,7 +379,7 @@ public struct FlashAttentionFragment: PrimitiveMetalKernelFragment {
             threadgroupMemoryLength: 0,
             sync: .bufferBarrier,
             mode: .batch,
-            sequenceLengthPolicy: .bind(index: 8),
+            sequenceLengthPolicy: .bindAndAdjustGridHeight(index: 8),
             positionBufferIndex: nil,
             perPositionStrides: [:]
         ))

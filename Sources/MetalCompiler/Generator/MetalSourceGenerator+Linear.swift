@@ -1,10 +1,25 @@
 extension MetalSourceGenerator {
 // MARK: - Linear Kernels
 
+    /// Supported MPP GEMM M-tile sizes. Callers emit one kernel per size and
+    /// select the appropriate pipeline at dispatch time based on runtime
+    /// sequence length, trading off padding waste (small seq → small tile) and
+    /// per-threadgroup work (long seq → large tile).
+    public static let mppGEMMTileSizes: [Int] = [16, 32, 64]
+
+    /// Default M-tile used when only a single variant is needed (long-seq baseline).
+    public static let mppGEMMDefaultTileSize: Int = 64
+
+    /// Suffix for a tile-specific kernel variant name.
+    public static func mppGEMMVariantName(baseName: String, tileSize: Int) -> String {
+        "\(baseName)_mtile\(tileSize)"
+    }
+
     public static func generateMPPGEMM(
         name: String,
         bufferPrecision: BufferPrecision,
-        weightFormat: WeightFormat
+        weightFormat: WeightFormat,
+        mTile: Int = mppGEMMDefaultTileSize
     ) -> String {
         let bt = bufferPrecision.metalType
         let tensorWeightType: String = switch weightFormat {
@@ -41,7 +56,7 @@ extension MetalSourceGenerator {
             // threadgroups never slice beyond the tensor declaration.
             // The backing buffers are allocated for maximumSequenceLength,
             // which is always >= paddedSeqLen.
-            constexpr uint M_TILE = 64;
+            constexpr uint M_TILE = \(mTile);
             const uint paddedSeqLen = ((sequenceLength + M_TILE - 1) / M_TILE) * M_TILE;
 
             auto A = tensor<device \(bt), dextents<int32_t, 2>, tensor_inline>(
@@ -61,6 +76,134 @@ extension MetalSourceGenerator {
             auto mB = B.slice(0, tgid.x * 32);
             auto mC = C.slice(tgid.x * 32, tgid.y * M_TILE);
             op.run(mA, mB, mC);
+        }
+        """
+    }
+
+    /// Generate MSL source for a batched MPP GEMM kernel with BF16 or native dense weights.
+    ///
+    /// All `count` projections share the same input `A`. Each projection has its
+    /// own weight matrix and output buffer. tgid.x linearly indexes N-tiles across
+    /// all projections; each threadgroup maps to one projection based on
+    /// cumulative N-tile counts. tgid.y indexes the M-tile (sequence position).
+    ///
+    /// Emitting one kernel for multiple projections removes barriers between
+    /// them and reduces dispatch encoding cost on the CPU side, which is the
+    /// dominant cost for short-sequence prefill on Apple Silicon.
+    ///
+    /// Assumptions:
+    /// - Every `outputDim_i` is a multiple of 32 (N_TILE).
+    /// - Count is 2 or 3 (used for gate/up and Q/K/V respectively).
+    public static func generateBatchedMPPGEMM(
+        name: String,
+        count: Int,
+        bufferPrecision: BufferPrecision,
+        weightFormat: WeightFormat,
+        mTile: Int = mppGEMMDefaultTileSize
+    ) -> String {
+        precondition(count >= 2, "batched MPP GEMM requires count >= 2")
+        let bt = bufferPrecision.metalType
+        let tensorWeightType: String = switch weightFormat {
+        case .bfloat16:
+            "bfloat"
+        case .float16:
+            "half"
+        case .float32:
+            "float"
+        case .quantized4Bit, .quantized8Bit:
+            bt
+        }
+
+        // Buffer binding layout:
+        //   0           : input
+        //   1..count    : weight_i
+        //   count+1..2*count : output_i
+        //   2*count+1   : inputDimension
+        //   2*count+2..3*count+1 : outputDim_i
+        //   3*count+2   : sequenceLength
+        //   3*count+3   : inputRowStride
+        let weightBindings = (0..<count).map { i in
+            "device \(tensorWeightType)* weight\(i)      [[buffer(\(1 + i))]],"
+        }.joined(separator: "\n    ")
+        let outputBindings = (0..<count).map { i in
+            "device \(bt)* output\(i)         [[buffer(\(1 + count + i))]],"
+        }.joined(separator: "\n    ")
+        let outputDimBindings = (0..<count).map { i in
+            "constant uint& outputDim\(i)     [[buffer(\(2 + 2 * count + i))]],"
+        }.joined(separator: "\n    ")
+
+        // Per-projection run blocks. Each block constructs local B/C tensor
+        // slices from the projection-local N-tile index and runs matmul2d.
+        var runBlocks: [String] = []
+        for i in 0..<count {
+            let priorTilesExpr: String
+            if i == 0 {
+                priorTilesExpr = "0u"
+            } else {
+                priorTilesExpr = (0..<i).map { "(outputDim\($0) / 32)" }.joined(separator: " + ")
+            }
+            // nTileLimit excludes the early-return case — we only enter this
+            // branch when nTile is in this projection's range.
+            let conditionExpr: String
+            if i == 0 {
+                conditionExpr = "if (nTile < outputDim0 / 32)"
+            } else if i == count - 1 {
+                conditionExpr = "else"
+            } else {
+                let cumulative = (0...i).map { "(outputDim\($0) / 32)" }.joined(separator: " + ")
+                conditionExpr = "else if (nTile < \(cumulative))"
+            }
+            runBlocks.append("""
+                \(conditionExpr) {
+                    const uint localNTile = nTile - (\(priorTilesExpr));
+                    auto B = tensor<device \(tensorWeightType), dextents<int32_t, 2>, tensor_inline>(
+                        weight\(i), dextents<int32_t, 2>(inputDimension, outputDim\(i)));
+                    auto C = tensor<device \(bt), dextents<int32_t, 2>, tensor_inline>(
+                        output\(i), dextents<int32_t, 2>(outputDim\(i), paddedSeqLen));
+                    auto mB = B.slice(0, localNTile * 32);
+                    auto mC = C.slice(localNTile * 32, tgid.y * M_TILE);
+                    op.run(mA, mB, mC);
+                }
+                """)
+        }
+        let runBody = runBlocks.joined(separator: "\n            ")
+
+        return """
+        #include <metal_stdlib>
+        #include <metal_tensor>
+        #include <MetalPerformancePrimitives/MetalPerformancePrimitives.h>
+        using namespace metal;
+
+        kernel void \(name)(
+            device \(bt)* input              [[buffer(0)]],
+            \(weightBindings)
+            \(outputBindings)
+            constant uint& inputDimension    [[buffer(\(1 + 2 * count))]],
+            \(outputDimBindings)
+            constant uint& sequenceLength    [[buffer(\(2 + 3 * count))]],
+            constant uint& inputRowStride    [[buffer(\(3 + 3 * count))]],
+            uint2 tgid [[threadgroup_position_in_grid]]
+        ) {
+            using namespace mpp::tensor_ops;
+            (void)inputRowStride;
+
+            constexpr uint M_TILE = \(mTile);
+            constexpr uint N_TILE = 32;
+            const uint paddedSeqLen = ((sequenceLength + M_TILE - 1) / M_TILE) * M_TILE;
+
+            auto A = tensor<device \(bt), dextents<int32_t, 2>, tensor_inline>(
+                input, dextents<int32_t, 2>(inputDimension, paddedSeqLen));
+
+            constexpr auto desc = matmul2d_descriptor(
+                M_TILE, N_TILE, dynamic_length_v<int>,
+                false, true, false,
+                matmul2d_descriptor::mode::multiply);
+            matmul2d<desc, execution_simdgroups<4>> op;
+
+            auto mA = A.slice(0, tgid.y * M_TILE);
+
+            const uint nTile = tgid.x;
+            \(runBody)
         }
         """
     }

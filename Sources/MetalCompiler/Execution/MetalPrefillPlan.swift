@@ -46,6 +46,23 @@ public enum PrefillSequenceLengthPolicy: Sendable {
     }
 }
 
+/// Tile-size variant for MPP GEMM prefill steps.
+///
+/// A single prefill step can compile multiple pipelines differing only in
+/// the matmul2d M-tile constant. At dispatch time the runtime picks the
+/// smallest M-tile whose padded grid still utilises the hardware well, which
+/// reduces padding waste for short sequences without regressing long-sequence
+/// throughput.
+public struct PrefillTileVariant: @unchecked Sendable {
+    public let tileHeight: Int
+    public let descriptor: MetalDispatchDescriptor
+
+    public init(tileHeight: Int, descriptor: MetalDispatchDescriptor) {
+        self.tileHeight = tileHeight
+        self.descriptor = descriptor
+    }
+}
+
 /// A single step in the prefill sequence graph.
 public struct MetalPrefillStep: @unchecked Sendable {
     public let descriptor: MetalDispatchDescriptor
@@ -55,6 +72,9 @@ public struct MetalPrefillStep: @unchecked Sendable {
     public let positionBufferIndex: Int?
     public let perPositionStrides: [Int: Int]
     public let metadata: MetalDispatchStepMetadata
+    /// MPP GEMM tile-size variants sorted ascending by `tileHeight`. Empty for
+    /// non-MPP steps; in that case the base `descriptor` is used unconditionally.
+    public let tileVariants: [PrefillTileVariant]
 
     public var pipeline: MTLComputePipelineState { descriptor.pipeline }
     public var gridSize: MTLSize { descriptor.gridSize }
@@ -81,7 +101,8 @@ public struct MetalPrefillStep: @unchecked Sendable {
         sequenceLengthPolicy: PrefillSequenceLengthPolicy,
         positionBufferIndex: Int?,
         perPositionStrides: [Int : Int],
-        metadata: MetalDispatchStepMetadata = .init()
+        metadata: MetalDispatchStepMetadata = .init(),
+        tileVariants: [PrefillTileVariant] = []
     ) {
         self.descriptor = MetalDispatchDescriptor(
             pipeline: pipeline,
@@ -97,6 +118,7 @@ public struct MetalPrefillStep: @unchecked Sendable {
         self.positionBufferIndex = positionBufferIndex
         self.perPositionStrides = perPositionStrides
         self.metadata = metadata
+        self.tileVariants = tileVariants.sorted { $0.tileHeight < $1.tileHeight }
     }
 
     public init(
@@ -106,7 +128,8 @@ public struct MetalPrefillStep: @unchecked Sendable {
         sequenceLengthPolicy: PrefillSequenceLengthPolicy,
         positionBufferIndex: Int?,
         perPositionStrides: [Int: Int],
-        metadata: MetalDispatchStepMetadata = .init()
+        metadata: MetalDispatchStepMetadata = .init(),
+        tileVariants: [PrefillTileVariant] = []
     ) {
         self.descriptor = descriptor
         self.bindings = bindings
@@ -115,6 +138,7 @@ public struct MetalPrefillStep: @unchecked Sendable {
         self.positionBufferIndex = positionBufferIndex
         self.perPositionStrides = perPositionStrides
         self.metadata = metadata
+        self.tileVariants = tileVariants.sorted { $0.tileHeight < $1.tileHeight }
     }
 
     public func bindRuntimeArguments(
@@ -146,14 +170,43 @@ public struct MetalPrefillStep: @unchecked Sendable {
     }
 
     public func resolvedGridSize(sequenceLength: Int) -> MTLSize {
-        guard sequenceLengthPolicy.adjustsGridHeightToSequenceLength, gridSize.height > 1 else {
-            return gridSize
+        let baseGridSize = resolvedDescriptor(sequenceLength: sequenceLength).gridSize
+        guard sequenceLengthPolicy.adjustsGridHeightToSequenceLength, baseGridSize.height > 1 else {
+            return baseGridSize
         }
-        if let tileHeight = sequenceLengthPolicy.tileHeight {
+        if let tileHeight = resolvedTileHeight(sequenceLength: sequenceLength) {
             let tiledHeight = (sequenceLength + tileHeight - 1) / tileHeight
-            return MTLSize(width: gridSize.width, height: tiledHeight, depth: gridSize.depth)
+            return MTLSize(width: baseGridSize.width, height: tiledHeight, depth: baseGridSize.depth)
         }
-        return MTLSize(width: gridSize.width, height: sequenceLength, depth: gridSize.depth)
+        return MTLSize(width: baseGridSize.width, height: sequenceLength, depth: baseGridSize.depth)
+    }
+
+    /// Pick a dispatch descriptor for the given runtime sequence length.
+    ///
+    /// If tile variants are available, selects the smallest `tileHeight` that
+    /// still produces ≥ 1 tile (i.e. `tileHeight >= sequenceLength`) when the
+    /// sequence is short enough to fit; otherwise falls back to the largest
+    /// available variant so long sequences keep the high-utilization tile.
+    public func resolvedDescriptor(sequenceLength: Int) -> MetalDispatchDescriptor {
+        guard !tileVariants.isEmpty else { return descriptor }
+        // tileVariants is sorted ascending by tileHeight (init guarantee).
+        for variant in tileVariants where variant.tileHeight >= sequenceLength {
+            return variant.descriptor
+        }
+        return tileVariants.last!.descriptor
+    }
+
+    /// Effective tile height to use when computing the tiled grid dimension.
+    /// Returns nil when the policy is not tiled.
+    private func resolvedTileHeight(sequenceLength: Int) -> Int? {
+        // Explicit tile height in the policy takes precedence but may be
+        // overridden by the selected tile variant.
+        guard sequenceLengthPolicy.tileHeight != nil else { return nil }
+        guard !tileVariants.isEmpty else { return sequenceLengthPolicy.tileHeight }
+        for variant in tileVariants where variant.tileHeight >= sequenceLength {
+            return variant.tileHeight
+        }
+        return tileVariants.last!.tileHeight
     }
 }
 

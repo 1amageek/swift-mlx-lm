@@ -2377,15 +2377,17 @@ public static func generateDirectScratchBatchFlashAttention(
         constant uint& causal             [[buffer(11)]],
         constant uint& windowLeft         [[buffer(12)]],
         constant uint& windowRight        [[buffer(13)]],
-        uint flatGroupId                  [[threadgroup_position_in_grid]],
+        uint2 gid                         [[threadgroup_position_in_grid]],
         uint tid                          [[thread_index_in_threadgroup]],
         uint tiisg                        [[thread_index_in_simdgroup]],
         uint sgitg                        [[simdgroup_index_in_threadgroup]],
-        uint threadgroupSize              [[threads_per_threadgroup]]
+        uint2 tgSize                      [[threads_per_threadgroup]]
     ) {
-        const uint headIndex = flatGroupId % headCount;
-        const uint posId = flatGroupId / headCount;
-        if (headIndex >= headCount || posId >= sequenceLength) return;
+        // Grid layout: width = headCount, height = sequenceLength (adjusted at runtime).
+        const uint headIndex = gid.x;
+        const uint posId = gid.y;
+        // Threadgroup is 1D (width=threads, height=1, depth=1); only .x is meaningful.
+        const uint threadgroupSize = tgSize.x;
 
         const uint headDim = headDimension;
         const uint kvHeadIndex = headIndex * kvHeadCount / headCount;

@@ -430,6 +430,12 @@ public struct MetalEmbeddingWorkspace: @unchecked Sendable {
         residencyBuffers + postProcessor.residencyBuffers
     }
 
+    /// Stable identity key derived from the workspace's output buffer. Used to
+    /// cache residency leases across repeated dispatches on the same workspace.
+    package var identityKey: ObjectIdentifier {
+        ObjectIdentifier(outputBuffer as AnyObject)
+    }
+
     init(postProcessor: MetalEmbeddingPostProcessor, device: MTLDevice) throws {
         self.postProcessor = postProcessor
 

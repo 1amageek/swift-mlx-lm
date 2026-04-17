@@ -75,7 +75,11 @@ struct MetalKernelSourceCatalog {
         var needsSSMHelpers = false
         var ssmConvSiluWeightFormats: [MetalSourceGenerator.WeightFormat] = []
 
-        // Generate batched Q4 GEMM kernels from original (pre-expansion) entries.
+        // Generate batched prefill GEMM kernels from original (pre-expansion) entries.
+        // Q4 packed weights → batched_gemm_q4_g*_{count} (block-level inline dequant).
+        // BF16 / FP16 dense weights → batched_gemm_bf16_f32s_{count} / batched_gemm_f32s_{count}
+        // (MPP matmul2d with shared input A across projections).
+        var batchedMPPGEMMRequests: [(name: String, count: Int, weightFormat: MetalSourceGenerator.WeightFormat)] = []
         if bufferPrecision == .float32 {
             for entry in entries {
                 let batchedRole: String
@@ -94,6 +98,10 @@ struct MetalKernelSourceCatalog {
                         count: batchedCount, bufferPrecision: bufferPrecision
                        ) {
                         sources.append(source)
+                    }
+                } else if let batchedMPPName = batchedMPPGEMMKernelName(for: weightFormat, count: batchedCount) {
+                    if generatedNames.insert(batchedMPPName).inserted {
+                        batchedMPPGEMMRequests.append((name: batchedMPPName, count: batchedCount, weightFormat: weightFormat))
                     }
                 }
             }
@@ -423,6 +431,20 @@ struct MetalKernelSourceCatalog {
                             weightFormat: weightFormat))
                     }
                 }
+                // Fused batched QK norm + RoPE for prefill. Emitted alongside the
+                // non-fused batched decode kernel (`batched_qk_rms_norm_2`),
+                // which this fragment still delegates to for the decode path.
+                if fragment is BatchedQKNormRoPEFragment, bufferPrecision == .float32 {
+                    let fusedName = weightFormat == .bfloat16
+                        ? "batched_qk_rms_norm_rope_seq_bf16_f32"
+                        : "batched_qk_rms_norm_rope_seq_f32"
+                    if generatedNames.insert(fusedName).inserted {
+                        sources.append(MetalSourceGenerator.generateBatchedQKNormRoPESequence(
+                            name: fusedName,
+                            bufferPrecision: bufferPrecision,
+                            weightFormat: weightFormat))
+                    }
+                }
                 if fragment.cacheSlots.contains(where: { $0.kind == .conv }) && bufferPrecision == .float32 {
                     let extractName = "extract_conv_state_f32"
                     if generatedNames.insert(extractName).inserted {
@@ -501,17 +523,62 @@ struct MetalKernelSourceCatalog {
             ))
         }
 
+        // Emit tile-size variants (_mtile16 / _mtile32 / _mtile64) per GEMM
+        // kernel name so the runtime can pick the shape that matches the
+        // actual sequence length. The base name is kept as an alias for the
+        // default tile size so existing name lookups continue to work.
+        var emittedMPPKernelNames: Set<String> = []
         for name in mppGEMMNames.sorted() {
+            for tileSize in MetalSourceGenerator.mppGEMMTileSizes {
+                let variantName = MetalSourceGenerator.mppGEMMVariantName(
+                    baseName: name, tileSize: tileSize)
+                mppSources.append(MetalSourceGenerator.generateMPPGEMM(
+                    name: variantName,
+                    bufferPrecision: bufferPrecision,
+                    weightFormat: mppGEMMWeightFormat,
+                    mTile: tileSize))
+                emittedMPPKernelNames.insert(variantName)
+            }
+            // Also emit the canonical base name at the default tile size so
+            // legacy lookups (pipelineCache[baseName]) resolve.
             mppSources.append(MetalSourceGenerator.generateMPPGEMM(
                 name: name,
                 bufferPrecision: bufferPrecision,
-                weightFormat: mppGEMMWeightFormat))
+                weightFormat: mppGEMMWeightFormat,
+                mTile: MetalSourceGenerator.mppGEMMDefaultTileSize))
+            emittedMPPKernelNames.insert(name)
+        }
+
+        // Batched MPP GEMM kernels (BF16 / FP16 / FP32 dense weights with multiple
+        // projections sharing the same input). Emitted alongside mppGEMMNames so
+        // they land in the MPP library and are compiled with the correct include
+        // headers for matmul2d.
+        for request in batchedMPPGEMMRequests {
+            for tileSize in MetalSourceGenerator.mppGEMMTileSizes {
+                let variantName = MetalSourceGenerator.mppGEMMVariantName(
+                    baseName: request.name, tileSize: tileSize)
+                mppSources.append(MetalSourceGenerator.generateBatchedMPPGEMM(
+                    name: variantName,
+                    count: request.count,
+                    bufferPrecision: bufferPrecision,
+                    weightFormat: request.weightFormat,
+                    mTile: tileSize))
+                emittedMPPKernelNames.insert(variantName)
+            }
+            // Canonical base name alias at the default tile size.
+            mppSources.append(MetalSourceGenerator.generateBatchedMPPGEMM(
+                name: request.name,
+                count: request.count,
+                bufferPrecision: bufferPrecision,
+                weightFormat: request.weightFormat,
+                mTile: MetalSourceGenerator.mppGEMMDefaultTileSize))
+            emittedMPPKernelNames.insert(request.name)
         }
 
         return GeneratedKernelSources(
             baseSource: sources.joined(separator: "\n\n"),
             mppSources: mppSources,
-            mppKernelNames: mppGEMMNames)
+            mppKernelNames: emittedMPPKernelNames)
     }
 
     private func sourceGenerationEntries(from entries: [DispatchEntry]) -> [DispatchEntry] {
@@ -664,6 +731,28 @@ struct MetalKernelSourceCatalog {
         case .quantized4Bit(let groupSize):
             return "batched_gemm_q4_g\(groupSize)_\(count)"
         default:
+            return nil
+        }
+    }
+
+    // MARK: - Batched MPP GEMM (Prefill BF16 / FP16 / FP32)
+
+    /// Kernel name for the batched MPP GEMM kernel that handles multiple dense-weight
+    /// projections sharing one input. Returns nil for weight formats where a dense
+    /// matmul2d-based kernel does not apply (e.g. packed Q4 — use `batchedQuantizedGEMMKernelName`).
+    func batchedMPPGEMMKernelName(
+        for weightFormat: MetalSourceGenerator.WeightFormat,
+        count: Int
+    ) -> String? {
+        guard count >= 2 && count <= 4 else { return nil }
+        switch weightFormat {
+        case .bfloat16:
+            return "batched_gemm_bf16_f32s_\(count)"
+        case .float16:
+            return "batched_gemm_f16_f32s_\(count)"
+        case .float32:
+            return "batched_gemm_f32_f32s_\(count)"
+        case .quantized4Bit, .quantized8Bit:
             return nil
         }
     }

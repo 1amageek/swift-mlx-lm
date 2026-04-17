@@ -36,6 +36,17 @@ extension AttentionAttributes: MetalCompilable {
                 outputSlotIndex: queryScratchSlotIndex
             )
         }
+        // Decide whether Q/K RMS norm can be fused with RoPE in prefill.
+        // Requires: QK norm is present, RoPE is present, K/V are not shared,
+        // and `v_norm` is absent (v norm would need to sit between QK norm and
+        // RoPE on K, breaking the fused kernel's assumptions).
+        let fuseQKNormWithRoPE: Bool = {
+            guard let qkNorm, qkNorm != .none else { return false }
+            guard !usesSharedKV else { return false }
+            guard rope != nil else { return false }
+            guard valueNorm == nil else { return false }
+            return true
+        }()
         if let qkNorm = qkNorm, qkNorm != .none {
             if usesSharedKV {
                 QKNormFragment(
@@ -45,6 +56,30 @@ extension AttentionAttributes: MetalCompilable {
                     weightRole: "q_layernorm",
                     weightBias: qkWeightBias,
                     scratchSlotIndex: queryScratchSlotIndex
+                )
+            } else if fuseQKNormWithRoPE, let ropeParams = rope {
+                // Fused batched Q+K RMS norm + RoPE (single prefill dispatch).
+                // Decode path is unaffected — RoPE runs inline in flash_attn_decode.
+                BatchedQKNormRoPEFragment(
+                    qNorm: QKNormFragment(
+                        headCount: headCount,
+                        headDimension: headDimension,
+                        epsilon: 1e-6,
+                        weightRole: "q_layernorm",
+                        weightBias: qkWeightBias,
+                        scratchSlotIndex: queryScratchSlotIndex
+                    ),
+                    kNorm: QKNormFragment(
+                        headCount: kvHeadCount,
+                        headDimension: headDimension,
+                        epsilon: 1e-6,
+                        weightRole: "k_layernorm",
+                        weightBias: qkWeightBias
+                    ),
+                    ropeDimension: ropeParams.dimension,
+                    ropeBase: ropeParams.base,
+                    ropeScaling: ropeParams.scaling,
+                    mropeAxes: ropeParams.mropeAxes
                 )
             } else {
                 // Batched QK norm (component-internal optimization)
@@ -102,7 +137,8 @@ extension AttentionAttributes: MetalCompilable {
             causal: causal,
             windowLeft: window?.left,
             windowRight: window?.right,
-            sharedKVSourceLayerIndex: sharedKeyValueSourceLayerIndex)
+            sharedKVSourceLayerIndex: sharedKeyValueSourceLayerIndex,
+            suppressPrefillRoPE: fuseQKNormWithRoPE)
         if outputGate == .sigmoidPackedInQProj {
             PackedSigmoidGateFragment(
                 dimension: attentionDimension,
