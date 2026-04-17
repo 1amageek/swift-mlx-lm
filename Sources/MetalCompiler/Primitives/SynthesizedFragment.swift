@@ -67,8 +67,25 @@ public struct SynthesizedFragment: PrimitiveMetalKernelFragment {
         case .quantized4Bit(let gs): weightTag = "wq4g\(gs)"
         case .quantized8Bit(let gs): weightTag = "wq8g\(gs)"
         }
+        // Composition tag: distinct compositions must produce distinct kernel names
+        // because the MSL body differs per composition. Using fragments.count alone
+        // causes aliasing (e.g., `CopyFragment+Reduction` vs `ResidualAddFragment+Reduction`
+        // both resolve to the same 2-way/4-port name), which lets the pipeline cache
+        // reuse the first-registered kernel source for a later, semantically different
+        // fusion and corrupts inference output (LFM2 regression, 2026-04-17).
+        let compositionTag = fragments
+            .map { Self.fragmentShortName($0) }
+            .joined(separator: "_")
         let portCount = mergedContract.ports.count
-        return "synthesized_\(fragments.count)way_\(portCount)p_\(parallelismTag)_\(precisionTag)_\(weightTag)"
+        return "synthesized_\(fragments.count)way_\(compositionTag)_\(portCount)p_\(parallelismTag)_\(precisionTag)_\(weightTag)"
+    }
+
+    /// Short, stable identifier for a fragment type, used to disambiguate
+    /// synthesized kernel names by composition.
+    private static func fragmentShortName(_ fragment: any PrimitiveMetalKernelFragment) -> String {
+        let raw = String(describing: type(of: fragment))
+        let trimmed = raw.replacingOccurrences(of: "Fragment", with: "")
+        return trimmed.lowercased()
     }
 
     public func kernelBody(bufferPrecision: BufferPrecision, weightFormat: WeightFormat) -> String? {
