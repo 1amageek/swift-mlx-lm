@@ -71,6 +71,114 @@ struct Gemma4BenchmarkTests {
         print("[Benchmark/\(Self.modelLabel)] decode \(decodeSteps) tokens: \(String(format: "%.1f", tokPerSec)) tok/s (\(String(format: "%.2f", msPerToken)) ms/tok)")
     }
 
+    // MARK: - MLX-aligned benchmark (apples-to-apples with mlx-swift-lm Gemma3nBenchmarkTests)
+    //
+    // Identical methodology to mlx-swift-lm:
+    //   - lengths [16, 32, 64, 128] for prefill, 100 decode steps
+    //   - fresh model state per measurement (equivalent to fresh TokenIterator + new cache)
+    //   - 1 warmup + 3 measured runs, median reported with σ and relative σ
+    //   - prefill = full prefill(tokens:) call (GPU dispatch → sync → first token back)
+    //   - decode  = decodeSync loop after 3-decode warmup (matches MLX's measureDecode)
+    @Test("MLX-aligned prefill + decode throughput (3-run median)")
+    func mlxAlignedBenchmark() throws {
+        let gpuLock = try GPUTestExclusion.acquire()
+        defer { gpuLock.release() }
+        BenchmarkSupport.settleGPU()
+
+        let (model, _, _) = try BenchmarkSupport.setupFromBundle(
+            bundlePath: Self.bundlePath,
+            maximumPrefillLength: 128
+        )
+        var inferenceModel = model
+
+        // Warmup — same intent as MLX: resident caches, hot Metal kernels.
+        do {
+            let warmupTokens: [Int32] = Array(repeating: 1, count: 8)
+            var tok = inferenceModel.prefill(tokens: warmupTokens)
+            for _ in 0..<4 { tok = inferenceModel.decodeSync(tokenID: tok) }
+            inferenceModel.resetState()
+        }
+
+        print("=== \(Self.modelLabel) BF16 swift-lm benchmark (MLX-aligned) ===")
+        print("runs per measurement: 3")
+        print()
+
+        // Prefill throughput: fresh state per run, time = prefill(tokens:) total.
+        print("PREFILL (tok/s — prompt tokens divided by time-to-first-token)")
+        let prefillLengths = [16, 32, 64, 128]
+        for length in prefillLengths {
+            var tps: [Double] = []
+            var msList: [Double] = []
+            for _ in 0..<3 {
+                inferenceModel.resetState()
+                let tokens = [Int32](repeating: 1, count: length)
+                let start = CFAbsoluteTimeGetCurrent()
+                _ = inferenceModel.prefill(tokens: tokens)
+                let elapsed = CFAbsoluteTimeGetCurrent() - start
+                tps.append(Double(length) / elapsed)
+                msList.append(elapsed * 1000)
+            }
+            let s = BenchStats(tps)
+            let m = BenchStats(msList)
+            print(String(
+                format: "  len %3d: median %6.1f tok/s, mean %6.1f ±%.2f (σ/μ %.2f%%) | %.2f ms median",
+                length, s.median, s.mean, s.stddev, s.relStddev * 100, m.median))
+        }
+
+        // Decode throughput: short prompt, 3 warmup decodes, then measured decodeSync loop.
+        print()
+        print("DECODE (tok/s — steady-state token generation after prefill)")
+        let decodeSteps = 100
+        var dtps: [Double] = []
+        var dms: [Double] = []
+        for _ in 0..<3 {
+            inferenceModel.resetState()
+            let promptTokens: [Int32] = [1, 1, 6, 6423, 708]
+            var tok = inferenceModel.prefill(tokens: promptTokens)
+            for _ in 0..<3 { tok = inferenceModel.decodeSync(tokenID: tok) }
+
+            let start = CFAbsoluteTimeGetCurrent()
+            for _ in 0..<decodeSteps {
+                tok = inferenceModel.decodeSync(tokenID: tok)
+            }
+            let elapsed = CFAbsoluteTimeGetCurrent() - start
+            dtps.append(Double(decodeSteps) / elapsed)
+            dms.append(elapsed * 1000 / Double(decodeSteps))
+        }
+        let ds = BenchStats(dtps)
+        let dm = BenchStats(dms)
+        print(String(
+            format: "  %3d steps: median %5.1f tok/s, mean %5.1f ±%.2f (σ/μ %.2f%%) | %.2f ms/tok median",
+            decodeSteps, ds.median, ds.mean, ds.stddev, ds.relStddev * 100, dm.median))
+        print()
+    }
+
+    private struct BenchStats {
+        let mean: Double
+        let median: Double
+        let stddev: Double
+        init(_ values: [Double]) {
+            precondition(!values.isEmpty)
+            let sorted = values.sorted()
+            let count = values.count
+            let sum = values.reduce(0, +)
+            let meanValue = sum / Double(count)
+            let stddevValue: Double
+            if count > 1 {
+                let variance = values.reduce(0.0) { acc, v in
+                    acc + (v - meanValue) * (v - meanValue)
+                } / Double(count - 1)
+                stddevValue = variance.squareRoot()
+            } else {
+                stddevValue = 0
+            }
+            self.mean = meanValue
+            self.median = sorted[count / 2]
+            self.stddev = stddevValue
+        }
+        var relStddev: Double { mean == 0 ? 0 : stddev / mean }
+    }
+
     @Test("End-to-end: prefill + decode with memory diagnostics")
     func endToEndBenchmark() throws {
         let gpuLock = try GPUTestExclusion.acquire()

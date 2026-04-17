@@ -191,17 +191,21 @@ extension MetalSourceGenerator {
         sources.append(generateSSMWeightIndependentHelpers())
         sources.append(generateSSMConvSiluHelper(weightFormat: .float16))
         sources.append(generateSSMConvSiluHelper(weightFormat: .bfloat16))
-        // Default convDimension for library generation (LFM2-style: 16 groups × 128 dk, 16 heads × 128 dv)
-        let defaultConvDimension = 2 * 16 * 128 + 16 * 128
+        // Default SSM dimensions for library generation (LFM2-style: 16 groups × 128 dk, 16 heads × 128 dv)
+        let defaultHeadCount = 16
+        let defaultGroupCount = 16
+        let defaultKeyHeadDimension = 128
+        let defaultValueHeadDimension = 128
+        let defaultConvDimension = 2 * defaultGroupCount * defaultKeyHeadDimension + defaultHeadCount * defaultValueHeadDimension
         let defaultMaxThreadgroupSize = SSMRecurrenceFragment.maxThreadgroupSize
         sources.append(generateSSMRecurrence(name: "ssm_recurrence", bufferPrecision: decode, weightFormat: .float16, convDimension: defaultConvDimension, maxThreadgroupSize: defaultMaxThreadgroupSize))
         sources.append(generateSSMRecurrence(name: "ssm_recurrence_f32", bufferPrecision: prefill, weightFormat: .float16, convDimension: defaultConvDimension, maxThreadgroupSize: defaultMaxThreadgroupSize))
-        sources.append(generateSSMRecurrenceSequence(name: "ssm_recurrence_seq", bufferPrecision: decode, weightFormat: .float16, convDimension: defaultConvDimension, maxThreadgroupSize: defaultMaxThreadgroupSize))
-        sources.append(generateSSMRecurrenceSequence(name: "ssm_recurrence_seq_f32", bufferPrecision: prefill, weightFormat: .float16, convDimension: defaultConvDimension, maxThreadgroupSize: defaultMaxThreadgroupSize))
+        sources.append(generateSSMRecurrenceSequence(name: "ssm_recurrence_seq", bufferPrecision: decode, weightFormat: .float16, convDimension: defaultConvDimension, maxThreadgroupSize: defaultMaxThreadgroupSize, headCount: defaultHeadCount, groupCount: defaultGroupCount, keyHeadDimension: defaultKeyHeadDimension, valueHeadDimension: defaultValueHeadDimension))
+        sources.append(generateSSMRecurrenceSequence(name: "ssm_recurrence_seq_f32", bufferPrecision: prefill, weightFormat: .float16, convDimension: defaultConvDimension, maxThreadgroupSize: defaultMaxThreadgroupSize, headCount: defaultHeadCount, groupCount: defaultGroupCount, keyHeadDimension: defaultKeyHeadDimension, valueHeadDimension: defaultValueHeadDimension))
         sources.append(generateSSMRecurrence(name: "ssm_recurrence_bf16", bufferPrecision: decode, weightFormat: .bfloat16, convDimension: defaultConvDimension, maxThreadgroupSize: defaultMaxThreadgroupSize))
         sources.append(generateSSMRecurrence(name: "ssm_recurrence_bf16_f32", bufferPrecision: prefill, weightFormat: .bfloat16, convDimension: defaultConvDimension, maxThreadgroupSize: defaultMaxThreadgroupSize))
-        sources.append(generateSSMRecurrenceSequence(name: "ssm_recurrence_seq_bf16", bufferPrecision: decode, weightFormat: .bfloat16, convDimension: defaultConvDimension, maxThreadgroupSize: defaultMaxThreadgroupSize))
-        sources.append(generateSSMRecurrenceSequence(name: "ssm_recurrence_seq_bf16_f32", bufferPrecision: prefill, weightFormat: .bfloat16, convDimension: defaultConvDimension, maxThreadgroupSize: defaultMaxThreadgroupSize))
+        sources.append(generateSSMRecurrenceSequence(name: "ssm_recurrence_seq_bf16", bufferPrecision: decode, weightFormat: .bfloat16, convDimension: defaultConvDimension, maxThreadgroupSize: defaultMaxThreadgroupSize, headCount: defaultHeadCount, groupCount: defaultGroupCount, keyHeadDimension: defaultKeyHeadDimension, valueHeadDimension: defaultValueHeadDimension))
+        sources.append(generateSSMRecurrenceSequence(name: "ssm_recurrence_seq_bf16_f32", bufferPrecision: prefill, weightFormat: .bfloat16, convDimension: defaultConvDimension, maxThreadgroupSize: defaultMaxThreadgroupSize, headCount: defaultHeadCount, groupCount: defaultGroupCount, keyHeadDimension: defaultKeyHeadDimension, valueHeadDimension: defaultValueHeadDimension))
 
         // === KV cache quantization ===
         sources.append(kvQuantizationSource)

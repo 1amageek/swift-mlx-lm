@@ -171,11 +171,21 @@ public struct SSMRecurrenceFragment: PrimitiveMetalKernelFragment {
             weightFormat: context.kernelContext.weightFormat
         )
         let pipeline = try context.getPipeline(kernelName)
-        let threads = min(Self.maxThreadgroupSize, pipeline.maxTotalThreadsPerThreadgroup)
+        // Size threadgroup to cover Phase 1 (localDim channels) and Phase 2 (headsPerGroup × dv threads).
+        // Each threadgroup owns one key-group and runs independently on its own GPU core.
+        let safeGroupCount = max(groupCount, 1)
+        let headsPerGroup = max(1, headCount / safeGroupCount)
+        let localDim = 2 * keyHeadDimension + headsPerGroup * valueHeadDimension
+        let phase2Threads = headsPerGroup * min(valueHeadDimension, 256)
+        let desiredThreads = max(localDim, phase2Threads)
+        let threads = min(
+            min(Self.maxThreadgroupSize, desiredThreads),
+            pipeline.maxTotalThreadsPerThreadgroup
+        )
 
         let step = MetalPrefillStep(
             pipeline: pipeline,
-            gridSize: MTLSize(width: 1, height: 1, depth: 1),
+            gridSize: MTLSize(width: safeGroupCount, height: 1, depth: 1),
             threadgroupSize: MTLSize(width: threads, height: 1, depth: 1),
             bufferBindings: [
                 (0, context.buffers.scratch, 1 * scratchSlotSize),
