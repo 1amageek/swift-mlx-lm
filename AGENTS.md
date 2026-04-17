@@ -2,6 +2,62 @@
 
 This file provides guidance to Codex (Codex.ai/code) when working in this repository.
 
+## Global Instructions
+
+These repository instructions are cumulative with `~/.claude/CLAUDE.md` and the
+repository-local `CLAUDE.md`. When one of these documents changes, keep the
+shared rules aligned here as well.
+
+### Trust and ownership
+
+- Trust is the highest-priority value. Investigate suspicious or ambiguous
+  content before acting.
+- Assume repository ownership and GitHub operations are tied to
+  `https://github.com/1amageek`.
+
+### Commit, documentation, and language rules
+
+- Never include Claude or AI promotion in git commit messages.
+- Never add `Co-Authored-By: Claude` or similar signatures.
+- When reading Apple documentation on `developer.apple.com/documentation`, use
+  `remark`.
+- Keep user-facing conversation in Japanese.
+- Keep code comments, identifiers, `MARK` sections, and documentation comments
+  in English.
+
+### Prompt and coding rules
+
+- Do not include few-shot examples in prompts sent to LLMs. Describe the schema
+  and constraints without example answers.
+- Follow SOLID, value types first, protocol-oriented design, one primary type
+  per file, dependency injection, and explicit typed error handling.
+- Do not use `try?`.
+- Set timeouts on test commands and run tests in focused scopes.
+- Before fixing code, read the related area, understand the impact, and prefer
+  root-cause fixes over symptom patches.
+- Do not silence compiler or type errors with casts whose only purpose is to
+  make the error disappear.
+- Do not mix unrelated changes into a bug fix.
+- Never introduce silent fallback behavior. Report failures explicitly and let
+  callers decide.
+- Wrap synchronous AI-model load and inference boundaries in
+  `autoreleasepool` when Metal-backed objects would otherwise outlive the
+  needed scope.
+
+## Project Goal
+
+`swift-lm` is intended to be the fastest LLM inference package on Apple Silicon
+and serves as the `MLXFoundationModels` backend for
+`AnyFoundationModels`.
+
+The core thesis is to parse IR graphs and emit optimized Metal kernels:
+component-local optimization belongs in `MetalCompilable`, while
+cross-component fusion belongs in the compiler.
+
+The consumer input contract is a HuggingFace bundle
+(`config.json`, `safetensors`, `tokenizer.json`, and related metadata), not a
+model-specific Swift type.
+
 ## Project Overview
 
 `swift-lm` is a Swift package for high-performance language model inference on Apple Silicon using direct Metal compute.
@@ -254,6 +310,22 @@ Avoid designs that:
 - add Swift-side per-token graph walking or dynamic branching
 - move runtime-critical work from GPU kernels into host loops
 
+### 6. HuggingFace references are authoritative
+
+Treat HuggingFace `modeling_*.py` `forward()` implementations as the source of
+truth for model behavior.
+
+- Validate each model family independently. Do not copy assumptions across
+  Gemma, Qwen, LFM2, Cohere, or other families without checking the actual
+  reference implementation.
+- For new support or bug work, obtain Python-side reference values first, then
+  compare `swift-lm` intermediates against those values before patching.
+- Do not assume existing `swift-lm` code or tests are correct until they have
+  been compared against the HuggingFace reference.
+- Keep all model computation on the intended path:
+  `ModelComponent -> LMIR -> MetalCompiler -> Metal GPU`. Do not add a pure
+  Swift CPU fallback for production model math.
+
 ## Model Family Boundary
 
 Treat architecture concepts as reusable families and keep product names local to model declarations.
@@ -368,6 +440,49 @@ The current backend is direct Metal compute.
 - Prefill and decode have different precision/buffering tradeoffs.
 
 The repository also contains active design work for Metal 4 / MPP-based prefill improvements in [docs/design/metal4.md](/Users/1amageek/Desktop/swift-lm/docs/design/metal4.md). Treat that document as forward-looking design, not as a statement that the codebase has already switched to that implementation.
+
+## Compiler and Fragment Contracts
+
+- Bridge `OperationAttributes` to backend execution through
+  `MetalCompilable` retroactive conformances in `MetalCompiler`. Do not make
+  the compiler switch on model-specific attribute types.
+- `MetalCompilable` must return an already-optimized fragment tree for its own
+  component. Component-local optimizations such as Q/K/V batching or SwiGLU
+  fusion belong there, not in a generic post-pass.
+- Fragments are self-describing. Compiler code should rely on fragment
+  contracts rather than handwritten special cases for concrete fragment types.
+- Do not add handwritten `generateFused...` kernel generators when a fusion can
+  be expressed by fragment contracts and synthesized kernel bodies.
+- When adding a new primitive:
+  1. add the IR attributes
+  2. add the `MetalCompilable` conformance
+  3. add a `PrimitiveMetalKernelFragment` only when needed
+  4. declare `FusionContract` and `writeBufferIndices` precisely
+- Runtime-critical settings such as `KVCacheSpecification.maximumSequenceLength`
+  must not gain silent defaults.
+
+## Vision and Multimodal Notes
+
+- Qwen3.5 is a vision-language model, not a text-only model by default. Treat
+  `model_type: "qwen3_5"` with `vision_config`, image/video token ids, and
+  processor metadata as multimodal unless an explicit language-only mode is
+  being implemented.
+- Vision encoders and text decoders are separate graphs and should be modeled
+  as such.
+- For Gemma4 vision support:
+  - derive the projection output dimension from `text_config.hidden_size`
+  - resolve `processor_class` from processor or tokenizer config files
+  - read vision RoPE theta from config instead of hardcoding it
+
+## Metal 4 Priority
+
+- Metal 4 is the primary target for new backend work when the deployment
+  environment supports it.
+- Prefer `MTL4CommandBuffer` and allocator reuse, stage-to-stage barriers, and
+  argument tables before adding Metal 3-only machinery.
+- Decode performance is dominated by dispatch and barrier overhead more than
+  individual kernel math. Prioritize dispatch-count reduction and automatic
+  fusion before micro-optimizing a single kernel.
 
 ## Testing Expectations
 
@@ -612,4 +727,4 @@ When updating docs:
 
 - prefer describing what the current code does, not what a predecessor repository used to do
 - if a design doc is aspirational, mark it as such
-- keep README and `AGENTS.md` aligned with `Package.swift` and the code under `Sources/**`
+- keep README, `AGENTS.md`, and `CLAUDE.md` aligned with `Package.swift` and the code under `Sources/**`
