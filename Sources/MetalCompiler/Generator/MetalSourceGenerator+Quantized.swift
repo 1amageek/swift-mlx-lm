@@ -633,4 +633,126 @@ kernel void gemm_bf16_f32s_halfout(
 }
 """
 
+// MARK: - Unified quantized GEMV (Phase 1 skeleton)
+
+/// Generate a GEMV kernel for any `QuantizationFormat` that is `isQuantized`.
+///
+/// This is the Phase 1 unified scaffold used by new formats (Q2/Q3/Q5/Q6).
+/// Existing Q4/Q8 kernels in `generateQuantizedGEMV_Q4*` / `...Q8*` are
+/// retained untouched — migration to this generator is deferred to Phase 5.
+///
+/// The block layout assumed here matches the MLX-compatible interleaved layout:
+///
+/// ```
+/// ┌──────────┬──────────┬────────────────────┐
+/// │scale (2B)│ zero (2B)│ packed quants      │
+/// └──────────┴──────────┴────────────────────┘
+/// ```
+///
+/// For aligned formats (2 / 4 / 8 bits) the inner loop uses
+/// `format.perWeightReadExpression(blocksVar: "qs", weightIndexVar: "k")`.
+/// For non-aligned formats (3 / 5 / 6 bits) the inner loop calls
+/// `format.emitGroupDequant(...)` to expand the group into thread-local floats
+/// before the simd-parallel multiply-accumulate.
+public static func generateUnifiedQuantizedGEMV(
+    name: String,
+    format: any QuantizationFormat,
+    bufferPrecision: BufferPrecision,
+    tileElements: Int = 256
+) -> String {
+    precondition(
+        format.isQuantized,
+        "generateUnifiedQuantizedGEMV requires isQuantized=true; got \(format.schemeIdentifier)"
+    )
+
+    let bt = bufferPrecision.metalType
+    let weightsPerBlock = format.weightsPerBlock
+    let bytesPerBlock = format.bytesPerBlock
+
+    let scaffoldBody: String
+    if format.isAligned {
+        guard let readExpression = format.perWeightReadExpression(
+            blocksVar: "qs",
+            weightIndexVar: "k"
+        ) else {
+            fatalError(
+                "Aligned format \(format.schemeIdentifier) did not provide perWeightReadExpression"
+            )
+        }
+        scaffoldBody = """
+                    for (uint k = tiisg; k < WEIGHTS_PER_BLOCK; k += SIMD_WIDTH) {
+                        float w = \(readExpression);
+                        sum += w * float(inputTile[tileOffset + k]);
+                    }
+        """
+    } else {
+        guard let groupExpansion = format.emitGroupDequant(
+            blocksVar: "qs",
+            blockIndexVar: "0",
+            outputArrayVar: "weights_f32"
+        ) else {
+            fatalError(
+                "Non-aligned format \(format.schemeIdentifier) did not provide emitGroupDequant"
+            )
+        }
+        scaffoldBody = """
+                    float weights_f32[\(weightsPerBlock)];
+                    \(groupExpansion)
+                    for (uint k = tiisg; k < WEIGHTS_PER_BLOCK; k += SIMD_WIDTH) {
+                        sum += weights_f32[k] * float(inputTile[tileOffset + k]);
+                    }
+        """
+    }
+
+    return """
+    kernel void \(name)(
+        device const \(bt)* input       [[buffer(0)]],
+        device const uchar* weight     [[buffer(1)]],
+        device \(bt)* output            [[buffer(2)]],
+        constant uint& inputDimension  [[buffer(3)]],
+        constant uint& outputDimension [[buffer(4)]],
+        uint2 gid                      [[threadgroup_position_in_grid]],
+        uint tid                       [[thread_index_in_threadgroup]],
+        uint tiisg                     [[thread_index_in_simdgroup]],
+        uint sgitg                     [[simdgroup_index_in_threadgroup]],
+        uint2 tptg                     [[threads_per_threadgroup]]
+    ) {
+        const uint WEIGHTS_PER_BLOCK = \(weightsPerBlock);
+        const uint BYTES_PER_BLOCK = \(bytesPerBlock);
+        const uint THREADS_PER_THREADGROUP = tptg.x;
+        const uint rowsPerThreadgroup = THREADS_PER_THREADGROUP / SIMD_WIDTH;
+        const uint TILE_ELEMENTS = \(tileElements);
+        const uint row = gid.x * rowsPerThreadgroup + sgitg;
+        if (row >= outputDimension) return;
+
+        const uint blocksPerRow = inputDimension / WEIGHTS_PER_BLOCK;
+        device const uchar* rowBase = weight + row * blocksPerRow * BYTES_PER_BLOCK;
+        threadgroup \(bt) inputTile[TILE_ELEMENTS];
+        float sum = 0.0f;
+
+        for (uint base = 0; base < inputDimension; base += TILE_ELEMENTS) {
+            const uint tileCount = min(TILE_ELEMENTS, inputDimension - base);
+            for (uint j = tid; j < tileCount; j += THREADS_PER_THREADGROUP) {
+                inputTile[j] = input[base + j];
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+
+            const uint blockBase = base / WEIGHTS_PER_BLOCK;
+            const uint blockCount = tileCount / WEIGHTS_PER_BLOCK;
+            for (uint localBlock = 0; localBlock < blockCount; localBlock++) {
+                device const uchar* block = rowBase + (blockBase + localBlock) * BYTES_PER_BLOCK;
+                float scale = float(*(device const half*)(block));
+                float zero = float(*(device const half*)(block + 2));
+                device const uchar* qs = block + 4;
+                const uint tileOffset = localBlock * WEIGHTS_PER_BLOCK;
+    \(scaffoldBody)
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+        }
+        sum = simd_sum(sum);
+        if (tiisg == 0) output[row] = \(bt)(sum);
+    }
+    """
+}
+
 }
