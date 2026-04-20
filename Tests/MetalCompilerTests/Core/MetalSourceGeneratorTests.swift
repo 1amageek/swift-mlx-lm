@@ -501,6 +501,117 @@ struct MetalSourceGeneratorTests {
         }
     }
 
+    @Test("Q6 group dequant matches CPU reference for all packed values")
+    func q6GroupDequantMatchesReference() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+
+        let formats: [any QuantizationFormat] = [
+            AffineQ6Group16Format(),
+            AffineQ6Group32Format(),
+        ]
+
+        for format in formats {
+            // Sweep quant values spanning the full 6-bit range [0, 63] by
+            // using a scale=1.0, zero=0.0 block whose packed weights cycle
+            // through 0..63 so every 4-weight group exercises one bit offset.
+            let wpb = format.weightsPerBlock
+            let scale: Float16 = 1.0
+            let zero: Float16 = 0.0
+
+            // Build expected weight values [0, 1, 2, ..., wpb-1] — all
+            // distinct values < 64 so none overflow 6 bits.
+            let expectedWeights: [UInt8] = (0..<wpb).map { UInt8($0) }
+            precondition(expectedWeights.allSatisfy { $0 < 64 })
+
+            // Pack into Q6 layout: 4 weights share 3 bytes per MLX spec.
+            let packedBytes = (wpb / 4) * 3
+            var blockBytes = Data(count: 4 + packedBytes)
+            blockBytes.withUnsafeMutableBytes { raw in
+                var scaleCopy = scale
+                memcpy(raw.baseAddress!, &scaleCopy, 2)
+                var zeroCopy = zero
+                memcpy(raw.baseAddress! + 2, &zeroCopy, 2)
+                let qs = raw.baseAddress!.advanced(by: 4)
+                    .assumingMemoryBound(to: UInt8.self)
+                for g in 0..<(wpb / 4) {
+                    let w0 = expectedWeights[g * 4 + 0]
+                    let w1 = expectedWeights[g * 4 + 1]
+                    let w2 = expectedWeights[g * 4 + 2]
+                    let w3 = expectedWeights[g * 4 + 3]
+                    qs[g * 3 + 0] = (w0 & 0x3f) | ((w1 & 0x03) << 6)
+                    qs[g * 3 + 1] = ((w1 >> 2) & 0x0f) | ((w2 & 0x0f) << 4)
+                    qs[g * 3 + 2] = ((w2 >> 4) & 0x03) | ((w3 & 0x3f) << 2)
+                }
+            }
+
+            // Compile a dequant-only kernel that wraps emitGroupDequant.
+            let name = "dequant_q6_g\(format.groupSize)_test"
+            let dequantBody = format.emitGroupDequant(
+                blocksVar: "qs",
+                blockIndexVar: "0",
+                outputArrayVar: "weights_f32"
+            )!
+            let source = """
+            #include <metal_stdlib>
+            using namespace metal;
+
+            kernel void \(name)(
+                device const uchar* block [[buffer(0)]],
+                device float* output      [[buffer(1)]]
+            ) {
+                float scale = float(*(device const half*)(block));
+                float zero  = float(*(device const half*)(block + 2));
+                device const uchar* qs = block + 4;
+                float weights_f32[\(wpb)];
+                \(dequantBody)
+                for (uint k = 0; k < \(wpb); k++) output[k] = weights_f32[k];
+            }
+            """
+            let options = MTLCompileOptions()
+            options.languageVersion = .version4_0
+            let library = try device.makeLibrary(source: source, options: options)
+            let pipeline = try device.makeComputePipelineState(
+                function: try #require(library.makeFunction(name: name))
+            )
+
+            let blockBuffer = try #require(device.makeBuffer(
+                bytes: [UInt8](blockBytes),
+                length: blockBytes.count,
+                options: .storageModeShared
+            ))
+            let outputBuffer = try #require(device.makeBuffer(
+                length: wpb * MemoryLayout<Float>.size,
+                options: .storageModeShared
+            ))
+
+            let queue = try #require(device.makeCommandQueue())
+            let commandBuffer = try #require(queue.makeCommandBuffer())
+            let encoder = try #require(commandBuffer.makeComputeCommandEncoder())
+            encoder.setComputePipelineState(pipeline)
+            encoder.setBuffer(blockBuffer, offset: 0, index: 0)
+            encoder.setBuffer(outputBuffer, offset: 0, index: 1)
+            encoder.dispatchThreads(
+                MTLSize(width: 1, height: 1, depth: 1),
+                threadsPerThreadgroup: MTLSize(width: 1, height: 1, depth: 1)
+            )
+            encoder.endEncoding()
+            commandBuffer.commit()
+            commandBuffer.waitUntilCompleted()
+
+            let result = outputBuffer.contents().bindMemory(
+                to: Float.self, capacity: wpb
+            )
+            for k in 0..<wpb {
+                let expected = Float(expectedWeights[k])
+                let actual = result[k]
+                #expect(
+                    abs(actual - expected) < 1e-5,
+                    "\(format.schemeIdentifier) dequant mismatch at k=\(k): expected=\(expected) actual=\(actual)"
+                )
+            }
+        }
+    }
+
     @Test("Generated complete library includes BF16 SSM kernels")
     func completeLibraryIncludesBF16SSMVariants() throws {
         guard let device = MTLCreateSystemDefaultDevice() else { return }
