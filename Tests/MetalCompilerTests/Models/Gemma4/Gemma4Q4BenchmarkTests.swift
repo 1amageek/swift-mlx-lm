@@ -10,7 +10,7 @@ import Testing
 @Suite("Gemma4 Q4 Benchmark", .serialized)
 struct Gemma4Q4BenchmarkTests {
 
-    static let bundlePath = "/Users/1amageek/Desktop/swift-lm/TestData/gemma-4-E2B-it-4bit"
+    static let bundlePath = "/Users/Shared/swift-lm-testdata/gemma-4-E2B-it-4bit"
     static let modelLabel = "Gemma4-E2B-Q4"
 
     @Test("MLX-aligned prefill + decode throughput (3-run median)")
