@@ -173,6 +173,10 @@ extension MetalSourceGenerator {
         sources.append(generateQuantizedGEMM_Q4(name: "gemm_q4_g128", bufferPrecision: decode, groupSize: 128))
         sources.append(generateQuantizedGEMM_Q4(name: "gemm_q4_g64_f32s", bufferPrecision: prefill, groupSize: 64))
         sources.append(generateQuantizedGEMM_Q4(name: "gemm_q4_g128_f32s", bufferPrecision: prefill, groupSize: 128))
+        sources.append(generateQuantizedGEMM_Q8(name: "gemm_q8_g32", bufferPrecision: decode, groupSize: 32))
+        sources.append(generateQuantizedGEMM_Q8(name: "gemm_q8_g64", bufferPrecision: decode, groupSize: 64))
+        sources.append(generateQuantizedGEMM_Q8(name: "gemm_q8_g32_f32s", bufferPrecision: prefill, groupSize: 32))
+        sources.append(generateQuantizedGEMM_Q8(name: "gemm_q8_g64_f32s", bufferPrecision: prefill, groupSize: 64))
 
         // === Misc decode kernels ===
         sources.append(generateSigmoidGate(name: "sigmoid_gate", bufferPrecision: decode))

@@ -303,6 +303,7 @@ Buffer routing (MetalPrefillStepBuilder / decode bindings)
 - 実 bundle を読む suite は `build-for-testing` 後に `test-without-building` で 1 suite ずつ回す。
 - 不安定な suite は [`scripts/xcodebuild/test-timeout.sh`](/Users/1amageek/Desktop/swift-lm/scripts/xcodebuild/test-timeout.sh) または [`scripts/xcodebuild/test-hang-guard.sh`](/Users/1amageek/Desktop/swift-lm/scripts/xcodebuild/test-hang-guard.sh) で再現性を確認する。
 - suite-level filter で切り分けられるように、重い smoke tests は output / prompt-state / capability などの関心ごとごとに分割する。
+- **ベンチマーク反復や `/loop` の `ScheduleWakeup` で 5 分 (300s) 以上の間隔を空けない** — Anthropic prompt cache の TTL が 5 分のため、それ以上空けると次回起動時にコンテキストを uncached で読み直すことになりコスト・応答速度が悪化する。cool-state を取る場合も 270s 未満で刻む。
 
 ### Compiler — Optimizing Kernel Compiler
 

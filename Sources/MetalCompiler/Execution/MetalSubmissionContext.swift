@@ -193,6 +193,10 @@ struct MetalSubmissionContext: @unchecked Sendable {
     }
 
     /// Fill buffer contents using unified compute+blit encoder.
+    ///
+    /// A device-visibility barrier is inserted after the fills to ensure
+    /// `hazardTrackingModeUntracked` buffers are flushed from any GPU cache
+    /// before subsequent kernels read them in a later command buffer.
     mutating func fillBuffers(
         _ fills: [(buffer: MTLBuffer, value: UInt8)],
         ephemeralResidency: MetalResidencyLease = .empty
@@ -201,15 +205,29 @@ struct MetalSubmissionContext: @unchecked Sendable {
             for fill in fills {
                 encoder.fill(buffer: fill.buffer, range: 0..<fill.buffer.length, value: fill.value)
             }
+            encoder.barrier(
+                afterEncoderStages: .dispatch,
+                beforeEncoderStages: .dispatch,
+                visibilityOptions: .device
+            )
         }
     }
 
     /// Copy buffers using unified compute+blit encoder.
+    ///
+    /// A device-visibility barrier is inserted before the copies to ensure
+    /// `hazardTrackingModeUntracked` source buffers are flushed from any GPU
+    /// cache left over from previous command buffers.
     mutating func copyBuffers(
         _ copies: [(from: MTLBuffer, sourceOffset: Int, to: MTLBuffer, destinationOffset: Int, size: Int)],
         ephemeralResidency: MetalResidencyLease = .empty
     ) throws {
         try withCompute(ephemeralResidency: ephemeralResidency) { encoder, _ in
+            encoder.barrier(
+                afterEncoderStages: .dispatch,
+                beforeEncoderStages: .blit,
+                visibilityOptions: .device
+            )
             for copy in copies {
                 encoder.copy(
                     sourceBuffer: copy.from, sourceOffset: copy.sourceOffset,

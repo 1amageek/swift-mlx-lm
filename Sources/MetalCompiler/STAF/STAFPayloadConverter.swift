@@ -58,8 +58,17 @@ struct STAFPayloadConverter: Sendable {
 
     private func repackMLXQuantized(entry: STAFConversionEntry, weightData: Data) throws -> Data {
         let modulePath = String(entry.name.dropLast(".weight".count))
-        let scalesData = try loadTensorFromSafetensors(name: modulePath + ".scales", shardURL: entry.shardURL)
-        let biasesData = try loadTensorFromSafetensors(name: modulePath + ".biases", shardURL: entry.shardURL)
+        let (rawScalesData, scalesDType) = try loadTensorFromSafetensorsWithDType(
+            name: modulePath + ".scales", shardURL: entry.shardURL)
+        let (rawBiasesData, biasesDType) = try loadTensorFromSafetensorsWithDType(
+            name: modulePath + ".biases", shardURL: entry.shardURL)
+
+        // MLX stores scales/biases in the original model's dtype (BF16 for
+        // bfloat16 models, F16 otherwise). The STAF Q4 block layout expects F16
+        // scale/bias. Convert BF16 → F16 up-front so the packing loop below can
+        // treat them uniformly as Float16.
+        let scalesData = try normalizeScaleToFloat16(rawScalesData, dtype: scalesDType)
+        let biasesData = try normalizeScaleToFloat16(rawBiasesData, dtype: biasesDType)
 
         guard let format = QuantizationFormatRegistry.format(for: entry.schemeIdentifier) else {
             throw STAFConversionError.unsupportedFormat(entry.schemeIdentifier.rawValue)
@@ -120,6 +129,13 @@ struct STAFPayloadConverter: Sendable {
     }
 
     private func loadTensorFromSafetensors(name: String, shardURL: URL) throws -> Data {
+        let (data, _) = try loadTensorFromSafetensorsWithDType(name: name, shardURL: shardURL)
+        return data
+    }
+
+    private func loadTensorFromSafetensorsWithDType(
+        name: String, shardURL: URL
+    ) throws -> (Data, SafetensorsDType) {
         let loader = SafetensorsLoader()
         let tensors = try loader.parseHeader(at: shardURL)
 
@@ -141,6 +157,59 @@ struct STAFPayloadConverter: Sendable {
               data.count == tensor.byteCount else {
             throw STAFConversionError.readFailed(name)
         }
-        return data
+        return (data, tensor.dtype)
+    }
+
+    /// Convert a raw scale/bias tensor to Float16 regardless of its source dtype.
+    ///
+    /// MLX affine quantization stores `scales` and `biases` in the same dtype
+    /// as the original model. For BF16 models (e.g. Gemma3/4), these arrive as
+    /// BF16 bytes even though the packed-weight kernel consumes them as Float16.
+    /// Reading BF16 bytes as Float16 produces catastrophically wrong scales and
+    /// biases, which is why prior Q4 bundles dequantized to near-identity layers
+    /// (hidden collapses to the input embedding, argmax echoes the last prompt
+    /// token). Normalize here so the kernel input is always F16.
+    private func normalizeScaleToFloat16(_ data: Data, dtype: SafetensorsDType) throws -> Data {
+        switch dtype {
+        case .float16:
+            return data
+        case .bfloat16:
+            let elementCount = data.count / 2
+            var output = Data(count: elementCount * MemoryLayout<Float16>.size)
+            data.withUnsafeBytes { source in
+                output.withUnsafeMutableBytes { destination in
+                    let bf16Words = source.bindMemory(to: UInt16.self)
+                    let halfs = destination.bindMemory(to: Float16.self)
+                    for index in 0..<elementCount {
+                        // BF16 is the upper 16 bits of a Float32; reconstruct
+                        // the Float32 and cast down to Float16.
+                        let widened = UInt32(bf16Words[index]) << 16
+                        let asFloat = Float(bitPattern: widened)
+                        halfs[index] = Float16(asFloat)
+                    }
+                }
+            }
+            return output
+        case .float32:
+            let elementCount = data.count / MemoryLayout<Float>.size
+            var output = Data(count: elementCount * MemoryLayout<Float16>.size)
+            data.withUnsafeBytes { source in
+                output.withUnsafeMutableBytes { destination in
+                    let floats = source.bindMemory(to: Float.self)
+                    let halfs = destination.bindMemory(to: Float16.self)
+                    for index in 0..<elementCount {
+                        halfs[index] = Float16(floats[index])
+                    }
+                }
+            }
+            return output
+        default:
+            // Scale/bias dtype is constrained by MLX to F16/BF16/F32. Any
+            // other dtype indicates a malformed bundle — fail loudly rather
+            // than silently producing bogus Q4 blocks.
+            fatalError(
+                "Unsupported scale/bias dtype for Q4 block packing: \(dtype.rawValue). " +
+                "Expected F16, BF16, or F32.")
+        }
     }
 }

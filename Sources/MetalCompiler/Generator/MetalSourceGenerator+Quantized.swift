@@ -16,12 +16,13 @@ public static func generateQuantizedGEMV_Q4G64(
         uint2 gid                      [[threadgroup_position_in_grid]],
         uint tid                       [[thread_index_in_threadgroup]],
         uint tiisg                     [[thread_index_in_simdgroup]],
-        uint sgitg                     [[simdgroup_index_in_threadgroup]]
+        uint sgitg                     [[simdgroup_index_in_threadgroup]],
+        uint2 tptg                     [[threads_per_threadgroup]]
     ) {
         const uint WEIGHTS_PER_BLOCK = 64;
         const uint BYTES_PER_BLOCK = 36;
-        const uint rowsPerThreadgroup = 2;
-        const uint THREADS_PER_THREADGROUP = SIMD_WIDTH * rowsPerThreadgroup;
+        const uint THREADS_PER_THREADGROUP = tptg.x;
+        const uint rowsPerThreadgroup = THREADS_PER_THREADGROUP / SIMD_WIDTH;
         const uint TILE_ELEMENTS = \(tileElements);
         const uint row = gid.x * rowsPerThreadgroup + sgitg;
         if (row >= outputDimension) return;
@@ -80,12 +81,13 @@ public static func generateQuantizedGEMV_Q4G128(
         uint2 gid                      [[threadgroup_position_in_grid]],
         uint tid                       [[thread_index_in_threadgroup]],
         uint tiisg                     [[thread_index_in_simdgroup]],
-        uint sgitg                     [[simdgroup_index_in_threadgroup]]
+        uint sgitg                     [[simdgroup_index_in_threadgroup]],
+        uint2 tptg                     [[threads_per_threadgroup]]
     ) {
         const uint WEIGHTS_PER_BLOCK = 128;
         const uint BYTES_PER_BLOCK = 68;
-        const uint rowsPerThreadgroup = 2;
-        const uint THREADS_PER_THREADGROUP = SIMD_WIDTH * rowsPerThreadgroup;
+        const uint THREADS_PER_THREADGROUP = tptg.x;
+        const uint rowsPerThreadgroup = THREADS_PER_THREADGROUP / SIMD_WIDTH;
         const uint TILE_ELEMENTS = \(tileElements);
         const uint row = gid.x * rowsPerThreadgroup + sgitg;
         if (row >= outputDimension) return;
@@ -144,11 +146,12 @@ public static func generateQuantizedGEMV_Q8(
         constant uint& outputDimension [[buffer(4)]],
         uint2 gid                      [[threadgroup_position_in_grid]],
         uint tiisg                     [[thread_index_in_simdgroup]],
-        uint sgitg                     [[simdgroup_index_in_threadgroup]]
+        uint sgitg                     [[simdgroup_index_in_threadgroup]],
+        uint2 tptg                     [[threads_per_threadgroup]]
     ) {
         const uint GROUP_SIZE = \(groupSize);
         const uint BYTES_PER_BLOCK = \(bytesPerBlock);
-        const uint rowsPerThreadgroup = 2;
+        const uint rowsPerThreadgroup = tptg.x / SIMD_WIDTH;
         const uint row = gid.x * rowsPerThreadgroup + sgitg;
         if (row >= outputDimension) return;
 
@@ -169,6 +172,91 @@ public static func generateQuantizedGEMV_Q8(
         }
         sum = simd_sum(sum);
         if (tiisg == 0) output[row] = \(bt)(sum);
+    }
+    """
+}
+
+/// Generate quantized GEMM (Q8 group, multi-row prefill sequence).
+///
+/// Signature matches `generateQuantizedGEMM_Q4` exactly so dispatch builder
+/// can route any Q* scheme through the same buffer-binding convention.
+///
+/// - Buffer 0: input  (F16 decode / F32 prefill)
+/// - Buffer 1: packed weights (uchar, 36/68 bytes per block for Q8G32/Q8G64)
+/// - Buffer 2: output (F16 decode / F32 prefill)
+/// - Buffer 3: inputDimension   (uint32)
+/// - Buffer 4: outputDimension  (uint32)
+/// - Buffer 5: sequenceLength   (uint32)
+/// - Buffer 6: inputRowStride   (uint32)
+///
+/// Block layout (per MLX Q8 affine):
+/// ```
+/// ┌──────────┬──────────┬──────────────────────────┐
+/// │scale (2B)│ zero (2B)│ packed quants (groupSize B) │
+/// └──────────┴──────────┴──────────────────────────┘
+/// ```
+/// Each quantized value is stored as uint8 (0..255). Dequant: `w = scale*q + zero`.
+public static func generateQuantizedGEMM_Q8(
+    name: String,
+    bufferPrecision: BufferPrecision,
+    groupSize: Int
+) -> String {
+    let bt = bufferPrecision.metalType
+    let bytesPerBlock = 4 + groupSize  // scale(f16) + zero(f16) + uint8 × groupSize
+    let tileElements = max(groupSize * 2, 256)
+    return """
+    kernel void \(name)(
+        device const \(bt)* input       [[buffer(0)]],
+        device const uchar* weight     [[buffer(1)]],
+        device \(bt)* output            [[buffer(2)]],
+        constant uint& inputDimension  [[buffer(3)]],
+        constant uint& outputDimension [[buffer(4)]],
+        constant uint& sequenceLength  [[buffer(5)]],
+        constant uint& inputRowStride  [[buffer(6)]],
+        uint2 gid                      [[threadgroup_position_in_grid]],
+        uint tid                       [[thread_index_in_threadgroup]],
+        uint tiisg                     [[thread_index_in_simdgroup]],
+        uint sgitg                     [[simdgroup_index_in_threadgroup]]
+    ) {
+        const uint GROUP_SIZE = \(groupSize);
+        const uint BYTES_PER_BLOCK = \(bytesPerBlock);
+        const uint rowsPerThreadgroup = 2;
+        const uint THREADS_PER_THREADGROUP = SIMD_WIDTH * rowsPerThreadgroup;
+        const uint TILE_ELEMENTS = \(tileElements);
+        const uint row = gid.x * rowsPerThreadgroup + sgitg;
+        const uint seqPos = gid.y;
+        if (row >= outputDimension || seqPos >= sequenceLength) return;
+
+        const uint blocksPerRow = inputDimension / GROUP_SIZE;
+        device const uchar* rowBase = weight + row * blocksPerRow * BYTES_PER_BLOCK;
+        device const \(bt)* inputRow = input + seqPos * inputRowStride;
+        threadgroup \(bt) inputTile[TILE_ELEMENTS];
+        float sum = 0.0f;
+
+        for (uint base = 0; base < inputDimension; base += TILE_ELEMENTS) {
+            const uint tileCount = min(TILE_ELEMENTS, inputDimension - base);
+            for (uint j = tid; j < tileCount; j += THREADS_PER_THREADGROUP) {
+                inputTile[j] = inputRow[base + j];
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+
+            const uint blockBase = base / GROUP_SIZE;
+            const uint blockCount = tileCount / GROUP_SIZE;
+            for (uint localBlock = 0; localBlock < blockCount; localBlock++) {
+                device const uchar* block = rowBase + (blockBase + localBlock) * BYTES_PER_BLOCK;
+                float blockScale = float(*(device const half*)(block));
+                float blockZero = float(*(device const half*)(block + 2));
+                device const uchar* quantized = block + 4;
+                const uint tileOffset = localBlock * GROUP_SIZE;
+                for (uint i = tiisg; i < GROUP_SIZE; i += SIMD_WIDTH) {
+                    float w = blockScale * float(quantized[i]) + blockZero;
+                    sum += w * float(inputTile[tileOffset + i]);
+                }
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+        }
+        sum = simd_sum(sum);
+        if (tiisg == 0) output[seqPos * outputDimension + row] = \(bt)(sum);
     }
     """
 }

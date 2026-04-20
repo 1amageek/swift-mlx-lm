@@ -1574,20 +1574,35 @@ private struct DirectQuantizedGEMM {
 
 /// Resolve the direct quantized GEMM kernel for a single projection.
 /// Returns nil when no direct kernel exists for this scheme (falls back to dequant→AMX).
+///
+/// IMPORTANT: The returned kernel MUST be a multi-row GEMM with `sequenceLength`
+/// and `inputRowStride` parameters. Decode-only GEMV kernels
+/// (`gemv_q4_g64` / `gemv_q4_g128` / `gemv_q8_g*`) must never be returned here
+/// — they ignore `gid.y` and silently corrupt non-first positions in prefill.
+///
+/// Buffer signature expected by dispatch builder:
+/// - Buffer 0: input, Buffer 1: weight, Buffer 2: output
+/// - Buffer 3: inputDim, Buffer 4: outputDim, Buffer 5: seqLen, Buffer 6: inputRowStride
 private func resolveDirectQuantizedGEMM(
     for scheme: QuantizationSchemeIdentifier
 ) -> DirectQuantizedGEMM? {
     switch scheme {
     case .q4Group64ScaleF16:
         return DirectQuantizedGEMM(
-            kernelName: "gemv_q4_g64",
+            kernelName: "gemm_q4_g64_f32s",
             threadgroupMemoryLength: max(64 * 2, 256) * MemoryLayout<Float>.size)
     case .q4Group128ScaleF16:
         return DirectQuantizedGEMM(
-            kernelName: "gemv_q4_g128",
+            kernelName: "gemm_q4_g128_f32s",
             threadgroupMemoryLength: max(128 * 2, 256) * MemoryLayout<Float>.size)
-    // Q8: no multi-row GEMM kernel yet (GEMV lacks sequenceLength/inputRowStride).
-    // Add cases here when Q8 GEMM kernels are implemented.
+    case .q8Group32ScaleF16:
+        return DirectQuantizedGEMM(
+            kernelName: "gemm_q8_g32_f32s",
+            threadgroupMemoryLength: max(32 * 2, 256) * MemoryLayout<Float>.size)
+    case .q8Group64ScaleF16:
+        return DirectQuantizedGEMM(
+            kernelName: "gemm_q8_g64_f32s",
+            threadgroupMemoryLength: max(64 * 2, 256) * MemoryLayout<Float>.size)
     default:
         return nil
     }

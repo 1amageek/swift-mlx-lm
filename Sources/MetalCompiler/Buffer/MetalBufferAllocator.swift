@@ -30,7 +30,14 @@ struct MetalBufferAllocator {
         let tokenOutputBuffer = context.device.makeBuffer(length: 4, options: cpuAccessOptions)!
 
         let kvCache: MetalKVCache?
-        if let firstSlot = walkContext.cacheSlots.first {
+        if !walkContext.cacheSlots.isEmpty {
+            // Mixed-attention models (e.g. Gemma4 sliding_attention head_dim=256 +
+            // full_attention head_dim=512) have per-layer head_dim variation. The cache
+            // slot stride must accommodate the LARGEST head_dim across all layers,
+            // otherwise kernels writing head_dim=512 into a slot sized for 256 overflow
+            // into adjacent layers/positions and cause non-determinism.
+            let maxHeadDimension = walkContext.cacheSlots.map(\.headDimension).max()!
+            let maxKVHeadCount = walkContext.cacheSlots.map(\.kvHeadCount).max()!
             let kvCachePolicy = context.inferencePolicy.kvCache
             let keyScheme = resolveKVCacheScheme(selection: kvCachePolicy.keyScheme, weightFormat: context.weightFormat)
             let valueScheme = resolveKVCacheScheme(selection: kvCachePolicy.valueScheme, weightFormat: context.weightFormat)
@@ -41,8 +48,8 @@ struct MetalBufferAllocator {
                     valueQuantizationScheme: valueScheme,
                     layoutMode: kvCachePolicy.layoutMode,
                     layerCount: walkContext.cacheSlots.count,
-                    kvHeadCount: firstSlot.kvHeadCount,
-                    headDimension: firstSlot.headDimension,
+                    kvHeadCount: maxKVHeadCount,
+                    headDimension: maxHeadDimension,
                     maximumSequenceLength: context.maximumSequenceLength
                 ),
                 qjlDimension: kvCachePolicy.qjlDimension,
@@ -176,7 +183,12 @@ struct MetalBufferAllocator {
         let prefillKVCache: MetalKVCache?
         if let sharedKVCache {
             prefillKVCache = sharedKVCache
-        } else if let firstSlot = walkContext.cacheSlots.first {
+        } else if !walkContext.cacheSlots.isEmpty {
+            // Per-layer head_dim / kv_head_count variation (e.g. Gemma4 mixed
+            // sliding/full attention) requires the cache stride to match the maximum.
+            // See makeDecodeBufferAllocation for the detailed rationale.
+            let maxHeadDimension = walkContext.cacheSlots.map(\.headDimension).max()!
+            let maxKVHeadCount = walkContext.cacheSlots.map(\.kvHeadCount).max()!
             let kvCachePolicy = context.inferencePolicy.kvCache
             let keyScheme = resolveKVCacheScheme(selection: kvCachePolicy.keyScheme, weightFormat: context.weightFormat)
             let valueScheme = resolveKVCacheScheme(selection: kvCachePolicy.valueScheme, weightFormat: context.weightFormat)
@@ -187,8 +199,8 @@ struct MetalBufferAllocator {
                     valueQuantizationScheme: valueScheme,
                     layoutMode: kvCachePolicy.layoutMode,
                     layerCount: walkContext.cacheSlots.count,
-                    kvHeadCount: firstSlot.kvHeadCount,
-                    headDimension: firstSlot.headDimension,
+                    kvHeadCount: maxKVHeadCount,
+                    headDimension: maxHeadDimension,
                     maximumSequenceLength: context.maximumSequenceLength
                 ),
                 qjlDimension: kvCachePolicy.qjlDimension,

@@ -1027,6 +1027,7 @@ public static func generateFlashAttentionKernel(
                     : read_kv_element(valueCache + vByteOffset, d, vQuantScheme, vHeadSlotBytes, headDim);
                 sharedOutput[d] = sharedOutput[d] * expCorrection + weight * v;
             }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
         }
 
         // --- Step 3: Write output ---
@@ -1696,6 +1697,7 @@ public static func generateBatchFlashAttention(
                 float v = read_kv_element(valueCache + vByteOffset, d, vQuantScheme, vHeadSlotBytes, headDim);
                 sharedOutput[d] = sharedOutput[d] * correction + weight * v;
             }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
         }
 
         float invSum = (sumExp > 0.0f) ? (1.0f / sumExp) : 0.0f;
@@ -2447,6 +2449,7 @@ public static func generateDirectScratchBatchFlashAttention(
                 float v = float(valueScratch[kOffset + d]);
                 sharedOutput[d] = sharedOutput[d] * correction + weight * v;
             }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
         }
 
         float invSum = (sumExp > 0.0f) ? (1.0f / sumExp) : 0.0f;

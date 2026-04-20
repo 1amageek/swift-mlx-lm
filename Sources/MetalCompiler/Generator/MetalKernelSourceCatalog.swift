@@ -192,10 +192,16 @@ struct MetalKernelSourceCatalog {
                             bufferPrecision: bufferPrecision,
                             weightFormat: effectiveWeightFormat))
                     } else if usesSequenceGEMV {
+                        // Prefill output-head GEMV. When the underlying weight is quantized
+                        // (Q4) we route via the dequant→BF16 pipeline: `needsDequantForAMX`
+                        // above emits the dequant kernel and effectiveWeightFormat becomes
+                        // .bfloat16. The generator must receive effectiveWeightFormat so the
+                        // dense GEMV template reads the dequantized BF16 buffer, not the
+                        // packed quantized blocks.
                         sources.append(MetalSourceGenerator.generateGEMV(
                             name: emittedName,
                             bufferPrecision: bufferPrecision,
-                            weightFormat: weightFormat,
+                            weightFormat: effectiveWeightFormat,
                             tileElements: 256))
                     } else if decodeFamily == .vocabDense {
                         sources.append(MetalSourceGenerator.generateVocabGEMV(
@@ -661,22 +667,23 @@ struct MetalKernelSourceCatalog {
         for weightFormat: WeightFormat,
         bufferPrecision: BufferPrecision
     ) -> String? {
+        let isPrefill = bufferPrecision == .float32
         switch (weightFormat, bufferPrecision) {
         case (.quantized4Bit(let groupSize), _):
             switch groupSize {
             case 64:
-                return "gemv_q4_g64"
+                return isPrefill ? "gemm_q4_g64_f32s" : "gemv_q4_g64"
             case 128:
-                return "gemv_q4_g128"
+                return isPrefill ? "gemm_q4_g128_f32s" : "gemv_q4_g128"
             default:
                 return nil
             }
         case (.quantized8Bit(let groupSize), _):
             switch groupSize {
             case 32:
-                return "gemv_q8_g32"
+                return isPrefill ? "gemm_q8_g32_f32s" : "gemv_q8_g32"
             case 64:
-                return "gemv_q8_g64"
+                return isPrefill ? "gemm_q8_g64_f32s" : "gemv_q8_g64"
             default:
                 return nil
             }
@@ -713,13 +720,24 @@ struct MetalKernelSourceCatalog {
             default:
                 return nil
             }
-        case (.quantized8Bit(let groupSize), _):
+        case (.quantized8Bit(let groupSize), .float32):
             guard groupSize == 32 || groupSize == 64 else { return nil }
-            return MetalSourceGenerator.generateQuantizedGEMV_Q8(
+            return MetalSourceGenerator.generateQuantizedGEMM_Q8(
                 name: kernelName,
                 bufferPrecision: bufferPrecision,
                 groupSize: groupSize
             )
+        case (.quantized8Bit(let groupSize), _):
+            switch groupSize {
+            case 32, 64:
+                return MetalSourceGenerator.generateQuantizedGEMV_Q8(
+                    name: kernelName,
+                    bufferPrecision: bufferPrecision,
+                    groupSize: groupSize
+                )
+            default:
+                return nil
+            }
         default:
             return nil
         }

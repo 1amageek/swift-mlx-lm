@@ -497,6 +497,115 @@ struct MetalPrefillExecutor: @unchecked Sendable {
         return snapshots
     }
 
+    /// Kind of KV cache slice to snapshot.
+    enum KVCacheSliceKind: Sendable {
+        case keys
+        case values
+    }
+
+    /// Snapshot of a KV cache layer slice after a full prefill run.
+    struct KVCacheLayerSnapshot: Sendable {
+        let bytes: [UInt8]
+        let scheme: QuantizationSchemeIdentifier
+        let bytesPerHeadSlot: Int
+        let kvHeadCount: Int
+        let maximumSequenceLength: Int
+    }
+
+    /// Capture a full layer slice of the KV cache after running prefill to completion.
+    ///
+    /// Returns raw bytes of one layer's K or V buffer (all heads, all positions).
+    /// Byte layout follows `cache.specification.layoutMode`:
+    /// - sequenceMajor: [head][seq][dim]
+    /// - headMajor:     [seq][head][dim]
+    ///
+    /// Used for cross-run determinism probes without decoding to F32.
+    func captureKVCacheLayerSnapshot(
+        prefillPlan: MetalPrefillPlan,
+        submission: inout MetalSubmissionContext,
+        position: Int,
+        tokens: [Int32],
+        ropePositionAxesByTokenIndex: [(UInt32, UInt32, UInt32)]? = nil,
+        layerIndex: Int,
+        kind: KVCacheSliceKind,
+        ephemeralResidency: MetalResidencyLease = .empty
+    ) throws -> KVCacheLayerSnapshot {
+        guard !tokens.isEmpty else {
+            throw MetalCompilerError.deviceSetupFailed("KV cache snapshot requires non-empty tokens")
+        }
+        guard tokens.count <= prefillPlan.maximumSequenceLength else {
+            throw MetalCompilerError.deviceSetupFailed("KV cache snapshot token count exceeds max seq length")
+        }
+        guard let cache = prefillPlan.buffers.kvCache else {
+            throw MetalCompilerError.deviceSetupFailed("Prefill plan has no KV cache")
+        }
+        let spec = cache.specification
+        guard layerIndex >= 0, layerIndex < spec.layerCount else {
+            throw MetalCompilerError.deviceSetupFailed("KV cache layer index out of range")
+        }
+        let scheme = (kind == .keys) ? spec.keyQuantizationScheme : spec.valueQuantizationScheme
+        let sourceBuffer = (kind == .keys) ? cache.keys : cache.values
+        let bytesPerLayer = spec.bytesPerLayer(scheme: scheme)
+        let layerOffset = spec.layerOffset(layer: layerIndex, scheme: scheme)
+
+        guard let staging = submission.device.makeBuffer(
+            length: bytesPerLayer, options: [.storageModeShared]
+        ) else {
+            throw MetalCompilerError.deviceSetupFailed("Cannot allocate KV cache staging buffer")
+        }
+
+        let sequenceLength = tokens.count
+        populatePrefillInputs(
+            prefillPlan: prefillPlan,
+            position: position,
+            tokens: tokens,
+            ropePositionAxesByTokenIndex: ropePositionAxesByTokenIndex
+        )
+        writeRuntimeConstants(
+            prefillPlan: prefillPlan,
+            basePosition: position,
+            sequenceLength: sequenceLength,
+            hiddenConversionElementCount: 0
+        )
+        try encodePrefillPasses(
+            submission: &submission,
+            prefillPlan: prefillPlan,
+            basePosition: position,
+            sequenceLength: sequenceLength,
+            ephemeralResidency: ephemeralResidency
+        )
+
+        // Diagnostic: readback via MTL3 blit command queue. The MTL4
+        // `submission.copyBuffers` path occasionally sees zeros despite
+        // `hazardTrackingModeUntracked` cache flushes; using a fresh MTL3
+        // blit queue matches the working sanity-check path and isolates
+        // whether the issue is write visibility vs readback mechanism.
+        guard let readbackQueue = submission.device.makeCommandQueue() else {
+            throw MetalCompilerError.deviceSetupFailed("Cannot create KV snapshot readback queue")
+        }
+        guard let cb = readbackQueue.makeCommandBuffer(),
+              let blit = cb.makeBlitCommandEncoder() else {
+            throw MetalCompilerError.deviceSetupFailed("Cannot create KV snapshot blit encoder")
+        }
+        blit.copy(
+            from: sourceBuffer, sourceOffset: layerOffset,
+            to: staging, destinationOffset: 0, size: bytesPerLayer
+        )
+        blit.endEncoding()
+        cb.commit()
+        cb.waitUntilCompleted()
+
+        let pointer = staging.contents().bindMemory(to: UInt8.self, capacity: bytesPerLayer)
+        let bytes: [UInt8] = Array(UnsafeBufferPointer<UInt8>(start: pointer, count: bytesPerLayer))
+        return KVCacheLayerSnapshot(
+            bytes: bytes,
+            scheme: scheme,
+            bytesPerHeadSlot: spec.bytesPerHeadSlot(scheme: scheme),
+            kvHeadCount: spec.kvHeadCount,
+            maximumSequenceLength: spec.maximumSequenceLength
+        )
+    }
+
     func captureLastTokenResidualSnapshots(
         prefillPlan: MetalPrefillPlan,
         submission: inout MetalSubmissionContext,
@@ -1087,11 +1196,14 @@ struct MetalPrefillExecutor: @unchecked Sendable {
         slotIndex: Int,
         rowStride: Int
     ) -> Int {
-        let _ = rowStride
+        // Slot-level addressing: each slot spans slotDimension * maxSeqLen floats.
+        // Within a slot, the per-position row stride depends on the producer kernel
+        // (e.g. attention output uses totalQDim < slotDimension), so honor the
+        // caller-provided rowStride to locate the last-token row correctly.
         let slotBase = slotIndex
             * prefillPlan.slotDimension
             * prefillPlan.maximumSequenceLength
-        let lastTokenBase = slotBase + (sequenceLength - 1) * prefillPlan.slotDimension
+        let lastTokenBase = slotBase + (sequenceLength - 1) * rowStride
         return lastTokenBase * MemoryLayout<Float>.stride
     }
 

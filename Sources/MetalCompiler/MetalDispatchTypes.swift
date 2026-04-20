@@ -61,13 +61,24 @@ public enum WeightFormat: Sendable, Equatable {
     }
 
     /// MSL expression to convert a weight value to float.
+    ///
+    /// Only valid for dense formats (float16 / bfloat16 / float32). Block-packed
+    /// quantized formats (Q4, Q8, ...) cannot produce a single-element read
+    /// expression because they require per-block scale/zero lookup; they must
+    /// be routed to dedicated quantized kernels (`gemv_q4_*`, `gemv_q8_*`, etc.).
+    ///
+    /// Calling this on a quantized format indicates a routing bug — the caller
+    /// should have dispatched the work to a quantized kernel path instead of a
+    /// dense GEMV/GEMM template. We trap loudly rather than emit undefined MSL
+    /// (`dequantize(...)`) that would fail at shader compile time with a
+    /// confusing diagnostic.
     public func readExpression(_ expr: String) -> String {
         switch self {
         case .float16: return "float(\(expr))"
         case .bfloat16: return "bf16_to_float(\(expr))"
         case .float32: return "(\(expr))"
         case .quantized4Bit, .quantized8Bit:
-            return "dequantize(\(expr))"
+            fatalError("WeightFormat.readExpression called with quantized format \(self); quantized weights must be routed to a dedicated quantized kernel (gemv_q4_*, gemv_q8_*), not a dense GEMV/GEMM template. This indicates a routing bug — the caller should pass `effectiveWeightFormat` (post dequant→BF16 substitution) rather than the original quantized `weightFormat`.")
         }
     }
 

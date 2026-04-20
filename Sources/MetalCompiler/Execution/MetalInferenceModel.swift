@@ -742,6 +742,64 @@ public struct MetalInferenceModel: @unchecked Sendable {
         )
     }
 
+    /// Kind of KV cache slice to snapshot.
+    public enum DebugKVCacheSliceKind: Sendable {
+        case keys
+        case values
+    }
+
+    /// Snapshot of a KV cache layer slice after a full prefill run.
+    public struct DebugKVCacheLayerSnapshot: Sendable {
+        public let bytes: [UInt8]
+        public let scheme: QuantizationSchemeIdentifier
+        public let bytesPerHeadSlot: Int
+        public let kvHeadCount: Int
+        public let maximumSequenceLength: Int
+    }
+
+    /// Capture one layer's KV cache slice after running prefill to completion.
+    ///
+    /// Used for cross-run determinism probes. The returned bytes follow
+    /// `cache.specification.layoutMode`:
+    /// - sequenceMajor: [head][seq][dim]
+    /// - headMajor:     [seq][head][dim]
+    public mutating func debugPrefillKVCacheLayerSnapshot(
+        tokens: [Int32],
+        layerIndex: Int,
+        kind: DebugKVCacheSliceKind,
+        prefillPerLayerInputs: [[[Float]]]? = nil
+    ) throws -> DebugKVCacheLayerSnapshot? {
+        guard let prefillPlan else { return nil }
+        guard !tokens.isEmpty else { return nil }
+        guard tokens.count <= prefillPlan.maximumSequenceLength else {
+            throw MetalCompilerError.deviceSetupFailed(
+                "Debug KV cache snapshot token count exceeds maximum sequence length"
+            )
+        }
+        resetState()
+        if let prefillPerLayerInputs {
+            try writePrefillPerLayerInputs(prefillPerLayerInputs)
+        }
+        let executorKind: MetalPrefillExecutor.KVCacheSliceKind =
+            (kind == .keys) ? .keys : .values
+        let snapshot = try prefillExecutor.captureKVCacheLayerSnapshot(
+            prefillPlan: prefillPlan,
+            submission: &submission,
+            position: position,
+            tokens: tokens,
+            layerIndex: layerIndex,
+            kind: executorKind,
+            ephemeralResidency: stableResidencyLease
+        )
+        return DebugKVCacheLayerSnapshot(
+            bytes: snapshot.bytes,
+            scheme: snapshot.scheme,
+            bytesPerHeadSlot: snapshot.bytesPerHeadSlot,
+            kvHeadCount: snapshot.kvHeadCount,
+            maximumSequenceLength: snapshot.maximumSequenceLength
+        )
+    }
+
     public mutating func debugPrefillLastTokenScratchSnapshots(
         hiddenStates: [[Float]],
         ropePositionAxes: [(UInt32, UInt32, UInt32)],

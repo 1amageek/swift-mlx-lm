@@ -30,7 +30,67 @@ struct MetalEntryCollector {
         )
         let unfusedCount = walkContext.entries.count
         let fusedEntries = fuseCrossComponent(walkContext.entries, context: fusionContext)
-        return (walkContext, unfusedCount, fusedEntries)
+        let finalEntries = decomposeQuantizedBatchedProjectionsForDecode(
+            fusedEntries,
+            stafWeightStore: context.stafWeightStore,
+            kernelContext: kernelContext
+        )
+        return (walkContext, unfusedCount, finalEntries)
+    }
+
+    // MARK: - Quantized BatchedProjection Decomposition
+
+    /// For decode, decompose `BatchedProjection` into per-projection `LinearFragment`
+    /// entries when any projection has a quantized weight format.
+    ///
+    /// Reason: the batched GEMV kernel (`batched_gemv2/3/4`) is generated assuming
+    /// dense weight layout (`weightRow[base + j]`). With Q4/Q8 block-packed weights
+    /// this emits `dequantize(...)` without a matching helper — Metal compilation
+    /// fails. Dense BF16/FP16 decode keeps `BatchedProjection` intact and benefits
+    /// from multi-output GEMV.
+    ///
+    /// Prefill is unaffected: the catalog already decomposes for source generation
+    /// (`sourceGenerationEntries` in `MetalKernelSourceCatalog`) and prefill step
+    /// building routes through `buildBatchedProjectionPrefillSteps`.
+    private func decomposeQuantizedBatchedProjectionsForDecode(
+        _ entries: [DispatchEntry],
+        stafWeightStore: STAFWeightStore?,
+        kernelContext: KernelContext
+    ) -> [DispatchEntry] {
+        // Only decode is affected (prefill has a separate path).
+        guard kernelContext.bufferPrecision != .float32 else { return entries }
+        guard let stafWeightStore else { return entries }
+
+        return entries.flatMap { entry -> [DispatchEntry] in
+            guard let batched = entry.fragment as? BatchedProjection else {
+                return [entry]
+            }
+            let hasQuantized = batched.projections.contains { projection in
+                guard let binding = entry.parameterBindings.first(where: { $0.role == projection.field }),
+                      let info = stafWeightStore.tensor(for: binding.tensorName) else {
+                    return false
+                }
+                // Any sub-16-bit weight format uses block-packed dequantization
+                // and therefore cannot flow through the dense batched GEMV path.
+                return info.format.bits < 16
+            }
+            guard hasQuantized else { return [entry] }
+
+            return batched.projections.map { projection in
+                DispatchEntry(
+                    index: entry.index,
+                    fragment: LinearFragment(
+                        field: projection.field,
+                        inputDimension: projection.inputDimension,
+                        outputDimension: projection.outputDimension,
+                        isOutput: false
+                    ),
+                    parameterBindings: entry.parameterBindings,
+                    layerIndex: entry.layerIndex,
+                    compositeID: entry.compositeID
+                )
+            }
+        }
     }
 
     // MARK: - Cross-Component Optimization
