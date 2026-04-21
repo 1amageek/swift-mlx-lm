@@ -47,8 +47,12 @@ public enum WeightFormat: Sendable, Equatable {
     case float32
     /// Quantized 2-bit (aligned) with group size.
     case quantized2Bit(groupSize: Int)
+    /// Quantized 3-bit (non-aligned: 8 weights per 3 bytes) with group size.
+    case quantized3Bit(groupSize: Int)
     /// Quantized 4-bit (aligned) with group size.
     case quantized4Bit(groupSize: Int)
+    /// Quantized 5-bit (non-aligned: 8 weights per 5 bytes) with group size.
+    case quantized5Bit(groupSize: Int)
     /// Quantized 6-bit (non-aligned: 4 weights per 3 bytes) with group size.
     case quantized6Bit(groupSize: Int)
     /// Quantized 8-bit (aligned) with group size.
@@ -60,7 +64,8 @@ public enum WeightFormat: Sendable, Equatable {
         case .float16: return "half"
         case .bfloat16: return "uint16_t"
         case .float32: return "float"
-        case .quantized2Bit, .quantized4Bit, .quantized6Bit, .quantized8Bit:
+        case .quantized2Bit, .quantized3Bit, .quantized4Bit,
+             .quantized5Bit, .quantized6Bit, .quantized8Bit:
             return "uchar"
         }
     }
@@ -76,14 +81,16 @@ public enum WeightFormat: Sendable, Equatable {
         case .float16: return "float(\(expr))"
         case .bfloat16: return "bf16_to_float(\(expr))"
         case .float32: return "(\(expr))"
-        case .quantized2Bit, .quantized4Bit, .quantized6Bit, .quantized8Bit:
+        case .quantized2Bit, .quantized3Bit, .quantized4Bit,
+             .quantized5Bit, .quantized6Bit, .quantized8Bit:
             fatalError("WeightFormat.readExpression called with quantized format \(self); quantized weights must be routed to a dedicated quantized kernel, not a dense GEMV/GEMM template. The caller should pass `effectiveWeightFormat` (post dequant→BF16 substitution) rather than the original quantized `weightFormat`.")
         }
     }
 
     var isQuantized: Bool {
         switch self {
-        case .quantized2Bit, .quantized4Bit, .quantized6Bit, .quantized8Bit:
+        case .quantized2Bit, .quantized3Bit, .quantized4Bit,
+             .quantized5Bit, .quantized6Bit, .quantized8Bit:
             return true
         case .float16, .bfloat16, .float32:
             return false
@@ -96,7 +103,8 @@ public enum WeightFormat: Sendable, Equatable {
             return MemoryLayout<UInt16>.stride
         case .float32:
             return MemoryLayout<Float>.stride
-        case .quantized2Bit, .quantized4Bit, .quantized6Bit, .quantized8Bit:
+        case .quantized2Bit, .quantized3Bit, .quantized4Bit,
+             .quantized5Bit, .quantized6Bit, .quantized8Bit:
             return MemoryLayout<UInt8>.stride
         }
     }
@@ -105,7 +113,9 @@ public enum WeightFormat: Sendable, Equatable {
     var quantizationBits: Int? {
         switch self {
         case .quantized2Bit: return 2
+        case .quantized3Bit: return 3
         case .quantized4Bit: return 4
+        case .quantized5Bit: return 5
         case .quantized6Bit: return 6
         case .quantized8Bit: return 8
         case .float16, .bfloat16, .float32: return nil
@@ -115,10 +125,36 @@ public enum WeightFormat: Sendable, Equatable {
     /// Group size for quantized formats (nil for dense).
     var quantizationGroupSize: Int? {
         switch self {
-        case .quantized2Bit(let g), .quantized4Bit(let g),
+        case .quantized2Bit(let g), .quantized3Bit(let g),
+             .quantized4Bit(let g), .quantized5Bit(let g),
              .quantized6Bit(let g), .quantized8Bit(let g):
             return g
         case .float16, .bfloat16, .float32: return nil
+        }
+    }
+
+    /// Resolve the protocol-driven `QuantizationFormat` instance for this enum case.
+    ///
+    /// Returns nil for dense formats and for quantized (bits, groupSize) pairs that
+    /// the registry does not recognise. Used by the catalog and prefill builder to
+    /// select kernels through `QuantizationFormat` properties instead of switching
+    /// on enum cases — the long-term Phase 5 migration path.
+    var quantizationFormat: (any QuantizationFormat)? {
+        switch self {
+        case .quantized2Bit(let g):
+            return QuantizationFormatRegistry.formatForMLXQuantization(bits: 2, groupSize: g)
+        case .quantized3Bit(let g):
+            return QuantizationFormatRegistry.formatForMLXQuantization(bits: 3, groupSize: g)
+        case .quantized4Bit(let g):
+            return QuantizationFormatRegistry.formatForMLXQuantization(bits: 4, groupSize: g)
+        case .quantized5Bit(let g):
+            return QuantizationFormatRegistry.formatForMLXQuantization(bits: 5, groupSize: g)
+        case .quantized6Bit(let g):
+            return QuantizationFormatRegistry.formatForMLXQuantization(bits: 6, groupSize: g)
+        case .quantized8Bit(let g):
+            return QuantizationFormatRegistry.formatForMLXQuantization(bits: 8, groupSize: g)
+        case .float16, .bfloat16, .float32:
+            return nil
         }
     }
 }

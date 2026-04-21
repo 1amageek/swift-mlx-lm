@@ -30,7 +30,7 @@ struct MetalKernelNameResolver {
         case .float32:
             return .float32
         case .float16,
-             .quantized2Bit, .quantized4Bit, .quantized6Bit, .quantized8Bit:
+             .quantized2Bit, .quantized3Bit, .quantized4Bit, .quantized5Bit, .quantized6Bit, .quantized8Bit:
             return .float16
         }
     }

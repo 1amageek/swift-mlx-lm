@@ -36,8 +36,22 @@ public struct GatherFragment: PrimitiveMetalKernelFragment {
             return context.bufferPrecision == .float32
                 ? "embedding_lookup_seq_f32\(scaled)"
                 : "embedding_lookup\(scaled)"
-        case (_, .quantized2Bit), (_, .quantized6Bit):
-            fatalError("GatherFragment.kernelName: embedding lookup kernel for \(context.weightFormat) is not implemented. Quantized embedding tables currently support Q4 and Q8 only; Q2/Q6 requires a dedicated embedding_lookup_q2_* / _q6_* kernel.")
+        case (_, .quantized2Bit(let groupSize)):
+            return context.bufferPrecision == .float32
+                ? "embedding_lookup_seq_q2_g\(groupSize)_f32\(scaled)"
+                : "embedding_lookup_q2_g\(groupSize)\(scaled)"
+        case (_, .quantized3Bit(let groupSize)):
+            return context.bufferPrecision == .float32
+                ? "embedding_lookup_seq_q3_g\(groupSize)_f32\(scaled)"
+                : "embedding_lookup_q3_g\(groupSize)\(scaled)"
+        case (_, .quantized5Bit(let groupSize)):
+            return context.bufferPrecision == .float32
+                ? "embedding_lookup_seq_q5_g\(groupSize)_f32\(scaled)"
+                : "embedding_lookup_q5_g\(groupSize)\(scaled)"
+        case (_, .quantized6Bit(let groupSize)):
+            return context.bufferPrecision == .float32
+                ? "embedding_lookup_seq_q6_g\(groupSize)_f32\(scaled)"
+                : "embedding_lookup_q6_g\(groupSize)\(scaled)"
         }
     }
     public var dispatchDimension: MetalDispatchDimension { .gather(count: embeddingDimension) }
@@ -58,6 +72,17 @@ public struct GatherFragment: PrimitiveMetalKernelFragment {
                 name: name,
                 bufferPrecision: bufferPrecision,
                 groupSize: groupSize,
+                isSequence: bufferPrecision == .float32,
+                embeddingScale: embeddingScale
+            )
+        case .quantized2Bit, .quantized3Bit, .quantized5Bit, .quantized6Bit:
+            guard let format = weightFormat.quantizationFormat else {
+                fatalError("GatherFragment.kernelSource: registry missing format for \(weightFormat)")
+            }
+            return MetalSourceGenerator.generateUnifiedQuantizedEmbeddingLookup(
+                name: name,
+                format: format,
+                bufferPrecision: bufferPrecision,
                 isSequence: bufferPrecision == .float32,
                 embeddingScale: embeddingScale
             )

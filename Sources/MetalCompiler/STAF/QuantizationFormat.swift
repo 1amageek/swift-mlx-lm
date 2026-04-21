@@ -342,6 +342,164 @@ public struct AffineQ2Group32Format: QuantizationFormat {
     public init() {}
 }
 
+// MARK: - 3-bit Affine Formats (non-aligned)
+
+/// 3-bit affine quantization with group size 16.
+///
+/// Non-aligned packing (MLX `extract_bits<3>`): 8 weights share 3 bytes.
+/// Block layout:
+/// ```
+/// ┌──────────┬──────────┬───────────────────┐
+/// │scale (2B)│ zero (2B)│ packed quants (6B)│
+/// └──────────┴──────────┴───────────────────┘
+/// 10 bytes per block, 16 weights (2 packs of 8)
+/// ```
+public struct AffineQ3Group16Format: QuantizationFormat {
+    public var schemeIdentifier: QuantizationSchemeIdentifier { .q3Group16ScaleF16 }
+    public var blockStructName: String { "BlockQ3Affine16" }
+    public var gemvKernelName: String { "gemv_q3_g16" }
+    public func gemmKernelName(bufferPrecision: BufferPrecision) -> String {
+        bufferPrecision == .float32 ? "gemm_q3_g16_f32s" : "gemm_q3_g16"
+    }
+    public var weightsPerBlock: Int { 16 }
+    public var bytesPerBlock: Int { 4 + 6 }
+    public var bits: Int { 3 }
+    public var groupSize: Int { 16 }
+
+    public var isQuantized: Bool { true }
+    public var bufferElementType: String { "uchar" }
+    public var mslDeclarations: String {
+        Q3AffineMSL.blockStruct(name: blockStructName, weightsPerBlock: weightsPerBlock)
+    }
+
+    public func emitGroupDequant(
+        blocksVar: String,
+        blockIndexVar: String,
+        outputArrayVar: String
+    ) -> String? {
+        Q3AffineMSL.groupDequant(
+            blocksVar: blocksVar,
+            outputArrayVar: outputArrayVar,
+            weightsPerBlock: weightsPerBlock
+        )
+    }
+
+    public init() {}
+}
+
+/// 3-bit affine quantization with group size 32.
+public struct AffineQ3Group32Format: QuantizationFormat {
+    public var schemeIdentifier: QuantizationSchemeIdentifier { .q3Group32ScaleF16 }
+    public var blockStructName: String { "BlockQ3Affine32" }
+    public var gemvKernelName: String { "gemv_q3_g32" }
+    public func gemmKernelName(bufferPrecision: BufferPrecision) -> String {
+        bufferPrecision == .float32 ? "gemm_q3_g32_f32s" : "gemm_q3_g32"
+    }
+    public var weightsPerBlock: Int { 32 }
+    public var bytesPerBlock: Int { 4 + 12 }
+    public var bits: Int { 3 }
+    public var groupSize: Int { 32 }
+
+    public var isQuantized: Bool { true }
+    public var bufferElementType: String { "uchar" }
+    public var mslDeclarations: String {
+        Q3AffineMSL.blockStruct(name: blockStructName, weightsPerBlock: weightsPerBlock)
+    }
+
+    public func emitGroupDequant(
+        blocksVar: String,
+        blockIndexVar: String,
+        outputArrayVar: String
+    ) -> String? {
+        Q3AffineMSL.groupDequant(
+            blocksVar: blocksVar,
+            outputArrayVar: outputArrayVar,
+            weightsPerBlock: weightsPerBlock
+        )
+    }
+
+    public init() {}
+}
+
+// MARK: - 5-bit Affine Formats (non-aligned)
+
+/// 5-bit affine quantization with group size 32.
+///
+/// Non-aligned packing (MLX `extract_bits<5>`): 8 weights share 5 bytes.
+/// Block layout:
+/// ```
+/// ┌──────────┬──────────┬────────────────────┐
+/// │scale (2B)│ zero (2B)│ packed quants (20B)│
+/// └──────────┴──────────┴────────────────────┘
+/// 24 bytes per block, 32 weights (4 packs of 8)
+/// ```
+public struct AffineQ5Group32Format: QuantizationFormat {
+    public var schemeIdentifier: QuantizationSchemeIdentifier { .q5Group32ScaleF16 }
+    public var blockStructName: String { "BlockQ5Affine32" }
+    public var gemvKernelName: String { "gemv_q5_g32" }
+    public func gemmKernelName(bufferPrecision: BufferPrecision) -> String {
+        bufferPrecision == .float32 ? "gemm_q5_g32_f32s" : "gemm_q5_g32"
+    }
+    public var weightsPerBlock: Int { 32 }
+    public var bytesPerBlock: Int { 4 + 20 }
+    public var bits: Int { 5 }
+    public var groupSize: Int { 32 }
+
+    public var isQuantized: Bool { true }
+    public var bufferElementType: String { "uchar" }
+    public var mslDeclarations: String {
+        Q5AffineMSL.blockStruct(name: blockStructName, weightsPerBlock: weightsPerBlock)
+    }
+
+    public func emitGroupDequant(
+        blocksVar: String,
+        blockIndexVar: String,
+        outputArrayVar: String
+    ) -> String? {
+        Q5AffineMSL.groupDequant(
+            blocksVar: blocksVar,
+            outputArrayVar: outputArrayVar,
+            weightsPerBlock: weightsPerBlock
+        )
+    }
+
+    public init() {}
+}
+
+/// 5-bit affine quantization with group size 64.
+public struct AffineQ5Group64Format: QuantizationFormat {
+    public var schemeIdentifier: QuantizationSchemeIdentifier { .q5Group64ScaleF16 }
+    public var blockStructName: String { "BlockQ5Affine64" }
+    public var gemvKernelName: String { "gemv_q5_g64" }
+    public func gemmKernelName(bufferPrecision: BufferPrecision) -> String {
+        bufferPrecision == .float32 ? "gemm_q5_g64_f32s" : "gemm_q5_g64"
+    }
+    public var weightsPerBlock: Int { 64 }
+    public var bytesPerBlock: Int { 4 + 40 }
+    public var bits: Int { 5 }
+    public var groupSize: Int { 64 }
+
+    public var isQuantized: Bool { true }
+    public var bufferElementType: String { "uchar" }
+    public var mslDeclarations: String {
+        Q5AffineMSL.blockStruct(name: blockStructName, weightsPerBlock: weightsPerBlock)
+    }
+
+    public func emitGroupDequant(
+        blocksVar: String,
+        blockIndexVar: String,
+        outputArrayVar: String
+    ) -> String? {
+        Q5AffineMSL.groupDequant(
+            blocksVar: blocksVar,
+            outputArrayVar: outputArrayVar,
+            weightsPerBlock: weightsPerBlock
+        )
+    }
+
+    public init() {}
+}
+
 // MARK: - 6-bit Affine Formats (non-aligned)
 
 /// 6-bit affine quantization with group size 16.
@@ -481,6 +639,33 @@ public struct AffineQ8Group64Format: QuantizationFormat {
     public init() {}
 }
 
+/// 8-bit affine quantization with group size 128.
+public struct AffineQ8Group128Format: QuantizationFormat {
+    public var schemeIdentifier: QuantizationSchemeIdentifier { .q8Group128ScaleF16 }
+    public var blockStructName: String { "BlockQ8Affine128" }
+    public var gemvKernelName: String { "gemv_q8_g128" }
+    public func gemmKernelName(bufferPrecision: BufferPrecision) -> String {
+        bufferPrecision == .float32 ? "gemm_q8_g128_f32s" : "gemm_q8_g128"
+    }
+    public var weightsPerBlock: Int { 128 }
+    public var bytesPerBlock: Int { 4 + 128 }
+    public var bits: Int { 8 }
+    public var groupSize: Int { 128 }
+
+    public var isQuantized: Bool { true }
+    public var bufferElementType: String { "uchar" }
+    public var mslDeclarations: String { Q8AffineMSL.blockStruct(name: blockStructName, weightsPerBlock: weightsPerBlock) }
+
+    public func perWeightReadExpression(
+        blocksVar: String,
+        weightIndexVar: String
+    ) -> String? {
+        Q8AffineMSL.perWeightExpression(blocksVar: blocksVar, weightIndexVar: weightIndexVar)
+    }
+
+    public init() {}
+}
+
 // MARK: - MSL Fragment Helpers
 
 /// MSL source fragments for Q2 affine block formats.
@@ -532,6 +717,112 @@ enum Q4AffineMSL {
     /// even k → low nibble, odd k → high nibble.
     static func perWeightExpression(blocksVar: String, weightIndexVar: String) -> String {
         "(scale * float((\(blocksVar)[(\(weightIndexVar)) >> 1] >> (((\(weightIndexVar)) & 1) * 4)) & 0xF) + zero)"
+    }
+}
+
+/// MSL source fragments for Q3 affine block formats.
+///
+/// Non-aligned packing (see MLX `mlx/backend/cpu/quantized.cpp` `extract_bits<3>`):
+/// 8 weights share 3 bytes.
+/// - w[0] = b0 & 0x07
+/// - w[1] = (b0 >> 3) & 0x07
+/// - w[2] = ((b0 >> 6) & 0x03) | ((b1 & 0x01) << 2)
+/// - w[3] = (b1 >> 1) & 0x07
+/// - w[4] = (b1 >> 4) & 0x07
+/// - w[5] = ((b1 >> 7) & 0x01) | ((b2 & 0x03) << 1)
+/// - w[6] = (b2 >> 2) & 0x07
+/// - w[7] = (b2 >> 5) & 0x07
+enum Q3AffineMSL {
+    /// Block struct definition. Packed bytes = (weightsPerBlock / 8) * 3.
+    static func blockStruct(name: String, weightsPerBlock: Int) -> String {
+        let packedBytes = (weightsPerBlock / 8) * 3
+        return """
+        struct \(name) {
+            half scale;
+            half zero;
+            uchar qs[\(packedBytes)];
+        };
+        """
+    }
+
+    /// Emits a loop that expands one block's `weightsPerBlock` weights into
+    /// `outputArrayVar[0..<weightsPerBlock]` as float. Assumes `scale` and
+    /// `zero` are captured as `float` locals by the caller.
+    static func groupDequant(
+        blocksVar: String,
+        outputArrayVar: String,
+        weightsPerBlock: Int
+    ) -> String {
+        let numGroups = weightsPerBlock / 8
+        return """
+        for (uint g = 0; g < \(numGroups); g++) {
+                            uchar b0 = \(blocksVar)[g * 3 + 0];
+                            uchar b1 = \(blocksVar)[g * 3 + 1];
+                            uchar b2 = \(blocksVar)[g * 3 + 2];
+                            \(outputArrayVar)[g * 8 + 0] = scale * float(b0 & 0x07) + zero;
+                            \(outputArrayVar)[g * 8 + 1] = scale * float((b0 >> 3) & 0x07) + zero;
+                            \(outputArrayVar)[g * 8 + 2] = scale * float(((b0 >> 6) & 0x03) | ((b1 & 0x01) << 2)) + zero;
+                            \(outputArrayVar)[g * 8 + 3] = scale * float((b1 >> 1) & 0x07) + zero;
+                            \(outputArrayVar)[g * 8 + 4] = scale * float((b1 >> 4) & 0x07) + zero;
+                            \(outputArrayVar)[g * 8 + 5] = scale * float(((b1 >> 7) & 0x01) | ((b2 & 0x03) << 1)) + zero;
+                            \(outputArrayVar)[g * 8 + 6] = scale * float((b2 >> 2) & 0x07) + zero;
+                            \(outputArrayVar)[g * 8 + 7] = scale * float((b2 >> 5) & 0x07) + zero;
+                        }
+        """
+    }
+}
+
+/// MSL source fragments for Q5 affine block formats.
+///
+/// Non-aligned packing (see MLX `mlx/backend/cpu/quantized.cpp` `extract_bits<5>`):
+/// 8 weights share 5 bytes.
+/// - w[0] = b0 & 0x1f
+/// - w[1] = ((b0 >> 5) & 0x07) | ((b1 & 0x03) << 3)
+/// - w[2] = (b1 >> 2) & 0x1f
+/// - w[3] = ((b1 >> 7) & 0x01) | ((b2 & 0x0f) << 1)
+/// - w[4] = ((b2 >> 4) & 0x0f) | ((b3 & 0x01) << 4)
+/// - w[5] = (b3 >> 1) & 0x1f
+/// - w[6] = ((b3 >> 6) & 0x03) | ((b4 & 0x07) << 2)
+/// - w[7] = (b4 >> 3) & 0x1f
+enum Q5AffineMSL {
+    /// Block struct definition. Packed bytes = (weightsPerBlock / 8) * 5.
+    static func blockStruct(name: String, weightsPerBlock: Int) -> String {
+        let packedBytes = (weightsPerBlock / 8) * 5
+        return """
+        struct \(name) {
+            half scale;
+            half zero;
+            uchar qs[\(packedBytes)];
+        };
+        """
+    }
+
+    /// Emits a loop that expands one block's `weightsPerBlock` weights into
+    /// `outputArrayVar[0..<weightsPerBlock]` as float. Assumes `scale` and
+    /// `zero` are captured as `float` locals by the caller.
+    static func groupDequant(
+        blocksVar: String,
+        outputArrayVar: String,
+        weightsPerBlock: Int
+    ) -> String {
+        let numGroups = weightsPerBlock / 8
+        return """
+        for (uint g = 0; g < \(numGroups); g++) {
+                            uchar b0 = \(blocksVar)[g * 5 + 0];
+                            uchar b1 = \(blocksVar)[g * 5 + 1];
+                            uchar b2 = \(blocksVar)[g * 5 + 2];
+                            uchar b3 = \(blocksVar)[g * 5 + 3];
+                            uchar b4 = \(blocksVar)[g * 5 + 4];
+                            \(outputArrayVar)[g * 8 + 0] = scale * float(b0 & 0x1f) + zero;
+                            \(outputArrayVar)[g * 8 + 1] = scale * float(((b0 >> 5) & 0x07) | ((b1 & 0x03) << 3)) + zero;
+                            \(outputArrayVar)[g * 8 + 2] = scale * float((b1 >> 2) & 0x1f) + zero;
+                            \(outputArrayVar)[g * 8 + 3] = scale * float(((b1 >> 7) & 0x01) | ((b2 & 0x0f) << 1)) + zero;
+                            \(outputArrayVar)[g * 8 + 4] = scale * float(((b2 >> 4) & 0x0f) | ((b3 & 0x01) << 4)) + zero;
+                            \(outputArrayVar)[g * 8 + 5] = scale * float((b3 >> 1) & 0x1f) + zero;
+                            \(outputArrayVar)[g * 8 + 6] = scale * float(((b3 >> 6) & 0x03) | ((b4 & 0x07) << 2)) + zero;
+                            \(outputArrayVar)[g * 8 + 7] = scale * float((b4 >> 3) & 0x1f) + zero;
+                        }
+        """
     }
 }
 
@@ -631,12 +922,21 @@ public enum QuantizationFormatRegistry {
         case .fp32RowMajor: return Float32Format()
         case .q2Group16ScaleF16: return AffineQ2Group16Format()
         case .q2Group32ScaleF16: return AffineQ2Group32Format()
+        case .q3Group16ScaleF16: return AffineQ3Group16Format()
+        case .q3Group32ScaleF16: return AffineQ3Group32Format()
         case .q4Group64ScaleF16: return AffineQ4Group64Format()
         case .q4Group128ScaleF16: return AffineQ4Group128Format()
+        // Q4G128Zero (0x42) uses the same 68-byte block layout as Q4G128. Alias
+        // to the same struct to resolve the orphan scheme ID without behavioral
+        // divergence — both decode to the same packed nibble representation.
+        case .q4Group128ScaleF16Zero: return AffineQ4Group128Format()
+        case .q5Group32ScaleF16: return AffineQ5Group32Format()
+        case .q5Group64ScaleF16: return AffineQ5Group64Format()
         case .q6Group16ScaleF16: return AffineQ6Group16Format()
         case .q6Group32ScaleF16: return AffineQ6Group32Format()
         case .q8Group32ScaleF16: return AffineQ8Group32Format()
         case .q8Group64ScaleF16: return AffineQ8Group64Format()
+        case .q8Group128ScaleF16: return AffineQ8Group128Format()
         case .passthrough: return Float16Format()
         default: return nil
         }
@@ -649,12 +949,17 @@ public enum QuantizationFormatRegistry {
         switch (bits, groupSize) {
         case (2, 16): return AffineQ2Group16Format()
         case (2, 32): return AffineQ2Group32Format()
+        case (3, 16): return AffineQ3Group16Format()
+        case (3, 32): return AffineQ3Group32Format()
         case (4, 64): return AffineQ4Group64Format()
         case (4, 128): return AffineQ4Group128Format()
+        case (5, 32): return AffineQ5Group32Format()
+        case (5, 64): return AffineQ5Group64Format()
         case (6, 16): return AffineQ6Group16Format()
         case (6, 32): return AffineQ6Group32Format()
         case (8, 32): return AffineQ8Group32Format()
         case (8, 64): return AffineQ8Group64Format()
+        case (8, 128): return AffineQ8Group128Format()
         default: return nil
         }
     }

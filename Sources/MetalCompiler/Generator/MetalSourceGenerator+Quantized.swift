@@ -578,6 +578,152 @@ public static func generateDequantQ4ToBFloat(
     """
 }
 
+/// Stable kernel name for a format's dequant→BF16 prefill path.
+///
+/// Q4 keeps its historical `dequant_q4_g{group}_bf16` name (emitted by the
+/// hand-tuned generator) so the MPP pipeline in benchmarks sees the same
+/// symbol. Other quantized formats use the generic `dequant_q{bits}_g{group}_bf16`
+/// form produced by `generateUnifiedDequantToBFloat`.
+public static func unifiedDequantKernelName(
+    for format: any QuantizationFormat
+) -> String {
+    "dequant_q\(format.bits)_g\(format.groupSize)_bf16"
+}
+
+/// Generic dequant→BF16 kernel generator driven by `QuantizationFormat`.
+///
+/// Emits one threadgroup per output row, 256 threads each, unpacking every block
+/// in the row into BFloat16 weights laid out row-major. The BF16 output is the
+/// input format expected by the Metal 4 MPP GEMM path used during prefill.
+///
+/// Aligned formats (Q2 / Q4 / Q8): per-packed-byte parallelism using
+/// `format.perWeightReadExpression`. Each thread processes one packed byte and
+/// writes its `8 / bits` weights.
+///
+/// Non-aligned formats (Q6): per-block parallelism using
+/// `format.emitGroupDequant`. Each thread expands one block into a local float
+/// array before casting to BF16. For typical prefill widths (1536 input × 16/32
+/// weights per block) this yields 48–96 blocks per row, which fits within the
+/// 256 threads per threadgroup.
+public static func generateUnifiedDequantToBFloat(
+    name: String,
+    format: any QuantizationFormat
+) -> String {
+    precondition(
+        format.isQuantized,
+        "generateUnifiedDequantToBFloat requires isQuantized=true; got \(format.schemeIdentifier)"
+    )
+
+    let weightsPerBlock = format.weightsPerBlock
+    let bytesPerBlock = format.bytesPerBlock
+
+    if format.isAligned {
+        guard let readExpression = format.perWeightReadExpression(
+            blocksVar: "qs",
+            weightIndexVar: "k"
+        ) else {
+            fatalError(
+                "Aligned format \(format.schemeIdentifier) did not provide perWeightReadExpression"
+            )
+        }
+        let bits = format.bits
+        precondition(8 % bits == 0, "Aligned dequant expects bits ∈ {2,4,8}; got \(bits)")
+        let weightsPerPackedByte = 8 / bits
+        let packedBytesPerBlock = weightsPerBlock / weightsPerPackedByte
+        return """
+        #include <metal_stdlib>
+        using namespace metal;
+
+        kernel void \(name)(
+            device const uchar* packed       [[buffer(0)]],
+            device bfloat* output            [[buffer(1)]],
+            constant uint& inputDimension    [[buffer(2)]],
+            constant uint& outputDimension   [[buffer(3)]],
+            uint tgpos [[threadgroup_position_in_grid]],
+            uint tid   [[thread_index_in_threadgroup]]
+        ) {
+            const uint WEIGHTS_PER_BLOCK = \(weightsPerBlock);
+            const uint BYTES_PER_BLOCK = \(bytesPerBlock);
+            const uint PACKED_BYTES_PER_BLOCK = \(packedBytesPerBlock);
+            const uint WEIGHTS_PER_BYTE = \(weightsPerPackedByte);
+            const uint THREADS_PER_TG = 256;
+            const uint row = tgpos;
+            if (row >= outputDimension) return;
+
+            const uint blocksPerRow = inputDimension / WEIGHTS_PER_BLOCK;
+            const uint totalPackedBytes = blocksPerRow * PACKED_BYTES_PER_BLOCK;
+            device const uchar* rowBase = packed + row * blocksPerRow * BYTES_PER_BLOCK;
+            device bfloat* outRow = output + row * inputDimension;
+
+            for (uint byteIdx = tid; byteIdx < totalPackedBytes; byteIdx += THREADS_PER_TG) {
+                uint blockIdx = byteIdx / PACKED_BYTES_PER_BLOCK;
+                uint localByte = byteIdx % PACKED_BYTES_PER_BLOCK;
+
+                device const uchar* block = rowBase + blockIdx * BYTES_PER_BLOCK;
+                float scale = float(*(device const half*)(block));
+                float zero  = float(*(device const half*)(block + 2));
+                device const uchar* qs = block + 4;
+
+                uint baseK = localByte * WEIGHTS_PER_BYTE;
+                uint outBase = blockIdx * WEIGHTS_PER_BLOCK + baseK;
+                for (uint w = 0; w < WEIGHTS_PER_BYTE; w++) {
+                    uint k = baseK + w;
+                    outRow[outBase + w] = bfloat(\(readExpression));
+                }
+            }
+        }
+        """
+    } else {
+        guard let groupExpansion = format.emitGroupDequant(
+            blocksVar: "qs",
+            blockIndexVar: "0",
+            outputArrayVar: "weights_f32"
+        ) else {
+            fatalError(
+                "Non-aligned format \(format.schemeIdentifier) did not provide emitGroupDequant"
+            )
+        }
+        return """
+        #include <metal_stdlib>
+        using namespace metal;
+
+        kernel void \(name)(
+            device const uchar* packed       [[buffer(0)]],
+            device bfloat* output            [[buffer(1)]],
+            constant uint& inputDimension    [[buffer(2)]],
+            constant uint& outputDimension   [[buffer(3)]],
+            uint tgpos [[threadgroup_position_in_grid]],
+            uint tid   [[thread_index_in_threadgroup]]
+        ) {
+            const uint WEIGHTS_PER_BLOCK = \(weightsPerBlock);
+            const uint BYTES_PER_BLOCK = \(bytesPerBlock);
+            const uint THREADS_PER_TG = 256;
+            const uint row = tgpos;
+            if (row >= outputDimension) return;
+
+            const uint blocksPerRow = inputDimension / WEIGHTS_PER_BLOCK;
+            device const uchar* rowBase = packed + row * blocksPerRow * BYTES_PER_BLOCK;
+            device bfloat* outRow = output + row * inputDimension;
+
+            for (uint blockIdx = tid; blockIdx < blocksPerRow; blockIdx += THREADS_PER_TG) {
+                device const uchar* block = rowBase + blockIdx * BYTES_PER_BLOCK;
+                float scale = float(*(device const half*)(block));
+                float zero  = float(*(device const half*)(block + 2));
+                device const uchar* qs = block + 4;
+
+                float weights_f32[\(weightsPerBlock)];
+                \(groupExpansion)
+
+                device bfloat* outBlock = outRow + blockIdx * WEIGHTS_PER_BLOCK;
+                for (uint k = 0; k < WEIGHTS_PER_BLOCK; k++) {
+                    outBlock[k] = bfloat(weights_f32[k]);
+                }
+            }
+        }
+        """
+    }
+}
+
 static let kvQuantizationSource = """
 kernel void quantize_kv_q8(
     device const half* input [[buffer(0)]], device uchar* output [[buffer(1)]],

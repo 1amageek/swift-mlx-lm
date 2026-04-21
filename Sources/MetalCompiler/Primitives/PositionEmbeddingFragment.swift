@@ -28,7 +28,7 @@ public struct PositionEmbeddingFragment: PrimitiveMetalKernelFragment {
         case .float16: "f16"
         case .bfloat16: "bf16"
         case .float32: "f32"
-        case .quantized2Bit, .quantized4Bit, .quantized6Bit, .quantized8Bit:
+        case .quantized2Bit, .quantized3Bit, .quantized4Bit, .quantized5Bit, .quantized6Bit, .quantized8Bit:
             fatalError("[Compiler] PositionEmbeddingFragment does not support quantized weights")
         }
         if context.bufferPrecision == .float32 {

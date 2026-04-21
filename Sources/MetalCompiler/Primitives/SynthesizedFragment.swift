@@ -65,7 +65,9 @@ public struct SynthesizedFragment: PrimitiveMetalKernelFragment {
         case .bfloat16: weightTag = "wbf16"
         case .float32: weightTag = "wf32"
         case .quantized2Bit(let gs): weightTag = "wq2g\(gs)"
+        case .quantized3Bit(let gs): weightTag = "wq3g\(gs)"
         case .quantized4Bit(let gs): weightTag = "wq4g\(gs)"
+        case .quantized5Bit(let gs): weightTag = "wq5g\(gs)"
         case .quantized6Bit(let gs): weightTag = "wq6g\(gs)"
         case .quantized8Bit(let gs): weightTag = "wq8g\(gs)"
         }

@@ -29,7 +29,7 @@ extension MetalSourceGenerator {
             "half"
         case .float32:
             "float"
-        case .quantized2Bit, .quantized4Bit, .quantized6Bit, .quantized8Bit:
+        case .quantized2Bit, .quantized3Bit, .quantized4Bit, .quantized5Bit, .quantized6Bit, .quantized8Bit:
             bt
         }
 
@@ -110,7 +110,7 @@ extension MetalSourceGenerator {
             "half"
         case .float32:
             "float"
-        case .quantized2Bit, .quantized4Bit, .quantized6Bit, .quantized8Bit:
+        case .quantized2Bit, .quantized3Bit, .quantized4Bit, .quantized5Bit, .quantized6Bit, .quantized8Bit:
             bt
         }
 

@@ -11,9 +11,11 @@ struct STAFPayloadConverter: Sendable {
         case .bf16RowMajor, .fp32RowMajor:
             return tensorData
         case .q2Group16ScaleF16, .q2Group32ScaleF16,
-             .q4Group64ScaleF16, .q4Group128ScaleF16,
+             .q3Group16ScaleF16, .q3Group32ScaleF16,
+             .q4Group64ScaleF16, .q4Group128ScaleF16, .q4Group128ScaleF16Zero,
+             .q5Group32ScaleF16, .q5Group64ScaleF16,
              .q6Group16ScaleF16, .q6Group32ScaleF16,
-             .q8Group32ScaleF16, .q8Group64ScaleF16:
+             .q8Group32ScaleF16, .q8Group64ScaleF16, .q8Group128ScaleF16:
             return try repackMLXQuantized(entry: entry, weightData: tensorData)
         default:
             return tensorData

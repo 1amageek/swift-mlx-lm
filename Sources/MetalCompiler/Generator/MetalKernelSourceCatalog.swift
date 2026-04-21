@@ -18,10 +18,18 @@ struct KernelWeightFormatResolver {
             return .quantized2Bit(groupSize: 16)
         case .q2Group32ScaleF16:
             return .quantized2Bit(groupSize: 32)
+        case .q3Group16ScaleF16:
+            return .quantized3Bit(groupSize: 16)
+        case .q3Group32ScaleF16:
+            return .quantized3Bit(groupSize: 32)
         case .q4Group64ScaleF16:
             return .quantized4Bit(groupSize: 64)
-        case .q4Group128ScaleF16:
+        case .q4Group128ScaleF16, .q4Group128ScaleF16Zero:
             return .quantized4Bit(groupSize: 128)
+        case .q5Group32ScaleF16:
+            return .quantized5Bit(groupSize: 32)
+        case .q5Group64ScaleF16:
+            return .quantized5Bit(groupSize: 64)
         case .q6Group16ScaleF16:
             return .quantized6Bit(groupSize: 16)
         case .q6Group32ScaleF16:
@@ -30,6 +38,8 @@ struct KernelWeightFormatResolver {
             return .quantized8Bit(groupSize: 32)
         case .q8Group64ScaleF16:
             return .quantized8Bit(groupSize: 64)
+        case .q8Group128ScaleF16:
+            return .quantized8Bit(groupSize: 128)
         default:
             fatalError("KernelWeightFormatResolver: unsupported STAF scheme 0x\(String(info.format.schemeIdentifier.rawValue, radix: 16)) for tensor '\(binding.tensorName)'. Silent fallback to float16 has been removed — add explicit handling for this scheme or extend WeightFormat.")
         }
@@ -141,8 +151,16 @@ struct MetalKernelSourceCatalog {
                     }
                 }
 
-                // For Q4 prefill: generate dequant kernel and treat as BF16 for MPP GEMM.
-                // The dequant kernel unpacks Q4→BF16, then the standard BF16 MPP path handles GEMM.
+                // For quantized prefill: generate a dequant kernel and treat the
+                // projection as BF16 for the downstream MPP GEMM. The dequant kernel
+                // unpacks packed weights into BF16 row-major and then the standard
+                // BF16 MPP path handles GEMM.
+                //
+                // Q4 kept on the hand-tuned Q4-specific generator to preserve the
+                // exact kernel name and byte-level parallelism that benchmarking has
+                // already locked in. Other quantized formats (Q2 / Q6, plus Q8 that
+                // also lacks a direct prefill GEMM) go through the unified
+                // format-driven generator.
                 let needsDequantForAMX = bufferPrecision == .float32 && weightFormat.isQuantized
                 if needsDequantForAMX {
                     if case .quantized4Bit(let groupSize) = weightFormat {
@@ -151,6 +169,14 @@ struct MetalKernelSourceCatalog {
                             sources.append(MetalSourceGenerator.generateDequantQ4ToBFloat(
                                 name: dequantName,
                                 groupSize: groupSize
+                            ))
+                        }
+                    } else if let format = weightFormat.quantizationFormat {
+                        let dequantName = MetalSourceGenerator.unifiedDequantKernelName(for: format)
+                        if generatedNames.insert(dequantName).inserted {
+                            sources.append(MetalSourceGenerator.generateUnifiedDequantToBFloat(
+                                name: dequantName,
+                                format: format
                             ))
                         }
                     }
@@ -694,9 +720,21 @@ struct MetalKernelSourceCatalog {
                 return isPrefill ? "gemm_q8_g32_f32s" : "gemv_q8_g32"
             case 64:
                 return isPrefill ? "gemm_q8_g64_f32s" : "gemv_q8_g64"
+            case 128:
+                // Q8G128: unified generator path (no dedicated legacy kernel).
+                // No direct prefill GEMM; prefill uses dequant→BF16 MPP.
+                guard !isPrefill else { return nil }
+                guard let format = weightFormat.quantizationFormat else { return nil }
+                return format.gemvKernelName
             default:
                 return nil
             }
+        case (.quantized2Bit, _), (.quantized3Bit, _), (.quantized5Bit, _), (.quantized6Bit, _):
+            // Q2/Q3/Q5/Q6 have no direct prefill GEMM; prefill uses dequant→BF16 MPP.
+            // Only decode gets a dedicated GEMV kernel from the unified generator.
+            guard !isPrefill else { return nil }
+            guard let format = weightFormat.quantizationFormat else { return nil }
+            return format.gemvKernelName
         default:
             return nil
         }
@@ -745,9 +783,29 @@ struct MetalKernelSourceCatalog {
                     bufferPrecision: bufferPrecision,
                     groupSize: groupSize
                 )
+            case 128:
+                // Q8G128: unified generator path.
+                guard bufferPrecision != .float32 else { return nil }
+                guard let format = weightFormat.quantizationFormat else { return nil }
+                return MetalSourceGenerator.generateUnifiedQuantizedGEMV(
+                    name: kernelName,
+                    format: format,
+                    bufferPrecision: bufferPrecision
+                )
             default:
                 return nil
             }
+        case (.quantized2Bit, _), (.quantized3Bit, _), (.quantized5Bit, _), (.quantized6Bit, _):
+            // Q2/Q3/Q5/Q6 decode GEMV is generated by the unified format-driven scaffold.
+            // Prefill is not reached here — quantizedProjectionKernelName returns nil
+            // for these formats during prefill and the dequant→BF16 MPP GEMM path takes over.
+            guard bufferPrecision != .float32 else { return nil }
+            guard let format = weightFormat.quantizationFormat else { return nil }
+            return MetalSourceGenerator.generateUnifiedQuantizedGEMV(
+                name: kernelName,
+                format: format,
+                bufferPrecision: bufferPrecision
+            )
         default:
             return nil
         }
@@ -784,7 +842,7 @@ struct MetalKernelSourceCatalog {
             return "batched_gemm_f16_f32s_\(count)"
         case .float32:
             return "batched_gemm_f32_f32s_\(count)"
-        case .quantized2Bit, .quantized4Bit, .quantized6Bit, .quantized8Bit:
+        case .quantized2Bit, .quantized3Bit, .quantized4Bit, .quantized5Bit, .quantized6Bit, .quantized8Bit:
             return nil
         }
     }

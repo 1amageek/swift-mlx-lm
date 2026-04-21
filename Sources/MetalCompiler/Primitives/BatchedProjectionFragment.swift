@@ -29,7 +29,7 @@ extension BatchedProjection: PrimitiveMetalKernelFragment {
                 return "batched_gemm_f16_f32s_\(count)"
             case .float32:
                 return "batched_gemm_f32_f32s_\(count)"
-            case .quantized2Bit, .quantized6Bit, .quantized8Bit:
+            case .quantized2Bit, .quantized3Bit, .quantized5Bit, .quantized6Bit, .quantized8Bit:
                 // No batched prefill kernel for these formats yet — fragment is
                 // decomposed into per-projection dispatches upstream.
                 break

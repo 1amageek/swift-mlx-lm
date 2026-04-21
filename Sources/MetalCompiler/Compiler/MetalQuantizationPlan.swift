@@ -263,12 +263,30 @@ extension WeightFormat {
             default:
                 return .passthrough
             }
+        case .quantized3Bit(let groupSize):
+            switch groupSize {
+            case 16:
+                return .q3Group16ScaleF16
+            case 32:
+                return .q3Group32ScaleF16
+            default:
+                return .passthrough
+            }
         case .quantized4Bit(let groupSize):
             switch groupSize {
             case 64:
                 return .q4Group64ScaleF16
             case 128:
                 return .q4Group128ScaleF16
+            default:
+                return .passthrough
+            }
+        case .quantized5Bit(let groupSize):
+            switch groupSize {
+            case 32:
+                return .q5Group32ScaleF16
+            case 64:
+                return .q5Group64ScaleF16
             default:
                 return .passthrough
             }

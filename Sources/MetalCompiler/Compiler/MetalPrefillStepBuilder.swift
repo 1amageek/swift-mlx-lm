@@ -1526,15 +1526,25 @@ private struct ProjectionWeightDescriptor {
     let fallbackReason: MetalQuantizationFallbackReason?
 }
 
-// MARK: - Q4 Dequant → AMX Helpers
+// MARK: - Quantized Dequant → AMX Helpers
 
 /// Dequant kernel name for the given quantization scheme.
-/// Returns nil for non-Q4 schemes.
+///
+/// Q4 keeps the historical `dequant_q4_g{group}_bf16` symbol emitted by the
+/// hand-tuned generator. All other quantized formats fall through to the
+/// generic `dequant_q{bits}_g{group}_bf16` emitted by
+/// `generateUnifiedDequantToBFloat`. Returns nil for dense schemes and for
+/// schemes that have no registered `QuantizationFormat`.
 private func dequantKernelName(for scheme: QuantizationSchemeIdentifier) -> String? {
     switch scheme {
     case .q4Group64ScaleF16: return "dequant_q4_g64_bf16"
     case .q4Group128ScaleF16: return "dequant_q4_g128_bf16"
-    default: return nil
+    default:
+        guard let format = QuantizationFormatRegistry.format(for: scheme),
+              format.isQuantized else {
+            return nil
+        }
+        return MetalSourceGenerator.unifiedDequantKernelName(for: format)
     }
 }
 
