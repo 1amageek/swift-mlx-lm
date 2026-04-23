@@ -44,6 +44,14 @@ public struct KVCacheSpecification: Sendable {
         headDimension: Int,
         maximumSequenceLength: Int
     ) {
+        precondition(
+            keyQuantizationScheme.isSupportedForKVCache,
+            "KVCacheSpecification: keyQuantizationScheme \(keyQuantizationScheme) has no matching FlashAttention KV cache kernel path. Supported: fp16/bf16/fp32, q4g{64,128,128zero}, q8g{32,64,128}, rotorQ4g64, rotorQ8g32. Sizing would succeed but write/read would corrupt the cache."
+        )
+        precondition(
+            valueQuantizationScheme.isSupportedForKVCache,
+            "KVCacheSpecification: valueQuantizationScheme \(valueQuantizationScheme) has no matching FlashAttention KV cache kernel path. Supported: fp16/bf16/fp32, q4g{64,128,128zero}, q8g{32,64,128}, rotorQ4g64, rotorQ8g32. Sizing would succeed but write/read would corrupt the cache."
+        )
         self.keyQuantizationScheme = keyQuantizationScheme
         self.valueQuantizationScheme = valueQuantizationScheme
         self.layoutMode = layoutMode

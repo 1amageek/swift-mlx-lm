@@ -205,6 +205,43 @@ extension QuantizationSchemeIdentifier {
         default: return self
         }
     }
+
+    /// Whether the FlashAttention KV cache kernels (`read_kv_element` +
+    /// `write_kv_element_dense` / `write_kv_quantized_*`) can read and write
+    /// this scheme losslessly.
+    ///
+    /// Sizing (`KVCacheSpecification.bytesPerHeadSlot`) is protocol-driven and
+    /// covers every registered format. This flag is narrower: it is the set the
+    /// MSL kernels actually implement. Expanding this set requires adding
+    /// matching write/read support in `MetalSourceGenerator+Attention`.
+    ///
+    /// Supported:
+    /// * Dense — fp16 / bf16 / fp32 (direct typed load/store)
+    /// * 4-bit nibble-packed — q4g64 / q4g128 / q4g128-zero
+    /// * 8-bit byte-packed — q8g32 / q8g64 / q8g128
+    /// * RotorQuant — rotorQ4g64 / rotorQ8g32 (delegates to base scheme layout)
+    ///
+    /// Unsupported (sizing works, but no KV kernel path exists):
+    /// * q2 / q3 / q5 / q6 families — would need bit-packed write kernels
+    /// * passthrough — not a real storage format for KV data
+    public var isSupportedForKVCache: Bool {
+        switch self {
+        case .fp16RowMajor, .bf16RowMajor, .fp32RowMajor:
+            return true
+        case .q4Group64ScaleF16, .q4Group128ScaleF16, .q4Group128ScaleF16Zero:
+            return true
+        case .q8Group32ScaleF16, .q8Group64ScaleF16, .q8Group128ScaleF16:
+            return true
+        case .rotorQ4Group64ScaleF16, .rotorQ8Group32ScaleF16:
+            return true
+        case .q2Group16ScaleF16, .q2Group32ScaleF16,
+             .q3Group16ScaleF16, .q3Group32ScaleF16,
+             .q5Group32ScaleF16, .q5Group64ScaleF16,
+             .q6Group16ScaleF16, .q6Group32ScaleF16,
+             .passthrough:
+            return false
+        }
+    }
 }
 
 // MARK: - Semantic Role

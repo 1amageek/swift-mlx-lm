@@ -760,110 +760,21 @@ public static func generateFlashAttentionKernel(
                 kWriteByteOffset = position * kvHeadCount * kHeadSlotBytes
                     + kvHeadIndex * kHeadSlotBytes;
             }
-                if (kRotor) {
-                    uint kBase = rotor_base_scheme(kQuantScheme);
-                    if (kBase == 0x40) {
-                        write_kv_quantized_q4(currentKey, keyCache + kWriteByteOffset, headDim, tid, threadgroupSize, tiisg, sgitg, quantSMin, quantSMax);
-                    } else {
-                        write_kv_quantized_q8(currentKey, keyCache + kWriteByteOffset, headDim, tid, threadgroupSize, tiisg, sgitg, quantSMin, quantSMax);
+                if (kQuantScheme == 0x00 || kQuantScheme == 0x01 || kQuantScheme == 0x02) {
+                    for (uint d = tid; d < headDim; d += threadgroupSize) {
+                        write_kv_element_dense(
+                            keyCache + kWriteByteOffset, d, currentKey[d], kQuantScheme);
                     }
-                    if (qjlDimension > 0) {
+                } else {
+                    write_kv_quantized(kQuantScheme, currentKey, keyCache + kWriteByteOffset,
+                        headDim, tid, threadgroupSize, tiisg, sgitg, quantSMin, quantSMax);
+                    if (kRotor && qjlDimension > 0) {
                         threadgroup_barrier(mem_flags::mem_device);
                         device half* qjlOut = qjlResidualK + (position * kvHeadCount + kvHeadIndex) * qjlDimension;
                         qjl_compute_residual(currentKey, keyCache + kWriteByteOffset, kQuantScheme,
                             qjlMatrix, qjlOut, headDim, qjlDimension, kHeadSlotBytes, tid, threadgroupSize);
                     }
-    \(inlineRoPE ? """
-                } else if (kQuantScheme == 0x00 || kQuantScheme == 0x01 || kQuantScheme == 0x02) {
-                    for (uint d = tid; d < headDim; d += threadgroupSize) {
-                        write_kv_element_dense(
-                            keyCache + kWriteByteOffset, d, currentKey[d], kQuantScheme);
-                    }
-                } else {
-                    const uint groupSize = 32;
-                    const uint bytesPerBlock = 36;
-                    const uint numGroups = (headDim + groupSize - 1) / groupSize;
-                    for (uint g = 0; g < numGroups; g++) {
-                        uint groupStart = g * groupSize;
-                        float localMin = HUGE_VALF, localMax = -HUGE_VALF;
-                        for (uint i = tid; i < groupSize && (groupStart + i) < headDim; i += threadgroupSize) {
-                            float val = currentKey[groupStart + i];
-                            localMin = min(localMin, val); localMax = max(localMax, val);
-                        }
-                        localMin = simd_min(localMin); localMax = simd_max(localMax);
-                        threadgroup float sharedMin[32], sharedMax[32];
-                        if (tiisg == 0) { sharedMin[sgitg] = localMin; sharedMax[sgitg] = localMax; }
-                        threadgroup_barrier(mem_flags::mem_threadgroup);
-                        if (tid == 0) {
-                            uint sgCount = (threadgroupSize + SIMD_WIDTH - 1) / SIMD_WIDTH;
-                            float gMin = sharedMin[0], gMax = sharedMax[0];
-                            for (uint s = 1; s < sgCount; s++) { gMin = min(gMin, sharedMin[s]); gMax = max(gMax, sharedMax[s]); }
-                            sharedMin[0] = gMin; sharedMax[0] = gMax;
-                        }
-                        threadgroup_barrier(mem_flags::mem_threadgroup);
-                        float groupMin = sharedMin[0], groupMax = sharedMax[0];
-                        float groupScale = (groupMax - groupMin) / 255.0f;
-                        if (groupScale < 1e-10f) groupScale = 1e-10f;
-                        device uchar* blockOutput = keyCache + kWriteByteOffset + g * bytesPerBlock;
-                        if (tid == 0) {
-                            *(device half*)(blockOutput) = half(groupScale);
-                            *(device half*)(blockOutput + 2) = half(groupMin);
-                        }
-                        threadgroup_barrier(mem_flags::mem_device);
-                        for (uint i = tid; i < groupSize && (groupStart + i) < headDim; i += threadgroupSize) {
-                            float val = currentKey[groupStart + i];
-                            int quantized = int(round((val - groupMin) / groupScale));
-                            quantized = clamp(quantized, 0, 255);
-                            *(device uchar*)(blockOutput + 4 + i) = uchar(quantized);
-                        }
-                    }
                 }
-    """ : """
-                } else if (kQuantScheme == 0x00 || kQuantScheme == 0x01 || kQuantScheme == 0x02) {
-                    for (uint d = tid; d < headDim; d += threadgroupSize) {
-                        write_kv_element_dense(
-                            keyCache + kWriteByteOffset, d, currentKey[d], kQuantScheme);
-                    }
-                } else {
-                    const uint groupSize = 32;
-                    const uint bytesPerBlock = 36;
-                    const uint numGroups = (headDim + groupSize - 1) / groupSize;
-                    for (uint g = 0; g < numGroups; g++) {
-                        uint groupStart = g * groupSize;
-                        float localMin = HUGE_VALF, localMax = -HUGE_VALF;
-                        for (uint i = tid; i < groupSize && (groupStart + i) < headDim; i += threadgroupSize) {
-                            float val = currentKey[groupStart + i];
-                            localMin = min(localMin, val); localMax = max(localMax, val);
-                        }
-                        localMin = simd_min(localMin); localMax = simd_max(localMax);
-                        threadgroup float sharedMin[32], sharedMax[32];
-                        if (tiisg == 0) { sharedMin[sgitg] = localMin; sharedMax[sgitg] = localMax; }
-                        threadgroup_barrier(mem_flags::mem_threadgroup);
-                        if (tid == 0) {
-                            uint sgCount = (threadgroupSize + SIMD_WIDTH - 1) / SIMD_WIDTH;
-                            float gMin = sharedMin[0], gMax = sharedMax[0];
-                            for (uint s = 1; s < sgCount; s++) { gMin = min(gMin, sharedMin[s]); gMax = max(gMax, sharedMax[s]); }
-                            sharedMin[0] = gMin; sharedMax[0] = gMax;
-                        }
-                        threadgroup_barrier(mem_flags::mem_threadgroup);
-                        float groupMin = sharedMin[0], groupMax = sharedMax[0];
-                        float groupScale = (groupMax - groupMin) / 255.0f;
-                        if (groupScale < 1e-10f) groupScale = 1e-10f;
-                        device uchar* blockOutput = keyCache + kWriteByteOffset + g * bytesPerBlock;
-                        if (tid == 0) {
-                            *(device half*)(blockOutput) = half(groupScale);
-                            *(device half*)(blockOutput + 2) = half(groupMin);
-                        }
-                        threadgroup_barrier(mem_flags::mem_device);
-                        for (uint i = tid; i < groupSize && (groupStart + i) < headDim; i += threadgroupSize) {
-                            float val = currentKey[groupStart + i];
-                            int quantized = int(round((val - groupMin) / groupScale));
-                            quantized = clamp(quantized, 0, 255);
-                            *(device uchar*)(blockOutput + 4 + i) = uchar(quantized);
-                        }
-                    }
-                }
-    """)
             threadgroup_barrier(mem_flags::mem_device);
 
             uint vWriteByteOffset;
@@ -875,56 +786,14 @@ public static func generateFlashAttentionKernel(
                     + kvHeadIndex * vHeadSlotBytes;
             }
 
-            if (vRotor) {
-                uint vBase = rotor_base_scheme(vQuantScheme);
-                if (vBase == 0x40) {
-                    write_kv_quantized_q4(currentValue, valueCache + vWriteByteOffset, headDim, tid, threadgroupSize, tiisg, sgitg, quantSMin, quantSMax);
-                } else {
-                    write_kv_quantized_q8(currentValue, valueCache + vWriteByteOffset, headDim, tid, threadgroupSize, tiisg, sgitg, quantSMin, quantSMax);
-                }
-            } else if (vQuantScheme == 0x00 || vQuantScheme == 0x01 || vQuantScheme == 0x02) {
+            if (vQuantScheme == 0x00 || vQuantScheme == 0x01 || vQuantScheme == 0x02) {
                 for (uint d = tid; d < headDim; d += threadgroupSize) {
                     write_kv_element_dense(
                         valueCache + vWriteByteOffset, d, currentValue[d], vQuantScheme);
                 }
             } else {
-                const uint groupSize = 32;
-                const uint bytesPerBlock = 36;
-                const uint numGroups = (headDim + groupSize - 1) / groupSize;
-                for (uint g = 0; g < numGroups; g++) {
-                    uint groupStart = g * groupSize;
-                    float localMin = HUGE_VALF, localMax = -HUGE_VALF;
-                    for (uint i = tid; i < groupSize && (groupStart + i) < headDim; i += threadgroupSize) {
-                        float val = currentValue[groupStart + i];
-                        localMin = min(localMin, val); localMax = max(localMax, val);
-                    }
-                    localMin = simd_min(localMin); localMax = simd_max(localMax);
-                    threadgroup float sharedMin[32], sharedMax[32];
-                    if (tiisg == 0) { sharedMin[sgitg] = localMin; sharedMax[sgitg] = localMax; }
-                    threadgroup_barrier(mem_flags::mem_threadgroup);
-                    if (tid == 0) {
-                        uint sgCount = (threadgroupSize + SIMD_WIDTH - 1) / SIMD_WIDTH;
-                        float gMin = sharedMin[0], gMax = sharedMax[0];
-                        for (uint s = 1; s < sgCount; s++) { gMin = min(gMin, sharedMin[s]); gMax = max(gMax, sharedMax[s]); }
-                        sharedMin[0] = gMin; sharedMax[0] = gMax;
-                    }
-                    threadgroup_barrier(mem_flags::mem_threadgroup);
-                    float groupMin = sharedMin[0], groupMax = sharedMax[0];
-                    float groupScale = (groupMax - groupMin) / 255.0f;
-                    if (groupScale < 1e-10f) groupScale = 1e-10f;
-                    device uchar* blockOutput = valueCache + vWriteByteOffset + g * bytesPerBlock;
-                    if (tid == 0) {
-                        *(device half*)(blockOutput) = half(groupScale);
-                        *(device half*)(blockOutput + 2) = half(groupMin);
-                    }
-                    threadgroup_barrier(mem_flags::mem_device);
-                    for (uint i = tid; i < groupSize && (groupStart + i) < headDim; i += threadgroupSize) {
-                        float val = currentValue[groupStart + i];
-                        int quantized = int(round((val - groupMin) / groupScale));
-                        quantized = clamp(quantized, 0, 255);
-                        *(device uchar*)(blockOutput + 4 + i) = uchar(quantized);
-                    }
-                }
+                write_kv_quantized(vQuantScheme, currentValue, valueCache + vWriteByteOffset,
+                    headDim, tid, threadgroupSize, tiisg, sgitg, quantSMin, quantSMax);
             }
         }
 
@@ -1166,60 +1035,18 @@ public static func generateFlashAttentionArgumentTableVariant(
                 kWriteByteOffset = position * kvHeadCount * kHeadSlotBytes + kvHeadIndex * kHeadSlotBytes;
             }
 
-            if (kRotor) {
-                uint kBase = rotor_base_scheme(kQuantScheme);
-                if (kBase == 0x40) {
-                    write_kv_quantized_q4(currentKey, args.keyCache + kWriteByteOffset, headDim, tid, threadgroupSize, tiisg, sgitg, quantSMin, quantSMax);
-                } else {
-                    write_kv_quantized_q8(currentKey, args.keyCache + kWriteByteOffset, headDim, tid, threadgroupSize, tiisg, sgitg, quantSMin, quantSMax);
-                }
-                if (qjlDimension > 0) {
-                    threadgroup_barrier(mem_flags::mem_device);
-                    device half* qjlOut = args.qjlResidualK + (position * kvHeadCount + kvHeadIndex) * qjlDimension;
-                    qjl_compute_residual(currentKey, args.keyCache + kWriteByteOffset, kQuantScheme,
-                        args.qjlMatrix, qjlOut, headDim, qjlDimension, kHeadSlotBytes, tid, threadgroupSize);
-                }
-            } else if (kQuantScheme == 0x00 || kQuantScheme == 0x01 || kQuantScheme == 0x02) {
+            if (kQuantScheme == 0x00 || kQuantScheme == 0x01 || kQuantScheme == 0x02) {
                 for (uint d = tid; d < headDim; d += threadgroupSize) {
                     write_kv_element_dense(args.keyCache + kWriteByteOffset, d, currentKey[d], kQuantScheme);
                 }
             } else {
-                const uint groupSize = 32;
-                const uint bytesPerBlock = 36;
-                const uint numGroups = (headDim + groupSize - 1) / groupSize;
-                for (uint g = 0; g < numGroups; g++) {
-                    uint groupStart = g * groupSize;
-                    float localMin = HUGE_VALF, localMax = -HUGE_VALF;
-                    for (uint i = tid; i < groupSize && (groupStart + i) < headDim; i += threadgroupSize) {
-                        float val = currentKey[groupStart + i];
-                        localMin = min(localMin, val); localMax = max(localMax, val);
-                    }
-                    localMin = simd_min(localMin); localMax = simd_max(localMax);
-                    threadgroup float sharedMin[32], sharedMax[32];
-                    if (tiisg == 0) { sharedMin[sgitg] = localMin; sharedMax[sgitg] = localMax; }
-                    threadgroup_barrier(mem_flags::mem_threadgroup);
-                    if (tid == 0) {
-                        uint sgCount = (threadgroupSize + SIMD_WIDTH - 1) / SIMD_WIDTH;
-                        float gMin = sharedMin[0], gMax = sharedMax[0];
-                        for (uint s = 1; s < sgCount; s++) { gMin = min(gMin, sharedMin[s]); gMax = max(gMax, sharedMax[s]); }
-                        sharedMin[0] = gMin; sharedMax[0] = gMax;
-                    }
-                    threadgroup_barrier(mem_flags::mem_threadgroup);
-                    float groupMin = sharedMin[0], groupMax = sharedMax[0];
-                    float groupScale = (groupMax - groupMin) / 255.0f;
-                    if (groupScale < 1e-10f) groupScale = 1e-10f;
-                    device uchar* blockOutput = args.keyCache + kWriteByteOffset + g * bytesPerBlock;
-                    if (tid == 0) {
-                        *(device half*)(blockOutput) = half(groupScale);
-                        *(device half*)(blockOutput + 2) = half(groupMin);
-                    }
+                write_kv_quantized(kQuantScheme, currentKey, args.keyCache + kWriteByteOffset,
+                    headDim, tid, threadgroupSize, tiisg, sgitg, quantSMin, quantSMax);
+                if (kRotor && qjlDimension > 0) {
                     threadgroup_barrier(mem_flags::mem_device);
-                    for (uint i = tid; i < groupSize && (groupStart + i) < headDim; i += threadgroupSize) {
-                        float val = currentKey[groupStart + i];
-                        int quantized = int(round((val - groupMin) / groupScale));
-                        quantized = clamp(quantized, 0, 255);
-                        *(device uchar*)(blockOutput + 4 + i) = uchar(quantized);
-                    }
+                    device half* qjlOut = args.qjlResidualK + (position * kvHeadCount + kvHeadIndex) * qjlDimension;
+                    qjl_compute_residual(currentKey, args.keyCache + kWriteByteOffset, kQuantScheme,
+                        args.qjlMatrix, qjlOut, headDim, qjlDimension, kHeadSlotBytes, tid, threadgroupSize);
                 }
             }
             threadgroup_barrier(mem_flags::mem_device);
@@ -1231,55 +1058,13 @@ public static func generateFlashAttentionArgumentTableVariant(
                 vWriteByteOffset = position * kvHeadCount * vHeadSlotBytes + kvHeadIndex * vHeadSlotBytes;
             }
 
-            if (vRotor) {
-                uint vBase = rotor_base_scheme(vQuantScheme);
-                if (vBase == 0x40) {
-                    write_kv_quantized_q4(currentValue, args.valueCache + vWriteByteOffset, headDim, tid, threadgroupSize, tiisg, sgitg, quantSMin, quantSMax);
-                } else {
-                    write_kv_quantized_q8(currentValue, args.valueCache + vWriteByteOffset, headDim, tid, threadgroupSize, tiisg, sgitg, quantSMin, quantSMax);
-                }
-            } else if (vQuantScheme == 0x00 || vQuantScheme == 0x01 || vQuantScheme == 0x02) {
+            if (vQuantScheme == 0x00 || vQuantScheme == 0x01 || vQuantScheme == 0x02) {
                 for (uint d = tid; d < headDim; d += threadgroupSize) {
                     write_kv_element_dense(args.valueCache + vWriteByteOffset, d, currentValue[d], vQuantScheme);
                 }
             } else {
-                const uint groupSize = 32;
-                const uint bytesPerBlock = 36;
-                const uint numGroups = (headDim + groupSize - 1) / groupSize;
-                for (uint g = 0; g < numGroups; g++) {
-                    uint groupStart = g * groupSize;
-                    float localMin = HUGE_VALF, localMax = -HUGE_VALF;
-                    for (uint i = tid; i < groupSize && (groupStart + i) < headDim; i += threadgroupSize) {
-                        float val = currentValue[groupStart + i];
-                        localMin = min(localMin, val); localMax = max(localMax, val);
-                    }
-                    localMin = simd_min(localMin); localMax = simd_max(localMax);
-                    threadgroup float sharedMin[32], sharedMax[32];
-                    if (tiisg == 0) { sharedMin[sgitg] = localMin; sharedMax[sgitg] = localMax; }
-                    threadgroup_barrier(mem_flags::mem_threadgroup);
-                    if (tid == 0) {
-                        uint sgCount = (threadgroupSize + SIMD_WIDTH - 1) / SIMD_WIDTH;
-                        float gMin = sharedMin[0], gMax = sharedMax[0];
-                        for (uint s = 1; s < sgCount; s++) { gMin = min(gMin, sharedMin[s]); gMax = max(gMax, sharedMax[s]); }
-                        sharedMin[0] = gMin; sharedMax[0] = gMax;
-                    }
-                    threadgroup_barrier(mem_flags::mem_threadgroup);
-                    float groupMin = sharedMin[0], groupMax = sharedMax[0];
-                    float groupScale = (groupMax - groupMin) / 255.0f;
-                    if (groupScale < 1e-10f) groupScale = 1e-10f;
-                    device uchar* blockOutput = args.valueCache + vWriteByteOffset + g * bytesPerBlock;
-                    if (tid == 0) {
-                        *(device half*)(blockOutput) = half(groupScale);
-                        *(device half*)(blockOutput + 2) = half(groupMin);
-                    }
-                    threadgroup_barrier(mem_flags::mem_device);
-                    for (uint i = tid; i < groupSize && (groupStart + i) < headDim; i += threadgroupSize) {
-                        float val = currentValue[groupStart + i];
-                        int quantized = int(round((val - groupMin) / groupScale));
-                        quantized = clamp(quantized, 0, 255);
-                        *(device uchar*)(blockOutput + 4 + i) = uchar(quantized);
-                    }
-                }
+                write_kv_quantized(vQuantScheme, currentValue, args.valueCache + vWriteByteOffset,
+                    headDim, tid, threadgroupSize, tiisg, sgitg, quantSMin, quantSMax);
             }
         }
 
@@ -1511,15 +1296,10 @@ public static func generateKVCacheFillSeq(
                 vByteOffset = pos * kvHeadCount * vHeadSlotBytes + kvHead * vHeadSlotBytes;
             }
 
-            if (kRotor) {
-                uint kBase = rotor_base_scheme(kQuantScheme);
-                if (kBase == 0x40) {
-                    write_kv_quantized_q4(rotatedK, keyCache + kByteOffset, headDim, tid, threadgroupSize, tiisg, sgitg, quantSMin, quantSMax);
-                } else {
-                    write_kv_quantized_q8(rotatedK, keyCache + kByteOffset, headDim, tid, threadgroupSize, tiisg, sgitg, quantSMin, quantSMax);
-                }
-                // QJL residual for K
-                if (qjlDimension > 0) {
+            if (kv_quant_bits(kQuantScheme) > 0) {
+                write_kv_quantized(kQuantScheme, rotatedK, keyCache + kByteOffset,
+                    headDim, tid, threadgroupSize, tiisg, sgitg, quantSMin, quantSMax);
+                if (kRotor && qjlDimension > 0) {
                     threadgroup_barrier(mem_flags::mem_device);
                     device half* qjlOut = qjlResidualK + (pos * kvHeadCount + kvHead) * qjlDimension;
                     qjl_compute_residual(rotatedK, keyCache + kByteOffset, kQuantScheme,
@@ -1532,13 +1312,9 @@ public static func generateKVCacheFillSeq(
             }
             threadgroup_barrier(mem_flags::mem_device);
 
-            if (vRotor) {
-                uint vBase = rotor_base_scheme(vQuantScheme);
-                if (vBase == 0x40) {
-                    write_kv_quantized_q4(rotatedV, valueCache + vByteOffset, headDim, tid, threadgroupSize, tiisg, sgitg, quantSMin, quantSMax);
-                } else {
-                    write_kv_quantized_q8(rotatedV, valueCache + vByteOffset, headDim, tid, threadgroupSize, tiisg, sgitg, quantSMin, quantSMax);
-                }
+            if (kv_quant_bits(vQuantScheme) > 0) {
+                write_kv_quantized(vQuantScheme, rotatedV, valueCache + vByteOffset,
+                    headDim, tid, threadgroupSize, tiisg, sgitg, quantSMin, quantSMax);
             } else {
                 for (uint d = tid; d < headDim; d += threadgroupSize) {
                     write_kv_element_dense(valueCache + vByteOffset, d, rotatedV[d], vQuantScheme);
@@ -1819,21 +1595,9 @@ public static func generateKVCacheTransfer(name: String) -> String {
                 }
             }
 
-            const uint destinationKBaseScheme = rotor_base_scheme(params.destinationKScheme);
-            if (destinationKBaseScheme == 0x40) {
-                write_kv_quantized_q4(
-                    convertedK,
-                    destinationKeyCache + destinationKByteOffset,
-                    headDim,
-                    tid,
-                    threadgroupSize,
-                    tiisg,
-                    sgitg,
-                    quantSMin,
-                    quantSMax
-                );
-            } else if (destinationKBaseScheme == 0x10) {
-                write_kv_quantized_q8(
+            if (kv_quant_bits(params.destinationKScheme) > 0) {
+                write_kv_quantized(
+                    params.destinationKScheme,
                     convertedK,
                     destinationKeyCache + destinationKByteOffset,
                     headDim,
@@ -1874,21 +1638,9 @@ public static func generateKVCacheTransfer(name: String) -> String {
             }
             threadgroup_barrier(mem_flags::mem_device);
 
-            const uint destinationVBaseScheme = rotor_base_scheme(params.destinationVScheme);
-            if (destinationVBaseScheme == 0x40) {
-                write_kv_quantized_q4(
-                    convertedV,
-                    destinationValueCache + destinationVByteOffset,
-                    headDim,
-                    tid,
-                    threadgroupSize,
-                    tiisg,
-                    sgitg,
-                    quantSMin,
-                    quantSMax
-                );
-            } else if (destinationVBaseScheme == 0x10) {
-                write_kv_quantized_q8(
+            if (kv_quant_bits(params.destinationVScheme) > 0) {
+                write_kv_quantized(
+                    params.destinationVScheme,
                     convertedV,
                     destinationValueCache + destinationVByteOffset,
                     headDim,
@@ -2110,6 +1862,42 @@ inline void rotor_apply_inverse(
 
 // --- KV cache read/write ---
 
+// Block-layout helpers. Resolve (groupSize, bytesPerBlock, bits) from the
+// scheme uniform so FlashAttention kernels never hardcode layout. Rotor
+// schemes delegate to their base quantization layout. Returning 0 means the
+// scheme has no kernel-supported layout; Swift-side precondition in
+// `KVCacheSpecification.init` rejects such schemes before dispatch, so these
+// 0 returns are only reached under a programming error and surface as NaN in
+// `read_kv_element` rather than silently corrupting data.
+inline uint kv_quant_group_size(uint scheme) {
+    uint base = is_rotor_scheme(scheme) ? rotor_base_scheme(scheme) : scheme;
+    if (base == 0x10) return 32;   // Q8G32
+    if (base == 0x11) return 64;   // Q8G64
+    if (base == 0x12) return 128;  // Q8G128
+    if (base == 0x40) return 64;   // Q4G64
+    if (base == 0x41) return 128;  // Q4G128
+    if (base == 0x42) return 128;  // Q4G128Zero
+    return 0;
+}
+
+inline uint kv_quant_bytes_per_block(uint scheme) {
+    uint base = is_rotor_scheme(scheme) ? rotor_base_scheme(scheme) : scheme;
+    if (base == 0x10) return 36;   // 32 × 1B + 4B header
+    if (base == 0x11) return 68;   // 64 × 1B + 4B header
+    if (base == 0x12) return 132;  // 128 × 1B + 4B header
+    if (base == 0x40) return 36;   // 64 × 0.5B + 4B header
+    if (base == 0x41) return 68;   // 128 × 0.5B + 4B header
+    if (base == 0x42) return 68;   // 128 × 0.5B + 4B header
+    return 0;
+}
+
+inline uint kv_quant_bits(uint scheme) {
+    uint base = is_rotor_scheme(scheme) ? rotor_base_scheme(scheme) : scheme;
+    if (base == 0x10 || base == 0x11 || base == 0x12) return 8;
+    if (base == 0x40 || base == 0x41 || base == 0x42) return 4;
+    return 0;
+}
+
 inline float read_kv_element(
     device const uchar* cache, uint elementIndex, uint kvQuantScheme,
     uint headSlotBytes, uint headDim
@@ -2124,28 +1912,25 @@ inline float read_kv_element(
     if (baseScheme == 0x02) {
         return ((device const float*)cache)[elementIndex];
     }
-    if (baseScheme == 0x40) {
-        const uint groupSize = 64;
-        const uint bytesPerBlock = 36;
-        uint group = elementIndex / groupSize;
-        uint indexInGroup = elementIndex % groupSize;
-        uint blockOffset = group * bytesPerBlock;
-        float scale = float(*(device const half*)(cache + blockOffset));
-        float zero = float(*(device const half*)(cache + blockOffset + 2));
-        uchar packed = *(device const uchar*)(cache + blockOffset + 4 + indexInGroup / 2);
-        uchar nibble = (indexInGroup % 2 == 0) ? (packed & 0x0F) : (packed >> 4);
-        return scale * float(nibble) + zero;
+    uint bits = kv_quant_bits(kvQuantScheme);
+    uint groupSize = kv_quant_group_size(kvQuantScheme);
+    uint bytesPerBlock = kv_quant_bytes_per_block(kvQuantScheme);
+    if (bits == 0 || groupSize == 0 || bytesPerBlock == 0) {
+        return NAN;  // unreachable: Swift KVCacheSpecification precondition rejects this scheme
     }
-    // Q8: 32 elements per group
-    const uint groupSize = 32;
-    const uint bytesPerBlock = 36;
     uint group = elementIndex / groupSize;
     uint indexInGroup = elementIndex % groupSize;
     uint blockOffset = group * bytesPerBlock;
     float scale = float(*(device const half*)(cache + blockOffset));
     float zero = float(*(device const half*)(cache + blockOffset + 2));
-    uchar quantized = *(device const uchar*)(cache + blockOffset + 4 + indexInGroup);
-    return scale * float(quantized) + zero;
+    if (bits == 8) {
+        uchar quantized = *(device const uchar*)(cache + blockOffset + 4 + indexInGroup);
+        return scale * float(quantized) + zero;
+    }
+    // bits == 4
+    uchar packed = *(device const uchar*)(cache + blockOffset + 4 + indexInGroup / 2);
+    uchar nibble = (indexInGroup % 2 == 0) ? (packed & 0x0F) : (packed >> 4);
+    return scale * float(nibble) + zero;
 }
 
 inline void write_kv_element_dense(
@@ -2244,15 +2029,16 @@ inline float qjl_score_correction(
 
 /// Write a full head vector to KV cache with per-group Q8 quantization.
 /// `sMin` and `sMax` must be threadgroup float arrays of at least 32 elements,
-/// provided by the calling kernel function.
+/// provided by the calling kernel function. `groupSize` and `bytesPerBlock`
+/// are resolved from the scheme uniform via `kv_quant_group_size` /
+/// `kv_quant_bytes_per_block` — never hardcoded by callers.
 inline void write_kv_quantized_q8(
     threadgroup const float* src, device uchar* cacheSlot,
     uint headDim, uint tid, uint threadgroupSize,
     uint tiisg, uint sgitg,
-    threadgroup float* sMin, threadgroup float* sMax
+    threadgroup float* sMin, threadgroup float* sMax,
+    uint groupSize, uint bytesPerBlock
 ) {
-    const uint groupSize = 32;
-    const uint bytesPerBlock = 36;
     const uint numGroups = (headDim + groupSize - 1) / groupSize;
     for (uint g = 0; g < numGroups; g++) {
         uint groupStart = g * groupSize;
@@ -2293,15 +2079,16 @@ inline void write_kv_quantized_q8(
 
 /// Write a full head vector to KV cache with per-group Q4 quantization.
 /// `sMin` and `sMax` must be threadgroup float arrays of at least 32 elements,
-/// provided by the calling kernel function.
+/// provided by the calling kernel function. `groupSize` and `bytesPerBlock`
+/// are resolved from the scheme uniform via `kv_quant_group_size` /
+/// `kv_quant_bytes_per_block` — never hardcoded by callers.
 inline void write_kv_quantized_q4(
     threadgroup const float* src, device uchar* cacheSlot,
     uint headDim, uint tid, uint threadgroupSize,
     uint tiisg, uint sgitg,
-    threadgroup float* sMin, threadgroup float* sMax
+    threadgroup float* sMin, threadgroup float* sMax,
+    uint groupSize, uint bytesPerBlock
 ) {
-    const uint groupSize = 64;
-    const uint bytesPerBlock = 36;
     const uint numGroups = (headDim + groupSize - 1) / groupSize;
     for (uint g = 0; g < numGroups; g++) {
         uint groupStart = g * groupSize;
@@ -2339,6 +2126,33 @@ inline void write_kv_quantized_q4(
             *(device uchar*)(block + 4 + i) = q0 | (q1 << 4);
         }
     }
+}
+
+/// Scheme-generic KV cache write dispatcher. Resolves block layout (bits,
+/// groupSize, bytesPerBlock) from `scheme` and delegates to the matching
+/// parameterized writer. Unsupported schemes (bits == 0) are programming
+/// errors — Swift-side `KVCacheSpecification.init` rejects them before
+/// dispatch, so falling through here is treated as a no-op rather than
+/// silently corrupting the cache with the wrong layout.
+inline void write_kv_quantized(
+    uint scheme,
+    threadgroup const float* src, device uchar* cacheSlot,
+    uint headDim, uint tid, uint threadgroupSize,
+    uint tiisg, uint sgitg,
+    threadgroup float* sMin, threadgroup float* sMax
+) {
+    uint bits = kv_quant_bits(scheme);
+    uint groupSize = kv_quant_group_size(scheme);
+    uint bytesPerBlock = kv_quant_bytes_per_block(scheme);
+    if (bits == 8) {
+        write_kv_quantized_q8(src, cacheSlot, headDim, tid, threadgroupSize,
+                              tiisg, sgitg, sMin, sMax, groupSize, bytesPerBlock);
+    } else if (bits == 4) {
+        write_kv_quantized_q4(src, cacheSlot, headDim, tid, threadgroupSize,
+                              tiisg, sgitg, sMin, sMax, groupSize, bytesPerBlock);
+    }
+    // else: scheme is dense (use write_kv_element_dense) or unsupported
+    // (blocked by Swift precondition). No-op here prevents corruption.
 }
 """
 
