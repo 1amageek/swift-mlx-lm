@@ -4,6 +4,14 @@ import Testing
 
 enum RealOutputAssertionSupport {
     static let strictCapitalPrompt = "What is the capital of Japan? Answer with exactly one word."
+    static let capitalCompletionPrompt = "The capital of Japan is"
+
+    static func directTextPrompt(_ text: String, using context: LanguageModelContext) -> PreparedPrompt {
+        PreparedPrompt(
+            renderedText: text,
+            tokenIDs: context.tokenizer.encode(text: text)
+        )
+    }
 
     static func greedyParameters(maxTokens: Int = 8) -> GenerationParameters {
         GenerationParameters(
@@ -121,6 +129,16 @@ enum RealOutputAssertionSupport {
         #expect(
             normalizedText.hasPrefix("Tokyo"),
             "\(label) should start with Tokyo for the strict capital prompt"
+        )
+    }
+
+    static func assertHasPrefix(_ text: String, prefix: String, label: String) {
+        let normalizedText = normalized(text)
+        print("[\(label) normalized output] \(normalizedText)")
+        #expect(!normalizedText.isEmpty, "\(label) output must not be empty")
+        #expect(
+            normalizedText.hasPrefix(prefix),
+            "\(label) should start with \(prefix)"
         )
     }
 }

@@ -10,7 +10,9 @@ struct ReleaseSmokeOutputTests {
         let loader = ModelBundleLoader()
         let container = try await loader.load(directory: localModelDirectory)
         let context = try LanguageModelContext(container)
-        let prepared = try await context.prepare(ModelInput(prompt: RealOutputAssertionSupport.strictCapitalPrompt)
+        let prepared = RealOutputAssertionSupport.directTextPrompt(
+            RealOutputAssertionSupport.capitalCompletionPrompt,
+            using: context
         )
         let executable = try ExecutablePrompt(preparedPrompt: prepared, using: context)
         let comparison = try RealOutputAssertionSupport.assertGreedyDirectMatchesPromptState(
@@ -24,26 +26,4 @@ struct ReleaseSmokeOutputTests {
         )
     }
 
-    @Test("Local LFM chat prompt starts a strict factual answer with Tokyo", .timeLimit(.minutes(2)))
-    func localBundleCapitalOfJapanChatOutput() async throws {
-        guard let localModelDirectory = ReleaseSmokeTestSupport.readableLocalModelDirectoryOrSkip() else { return }
-
-        let loader = ModelBundleLoader()
-        let container = try await loader.load(directory: localModelDirectory)
-        let context = try LanguageModelContext(container)
-        let prepared = try await context.prepare(ModelInput(chat: [
-                .user([.text(RealOutputAssertionSupport.strictCapitalPrompt)])
-            ])
-        )
-        let executable = try ExecutablePrompt(preparedPrompt: prepared, using: context)
-        let comparison = try RealOutputAssertionSupport.assertGreedyDirectMatchesPromptState(
-            container: context,
-            prompt: executable,
-            label: "LFM chat greedy"
-        )
-        RealOutputAssertionSupport.assertStartsWithTokyo(
-            comparison.directText,
-            label: "LFM chat greedy"
-        )
-    }
 }

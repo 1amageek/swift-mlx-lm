@@ -2,6 +2,7 @@ import Foundation
 import Metal
 import Testing
 import Tokenizers
+@testable import LMIR
 @testable import MetalCompiler
 @testable import SwiftLM
 @testable import LMArchitecture
@@ -17,8 +18,14 @@ enum Gemma4TestSupport {
     }
 
     static func optionalRealGemma4Directory() throws -> URL? {
+        let repositoryRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
         let directCandidates = [
-            "/Users/1amageek/Desktop/swift-lm/TestData/gemma-4-E2B-it",
+            repositoryRoot.appendingPathComponent("TestData/gemma-4-E2B-it").path,
         ]
         for candidate in directCandidates {
             let directory = URL(fileURLWithPath: candidate)
@@ -347,6 +354,68 @@ enum Gemma4TestSupport {
         }
     }
 
+    static func syntheticSTAFWeightStore(
+        graph: ModelGraph,
+        hiddenSize: Int,
+        device: MTLDevice
+    ) throws -> STAFWeightStore {
+        let denseTensors = syntheticDenseTensors(hiddenSize: hiddenSize)
+        let maxElements = max(1, denseTensors.values.map { $0.shape.reduce(1, *) }.max() ?? 1)
+        let payloadSize = maxElements * MemoryLayout<UInt16>.stride
+        guard let buffer = device.makeBuffer(length: payloadSize, options: .storageModeShared) else {
+            throw MetalCompilerError.deviceSetupFailed("Cannot allocate synthetic Gemma4 weight buffer")
+        }
+        memset(buffer.contents(), 0, buffer.length)
+
+        var entries: [String: STAFTensorEntry] = [:]
+        let allTensorNames = tensorNames(in: graph.rootRegion).union(denseTensors.keys)
+        for tensorName in allTensorNames {
+            let shape = denseTensors[tensorName]?.shape ?? [maxElements]
+            entries[tensorName] = STAFTensorEntry(
+                name: tensorName,
+                payloadOffset: 0,
+                payloadSize: payloadSize,
+                schemeIdentifier: .fp16RowMajor,
+                semanticRole: .unknown,
+                shape: shape,
+                blockSize: 0,
+                groupSize: 0,
+                bufferOffset: 0
+            )
+        }
+
+        return STAFWeightStore(
+            buffer: buffer,
+            entries: entries,
+            metadata: .empty,
+            specializedBufferAccesses: [:]
+        )
+    }
+
+    private static func tensorNames(in region: Region) -> Set<String> {
+        var names = Set(region.operations.flatMap { operation in
+            operation.parameterBindings.map(\.tensorName)
+        })
+        for operation in region.operations {
+            switch operation.kind {
+            case .primitive:
+                break
+            case .residual(_, let body):
+                names.formUnion(tensorNames(in: body))
+            case .parallel(_, let branches):
+                for branch in branches {
+                    names.formUnion(tensorNames(in: branch))
+                }
+            case .repeating(_, let body):
+                names.formUnion(tensorNames(in: body))
+            case .conditional(_, let thenRegion, let elseRegion):
+                names.formUnion(tensorNames(in: thenRegion))
+                names.formUnion(tensorNames(in: elseRegion))
+            }
+        }
+        return names
+    }
+
     private static func snapshotDirectories(baseURL: URL) throws -> [URL] {
         let snapshots = baseURL.appendingPathComponent("snapshots")
         guard FileManager.default.fileExists(atPath: snapshots.path) else {
@@ -381,12 +450,18 @@ private actor Gemma4SyntheticContainerCache {
         let config = Gemma4TestSupport.syntheticConfig()
         let graph = try ModelGraph(Gemma4(config: config))
         let resolvedGraph = ParameterResolver().resolve(graph: graph, convention: .gemma4Family)
+        let stafWeightStore = try Gemma4TestSupport.syntheticSTAFWeightStore(
+            graph: resolvedGraph,
+            hiddenSize: config.hiddenSize,
+            device: device
+        )
         let compiler = MetalInferenceCompiler()
         var compiledModel = try compiler.compile(
             graph: resolvedGraph,
             hiddenSize: config.hiddenSize,
             intermediateSize: config.intermediateSize,
             vocabSize: config.vocabSize,
+            stafWeightStore: stafWeightStore,
             device: device
         )
         let prefillPlan = try compiler.compilePrefill(
@@ -395,6 +470,7 @@ private actor Gemma4SyntheticContainerCache {
             intermediateSize: config.intermediateSize,
             vocabSize: config.vocabSize,
             inferencePolicy: InferencePolicy(maximumSequenceLength: 256),
+            stafWeightStore: stafWeightStore,
             sharedKVCache: compiledModel.buffers.kvCache,
             sharedConvState: compiledModel.buffers.convState,
             sharedConvStateDimension: compiledModel.buffers.convStateDimension,

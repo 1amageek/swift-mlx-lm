@@ -2,8 +2,13 @@ import Foundation
 
 enum ReleaseSmokeTestSupport {
     static let localModelDirectory = URL(
-        fileURLWithPath: "/Users/1amageek/Desktop/swift-lm/TestData/LFM2.5-1.2B-Thinking"
+        fileURLWithPath: #filePath
     )
+    .deletingLastPathComponent()
+    .deletingLastPathComponent()
+    .deletingLastPathComponent()
+    .deletingLastPathComponent()
+    .appendingPathComponent("TestData/LFM2.5-1.2B-Thinking")
 
     static func readableLocalModelDirectoryOrSkip() -> URL? {
         let configURL = localModelDirectory.appendingPathComponent("config.json")

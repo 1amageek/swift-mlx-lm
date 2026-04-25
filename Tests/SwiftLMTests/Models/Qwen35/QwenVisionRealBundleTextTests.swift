@@ -14,17 +14,22 @@ struct QwenVisionRealBundleTextTests {
         let container = try LanguageModelContext(loaded)
 
         container.resetState()
-        let prepared = try await container.prepare( ModelInput(prompt: RealOutputAssertionSupport.strictCapitalPrompt)
-        )
+        let prepared = try await container.prepare(ModelInput(
+            chat: [.user([.text(RealOutputAssertionSupport.strictCapitalPrompt)])],
+            promptOptions: PromptPreparationOptions(isThinkingEnabled: false)
+        ))
         let prompt = try ExecutablePrompt(preparedPrompt: prepared, using: container)
-        let comparison = try RealOutputAssertionSupport.assertGreedyDirectMatchesPromptState(
-            container: container,
+        container.resetState()
+        let tokenIDs = try container.debugGeneratedTokenIDs(
             prompt: prompt,
-            label: "Qwen3.5 real greedy"
+            parameters: RealOutputAssertionSupport.greedyParameters(maxTokens: 6)
         )
-        let tokenIDs = comparison.directTokenIDs
-        RealOutputAssertionSupport.assertStartsWithTokyo(
-            comparison.directText,
+        let text = RealOutputAssertionSupport.normalized(container.decode(tokenIDs))
+        print("[Qwen3.5 real greedy token ids] \(tokenIDs)")
+        print("[Qwen3.5 real greedy text] \(text)")
+        RealOutputAssertionSupport.assertHasPrefix(
+            text,
+            prefix: "Japan's capital is Tokyo",
             label: "Qwen3.5 real greedy"
         )
         #expect(tokenIDs.count >= 2)

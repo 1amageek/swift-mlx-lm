@@ -41,6 +41,7 @@ extension BatchedFragment: PrimitiveMetalKernelFragment {
         var outputIsHidden = false
         var expectedHeadDimension: Int?
         var expectedEpsilon: Float?
+        var expectedWeightBias: Float?
 
         let fragmentCount = fragments.count
         bufferBindings.reserveCapacity(fragmentCount * 2)
@@ -90,6 +91,12 @@ extension BatchedFragment: PrimitiveMetalKernelFragment {
             }
             expectedEpsilon = epsilon
 
+            let weightBias = fragment.normWeightBias ?? 0
+            if let expectedWeightBias, expectedWeightBias != weightBias {
+                preconditionFailure("Batched fragments must share the same weight bias")
+            }
+            expectedWeightBias = weightBias
+
             bufferBindings.append((fragmentIndex, dataBinding.buffer, dataBinding.offset))
             bufferBindings.append((fragmentCount + fragmentIndex, weightBinding.buffer, weightBinding.offset))
             bytesBindings.append(uint32Binding(2 * fragmentCount + fragmentIndex, UInt32(headCount)))
@@ -111,6 +118,7 @@ extension BatchedFragment: PrimitiveMetalKernelFragment {
         if let expectedEpsilon {
             bytesBindings.append(floatBinding(3 * fragmentCount + 1, expectedEpsilon))
         }
+        bytesBindings.append(floatBinding(3 * fragmentCount + 2, expectedWeightBias ?? 0))
 
         return FragmentBindings(
             buffers: bufferBindings,

@@ -451,6 +451,51 @@ struct MetalSourceGeneratorTests {
         #expect(SSMRecurrenceFragment.sequenceKernelName(bufferPrecision: .float32, weightFormat: .bfloat16) == "ssm_recurrence_seq_bf16_f32")
     }
 
+    @Test("SSM recurrence reads Qwen norm weight as float unit offset")
+    func ssmRecurrenceUsesFloatUnitOffsetNormWeight() {
+        let decodeSource = MetalSourceGenerator.generateSSMRecurrence(
+            name: "ssm_recurrence_bf16",
+            bufferPrecision: .float16,
+            weightFormat: .bfloat16,
+            convDimension: 4096,
+            maxThreadgroupSize: 1024,
+            headCount: 16,
+            groupCount: 16,
+            keyHeadDimension: 128,
+            valueHeadDimension: 128
+        )
+        let sequenceSource = MetalSourceGenerator.generateSSMRecurrenceSequence(
+            name: "ssm_recurrence_seq_bf16_f32",
+            bufferPrecision: .float32,
+            weightFormat: .bfloat16,
+            convDimension: 4096,
+            maxThreadgroupSize: 1024,
+            headCount: 16,
+            groupCount: 16,
+            keyHeadDimension: 128,
+            valueHeadDimension: 128
+        )
+
+        for source in [decodeSource, sequenceSource] {
+            #expect(source.contains("device const float* normWeight [[buffer(5)]]"))
+            #expect(source.contains("1.0f + normWeight[d]"))
+            #expect(!source.contains("bf16_to_float(normWeight[d])"))
+        }
+    }
+
+    @Test("Batched QK norm decode applies unit-offset weight bias")
+    func batchedQKNormDecodeAppliesWeightBias() {
+        let source = MetalSourceGenerator.generateBatchedPerHead2(
+            name: "batched_qk_rms_norm_bf16_2",
+            bufferPrecision: .float16,
+            weightFormat: .bfloat16
+        )
+
+        #expect(source.contains("constant float& weightBias     [[buffer(8)]]"))
+        #expect(source.contains("float affine = bf16_to_float(weight[i]) + weightBias;"))
+        #expect(source.contains("scale * affine"))
+    }
+
     @Test("Unified quantized GEMV emits MLX-compatible Q6 bit extraction")
     func unifiedQuantizedGEMVQ6EmitsMLXBitPattern() throws {
         let formats: [any QuantizationFormat] = [

@@ -4,17 +4,15 @@ import Testing
 @testable import SwiftLM
 
 private enum RotorQuantRealBundleTestSupport {
-    static let promptText = "What is the capital of Japan? Answer briefly."
-    static let expectedAnswer = "Tokyo"
-    static let answerWindowTokens = 32
+    static let promptText = RealOutputAssertionSupport.capitalCompletionPrompt
+    static let expectedPrefix = "Tokyo"
+    static let answerWindowTokens = 1
 
-    /// Assert that Gemma4 mentions "Tokyo" in its short factual answer.
+    /// Assert that Gemma4 starts its strict factual answer with "Tokyo".
     ///
-    /// The earlier version of this helper required the model's very first
-    /// token to equal "Tokyo", which is unrealistic for an instruct-tuned
-    /// model whose natural response is "The capital of Japan is Tokyo." —
-    /// the prefix is "The", not "Tokyo". Instead, generate a small window
-    /// and assert the expected fact appears anywhere in the decoded answer.
+    /// The direct completion prompt makes the expected first token stable, so
+    /// prefix matching is stronger than a loose contains check and still allows
+    /// punctuation after the first generated token.
     static func assertGemma4AnswersWithTokyo(
         inferencePolicy: InferencePolicy,
         label: String
@@ -33,7 +31,10 @@ private enum RotorQuantRealBundleTestSupport {
         }
 
         container.resetState()
-        let prepared = try await container.prepare(ModelInput(prompt: promptText))
+        let prepared = PreparedPrompt(
+            renderedText: "<bos>" + promptText,
+            tokenIDs: [2] + container.encode(promptText, addSpecialTokens: false)
+        )
         let prompt = try autoreleasepool {
             try ExecutablePrompt(preparedPrompt: prepared, using: container)
         }
@@ -63,8 +64,8 @@ private enum RotorQuantRealBundleTestSupport {
         print("[Gemma4 \(label) real answer] \(String(reflecting: normalized))")
         #expect(!normalized.isEmpty, "Model produced no output for \(label)")
         #expect(
-            normalized.contains(expectedAnswer),
-            "Expected \"\(expectedAnswer)\" in \(label) answer; got: \(String(reflecting: normalized))"
+            normalized.hasPrefix(expectedPrefix),
+            "Expected \(label) answer to start with \"\(expectedPrefix)\"; got: \(String(reflecting: normalized))"
         )
     }
 }

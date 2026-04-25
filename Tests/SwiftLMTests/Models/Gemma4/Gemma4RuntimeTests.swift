@@ -89,9 +89,14 @@ struct Gemma4RuntimeTests {
             print("[Skip] No Metal device available for Gemma4 runtime tests")
             return
         }
-        let prepared = try await container.prepare( ModelInput(prompt: "hello gemma4"))
+        let prepared = try await container.prepare(
+            ModelInput(chat: [.user([.text("hello gemma4")])])
+        )
         let executable = try ExecutablePrompt(preparedPrompt: prepared, using: container)
 
+        #expect(prepared.renderedText.contains("hello gemma4"))
+        #expect(prepared.renderedText.contains("<|turn>user"))
+        #expect(prepared.renderedText.contains("<|turn>model"))
         #expect(executable.visualContext == nil)
         #expect(executable.tokenIDs == prepared.tokenIDs)
     }

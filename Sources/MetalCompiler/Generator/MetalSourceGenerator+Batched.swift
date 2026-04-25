@@ -449,6 +449,7 @@ public static func generateBatchedPerHead2(
         constant uint& count1          [[buffer(5)]],
         constant uint& headDim         [[buffer(6)]],
         constant float& epsilon        [[buffer(7)]],
+        constant float& weightBias     [[buffer(8)]],
         uint headIndex                 [[threadgroup_position_in_grid]],
         uint tid                       [[thread_index_in_threadgroup]],
         uint threadgroupSize           [[threads_per_threadgroup]]
@@ -487,7 +488,8 @@ public static func generateBatchedPerHead2(
 
         float scale = shared[0];
         for (uint i = tid; i < headDim; i += threadgroupSize) {
-            data[offset + i] = \(bt)(float(data[offset + i]) * scale * \(readWeight("weight[i]")));
+            float affine = \(readWeight("weight[i]")) + weightBias;
+            data[offset + i] = \(bt)(float(data[offset + i]) * scale * affine);
         }
     }
     """
@@ -518,6 +520,7 @@ public static func generateBatchedPerHead2ArgumentTableVariant(
         constant uint& count1                    [[buffer(5)]],
         constant uint& headDim                   [[buffer(6)]],
         constant float& epsilon                  [[buffer(7)]],
+        constant float& weightBias               [[buffer(8)]],
         uint headIndex                           [[threadgroup_position_in_grid]],
         uint tid                                 [[thread_index_in_threadgroup]],
         uint threadgroupSize                     [[threads_per_threadgroup]]
@@ -554,7 +557,8 @@ public static func generateBatchedPerHead2ArgumentTableVariant(
 
         float scale = shared[0];
         for (uint i = tid; i < headDim; i += threadgroupSize) {
-            data[offset + i] = \(bt)(float(data[offset + i]) * scale * \(readWeight("weight[i]")));
+            float affine = \(readWeight("weight[i]")) + weightBias;
+            data[offset + i] = \(bt)(float(data[offset + i]) * scale * affine);
         }
     }
     """

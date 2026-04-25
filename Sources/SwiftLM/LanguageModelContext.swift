@@ -198,6 +198,14 @@ public final class LanguageModelContext: @unchecked Sendable {
             )
         }
 
+        if gemma4Runtime != nil {
+            return try await applyGemma4ChatTemplate(
+                messages: renderedMessages,
+                tools: tools,
+                originalMessages: messages
+            )
+        }
+
         if let template = chatTemplate {
             var context: [String: Value] = [
                 "messages": .array(try renderedMessages.map(makeJinjaMessageValue)),
@@ -217,23 +225,11 @@ public final class LanguageModelContext: @unchecked Sendable {
         }
 
         if modelTokenizer.hasChatTemplate {
-            let renderedTokenIDs = try modelTokenizer.applyChatTemplate(
-                messages: try renderedMessages.map(makeTokenizerMessage),
-                tools: tools.map { $0.map(makeTokenizerToolSpec) },
-                additionalContext: try tokenizerPromptTemplateContext(promptOptions: promptOptions)
-            )
-            let rendered = modelTokenizer.decode(tokens: renderedTokenIDs, skipSpecialTokens: false)
-            let prepared = try await prepareRenderedPrompt(rendered, messages: messages)
-            let preparedTokenIDs: [Int]?
-            if prepared.multimodal == nil {
-                preparedTokenIDs = renderedTokenIDs
-            } else {
-                preparedTokenIDs = nil
-            }
-            return RenderedPrompt(
-                text: prepared.text,
-                tokenIDs: preparedTokenIDs,
-                multimodal: prepared.multimodal
+            return try await applyTokenizerChatTemplate(
+                messages: renderedMessages,
+                originalMessages: messages,
+                tools: tools,
+                promptOptions: promptOptions
             )
         }
 
@@ -260,6 +256,69 @@ public final class LanguageModelContext: @unchecked Sendable {
         }
         .joined(separator: "\n")
         return try await prepareRenderedPrompt(rendered, messages: messages)
+    }
+
+    private func applyTokenizerChatTemplate(
+        messages: [InputMessage],
+        originalMessages: [InputMessage],
+        tools: [ToolDefinition]?,
+        promptOptions: PromptPreparationOptions
+    ) async throws -> RenderedPrompt {
+        let renderedTokenIDs = try modelTokenizer.applyChatTemplate(
+            messages: try messages.map(makeTokenizerMessage),
+            tools: tools.map { $0.map(makeTokenizerToolSpec) },
+            additionalContext: try tokenizerPromptTemplateContext(promptOptions: promptOptions)
+        )
+        let rendered = modelTokenizer.decode(tokens: renderedTokenIDs, skipSpecialTokens: false)
+        let prepared = try await prepareRenderedPrompt(rendered, messages: originalMessages)
+        let preparedTokenIDs: [Int]?
+        if prepared.multimodal == nil {
+            preparedTokenIDs = renderedTokenIDs
+        } else {
+            preparedTokenIDs = nil
+        }
+        return RenderedPrompt(
+            text: prepared.text,
+            tokenIDs: preparedTokenIDs,
+            multimodal: prepared.multimodal
+        )
+    }
+
+    private func applyGemma4ChatTemplate(
+        messages: [InputMessage],
+        tools: [ToolDefinition]?,
+        originalMessages: [InputMessage]
+    ) async throws -> RenderedPrompt {
+        if let tools, !tools.isEmpty {
+            throw LanguageModelContextError.unsupportedInputForModel(
+                "Gemma4 tool-use prompt rendering is not implemented."
+            )
+        }
+
+        var rendered = modelTokenizer.bosToken ?? "<bos>"
+        for message in messages {
+            let role = message.role == .assistant ? "model" : message.role.rawValue
+            rendered += "<|turn>\(role)\n"
+            rendered += try renderGemma4MessageContent(message)
+            rendered += "<turn|>\n"
+        }
+        rendered += "<|turn>model\n"
+        return try await prepareRenderedPrompt(rendered, messages: originalMessages)
+    }
+
+    private func renderGemma4MessageContent(_ message: InputMessage) throws -> String {
+        var rendered = ""
+        for item in message.content {
+            switch item {
+            case .text(let text):
+                rendered += text.trimmingCharacters(in: .whitespacesAndNewlines)
+            case .image:
+                rendered += "<|image|>"
+            case .video:
+                rendered += "<|video|>"
+            }
+        }
+        return rendered
     }
 
     private func renderedMessagesWithThinkingControl(
@@ -296,7 +355,10 @@ public final class LanguageModelContext: @unchecked Sendable {
     private func tokenizerPromptTemplateContext(
         promptOptions: PromptPreparationOptions
     ) throws -> [String: any Sendable] {
-        var context: [String: any Sendable] = ["add_vision_id": false]
+        var context: [String: any Sendable] = [
+            "add_generation_prompt": true,
+            "add_vision_id": false,
+        ]
         for (key, value) in try promptTemplateVariables(promptOptions: promptOptions) {
             context[key] = value.tokenizerValue
         }
@@ -652,6 +714,38 @@ public final class LanguageModelContext: @unchecked Sendable {
     private func prefill(prompt: ExecutablePrompt) throws -> (firstToken: Int32, ropePositionOffset: Int) {
         inferenceModel.resetState()
         if let gemma4PromptContext = prompt.gemma4PromptContext {
+            if gemma4PromptContext.usesEmbeddingOverrides == false {
+                var firstToken: Int32 = -1
+                for tokenIndex in prompt.tokenIDs.indices {
+                    guard tokenIndex < gemma4PromptContext.promptEmbeddings.count else {
+                        throw LanguageModelContextError.invalidPrefillResult
+                    }
+                    var valuesByLayer: [[Float]] = []
+                    valuesByLayer.reserveCapacity(gemma4PromptContext.perLayerInputs.count)
+                    for layerInputs in gemma4PromptContext.perLayerInputs {
+                        guard tokenIndex < layerInputs.count else {
+                            throw LanguageModelContextError.invalidPrefillResult
+                        }
+                        valuesByLayer.append(layerInputs[tokenIndex])
+                    }
+                    try inferenceModel.writeDecodePerLayerInputs(valuesByLayer)
+                    firstToken = try inferenceModel.decodeSync(
+                        hiddenState: gemma4PromptContext.promptEmbeddings[tokenIndex],
+                        ropePositionAxes: generationRoPEAxes(offset: 0)
+                    )
+                    guard firstToken >= 0 else {
+                        InternalLog.error(
+                            "[LanguageModelContext] Sequential Gemma4 text prefill failed for \(prompt.tokenIDs.count) prompt tokens"
+                        )
+                        throw LanguageModelContextError.invalidPrefillResult
+                    }
+                }
+                guard firstToken >= 0 else {
+                    InternalLog.error("[LanguageModelContext] Gemma4 text prefill received an empty prompt")
+                    throw LanguageModelContextError.invalidPrefillResult
+                }
+                return (firstToken: firstToken, ropePositionOffset: 0)
+            }
             try inferenceModel.writePrefillPerLayerInputs(gemma4PromptContext.perLayerInputs)
             let firstToken: Int32
             if gemma4PromptContext.usesEmbeddingOverrides {
@@ -667,6 +761,9 @@ public final class LanguageModelContext: @unchecked Sendable {
                 firstToken = inferenceModel.prefill(tokens: prompt.tokenIDs.map(Int32.init))
             }
             guard firstToken >= 0 else {
+                InternalLog.error(
+                    "[LanguageModelContext] Invalid Gemma4 prefill result for \(prompt.tokenIDs.count) prompt tokens"
+                )
                 throw LanguageModelContextError.invalidPrefillResult
             }
             return (firstToken: firstToken, ropePositionOffset: 0)
@@ -675,6 +772,9 @@ public final class LanguageModelContext: @unchecked Sendable {
             let promptTokens = prompt.tokenIDs.map(Int32.init)
             let firstToken = inferenceModel.prefill(tokens: promptTokens)
             guard firstToken >= 0 else {
+                InternalLog.error(
+                    "[LanguageModelContext] Invalid text prefill result for \(promptTokens.count) prompt tokens"
+                )
                 throw LanguageModelContextError.invalidPrefillResult
             }
             return (firstToken: firstToken, ropePositionOffset: 0)
@@ -764,6 +864,9 @@ public final class LanguageModelContext: @unchecked Sendable {
         }
 
         guard firstToken >= 0 else {
+            InternalLog.error(
+                "[LanguageModelContext] Invalid multimodal prefill result for \(prompt.tokenIDs.count) prompt tokens"
+            )
             throw LanguageModelContextError.invalidPrefillResult
         }
         return (
@@ -1892,6 +1995,33 @@ public final class LanguageModelContext: @unchecked Sendable {
                 layerIndex: step.metadata.layerIndex
             )
         }
+    }
+
+    internal func debugDescribeDecodeSteps(
+        indices: Set<Int>
+    ) -> [Int: String] {
+        let decodePlan = inferenceModel.decodePlan
+        var descriptions: [Int: String] = [:]
+        for index in indices.sorted() where index >= 0 && index < decodePlan.steps.count {
+            let step = decodePlan.steps[index]
+            let buffers = step.bufferBindings.map { binding in
+                let kind = describeBufferKind(
+                    buffer: binding.buffer,
+                    hidden: decodePlan.buffers.hidden,
+                    residual: decodePlan.buffers.residual,
+                    scratch: decodePlan.buffers.scratch
+                )
+                return "\(binding.index):\(kind)@\(binding.offset)"
+            }.joined(separator: ", ")
+            let bytes = step.bytesBindings.map { binding in
+                "\(binding.index):\(binding.value.count)b"
+            }.joined(separator: ", ")
+            let barrier = String(describing: step.barrierPolicy)
+            let entryIndex = step.metadata.entryIndex.map(String.init) ?? "-"
+            let weight = step.metadata.weightTensorName ?? "-"
+            descriptions[index] = "entry=\(entryIndex) weight=\(weight) barrier=\(barrier) buffers=[\(buffers)] bytes=[\(bytes)]"
+        }
+        return descriptions
     }
 
     internal func debugDecodeBindingProbes(

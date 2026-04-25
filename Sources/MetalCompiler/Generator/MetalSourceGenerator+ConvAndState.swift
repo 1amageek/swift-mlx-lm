@@ -418,7 +418,7 @@ public static func generateSSMRecurrence(
                 }
                 float rmsScale = rsqrt(totalNormSq / float(dv) + 1e-6f);
                 for (uint d = dStart; d < dEnd; ++d) {
-                    float normed = float(output[headIndex * dv + d]) * rmsScale * normWeight[d];
+                    float normed = float(output[headIndex * dv + d]) * rmsScale * (1.0f + normWeight[d]);
                     float z = float(projectedZ[headIndex * dv + d]);
                     output[headIndex * dv + d] = \(bt)(normed * z * stable_sigmoid(z));
                 }
@@ -629,7 +629,7 @@ public static func generateSSMRecurrenceSequence(
                     }
                     float rmsScale = rsqrt(totalNormSq / float(dv) + 1e-6f);
                     for (uint d = dStart; d < dEnd; ++d) {
-                        float normed = float(outputPos[headIndex * dv + d]) * rmsScale * normWeight[d];
+                        float normed = float(outputPos[headIndex * dv + d]) * rmsScale * (1.0f + normWeight[d]);
                         float z = float(projectedZPos[headIndex * dv + d]);
                         outputPos[headIndex * dv + d] = \(bt)(normed * z * stable_sigmoid(z));
                     }
