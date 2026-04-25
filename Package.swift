@@ -18,9 +18,9 @@ let package = Package(
         .library(name: "SwiftLM", targets: ["SwiftLM"]),
     ],
     dependencies: [
-        .package(url: "https://github.com/apple/swift-collections.git", from: "1.1.0"),
-        .package(url: "https://github.com/huggingface/swift-jinja", from: "2.3.2"),
-        .package(url: "https://github.com/huggingface/swift-transformers", .upToNextMinor(from: "1.1.9")),
+        .package(url: "https://github.com/apple/swift-collections.git", from: "1.4.1"),
+        .package(url: "https://github.com/huggingface/swift-jinja", from: "2.3.5"),
+        .package(url: "https://github.com/huggingface/swift-transformers", from: "1.3.0"),
         .package(url: "https://github.com/mattt/JSONSchema", from: "1.3.1"),
         .package(url: "https://github.com/1amageek/swift-testing-heartbeat", from: "0.1.0"),
     ],
