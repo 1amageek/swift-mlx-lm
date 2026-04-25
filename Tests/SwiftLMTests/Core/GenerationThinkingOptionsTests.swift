@@ -76,6 +76,18 @@ struct GenerationThinkingOptionsTests {
         #expect(trailing.answer.isEmpty)
     }
 
+    @Test("prompt-opened reasoning is detected only at prompt end")
+    func promptOpenedReasoningRequiresTrailingTag() {
+        let realPromptOpenedReasoning = "<|im_start|>assistant\n<think>\n"
+        let instructionalMention =
+            "<|im_start|>system\nDo not output <think> tags.<|im_end|>\n"
+            + "<|im_start|>user\nHello<|im_end|>\n"
+            + "<|im_start|>assistant\n"
+
+        #expect(LanguageModelContext.promptEndsInsideReasoning(realPromptOpenedReasoning, policy: policy))
+        #expect(!LanguageModelContext.promptEndsInsideReasoning(instructionalMention, policy: policy))
+    }
+
     @Test("visible mode keeps think tags inline when no separation is requested")
     func visibleModeKeepsInlineThinking() {
         var state = GenerationVisibilityState(policy: nil, emitsReasoning: false)

@@ -615,6 +615,67 @@ swift build
 - `storageModePrivate` のバッファを host sampling に渡してはいけない。CPU readable な logits source を明示的に使う。
 - end-to-end の弱い文字列一致だけで合格にしない。可能なら token IDs、先頭トークン列、HuggingFace Python 実装との一致を取る。
 
+### Output Verification Gate
+
+テストは「実行した」だけではリリース根拠にならない。ユーザーが受け取る出力条件を満たして初めて合格とする。今回の LFM thinking 回帰のように、`reasoning` が出ていても `answer` が空なら失敗である。
+
+#### 信用できないテストの禁止
+
+- `reasoning` が非空であることだけを検証する thinking E2E は禁止。必ず final answer も検証する。
+- `answer` / visible text が空、空白、改行のみでも通る smoke test は禁止。
+- `<think>` / `</think>` が answer に漏れていないことだけでは不十分。answer が実際に生成され、期待内容を含むことを検証する。
+- 1 つのモデルで通った結果を別モデル family の correctness 証拠として扱わない。Qwen で通っても LFM / Gemma の保証にはならない。
+- 1 つの経路で通った結果を別経路の証拠として扱わない。`generate` で通っても streaming の保証にはならない。
+- skip された real-bundle test を成功として扱わない。local asset 不足で skip した場合は `partial` と報告する。
+- benchmark、throughput、optimizer 有効化ログは output correctness の代替にならない。
+
+#### Thinking 対応モデルの必須検証
+
+thinking / reasoning をサポートするモデルを変更・リリースするときは、各対応モデル family ごとに次を満たす focused E2E を用意し、実行結果を確認する:
+
+- `PromptPreparationOptions.isThinkingEnabled == true`
+- `GenerationParameters.reasoning == .separate`
+- `temperature == 0` または固定 sampling state
+- `generate` 経路で reasoning が非空
+- `generate` 経路で answer が非空
+- `generate` 経路で answer が期待内容を含む、または token ID / exact prefix が reference と一致する
+- `stream` 経路で reasoning delta が出る
+- `stream` 経路で text delta が出る
+- `stream` 経路の accumulated answer が非空
+- answer に reasoning tag が混入しない
+- reasoning に raw tag が混入しない
+- `reasoning == .hidden` では answer に reasoning が漏れない
+
+最低対象:
+
+- LFM2 / LFM2.5 thinking bundles
+- Qwen thinking bundles
+- Gemma thinking / reasoning-channel bundles
+
+#### Release Stop Conditions
+
+次のいずれかに該当する場合は release を止める:
+
+- thinking E2E で `answer` が空、空白、改行のみ
+- streaming で reasoning だけが増え、text delta が出ない
+- max token に到達しても final answer に入らない
+- モデル family の 1 つでも実モデル確認が未実行
+- 既存 E2E が「reasoning 非空」だけを合格条件にしている
+- 出力がおかしいが benchmark や unit test が通ることを理由に進めようとしている
+
+#### 出力確認ログの必須項目
+
+release note または作業ログに次を残す:
+
+- model ID または local snapshot path
+- prompt/render options と generation/output options
+- `generate` と `stream` のどちらを実行したか
+- answer の先頭部分
+- reasoning の先頭部分
+- answer token count または text length
+- reasoning token count または text length
+- pass/fail と、skip した場合の理由
+
 ### Crash-Resistant Real-Model Test Procedure
 
 - `build-for-testing` を 1 回だけ実行し、その後は `test-without-building` で 1 case ずつ流す。

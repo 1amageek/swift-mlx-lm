@@ -154,6 +154,10 @@ public final class LanguageModelContext: @unchecked Sendable {
             renderedPrompt = try await applyChatTemplate(messages: messages, tools: input.tools, promptOptions: input.promptOptions)
         }
         let tokens = renderedPrompt.tokenIDs ?? modelTokenizer.encode(text: renderedPrompt.text)
+        InternalLog.generationDebug(
+            "[GenerationDebug] prepared prompt tokens=\(tokens.count) text=\"\(Self.debugSnippet(renderedPrompt.text, limit: 800))\" "
+                + "tail=\"\(Self.debugSnippet(modelTokenizer.decode(tokens: Array(tokens.suffix(Self.promptStateSamplingTailLimit)), skipSpecialTokens: false), limit: 400))\""
+        )
         var multimodal = renderedPrompt.multimodal
         if multimodal != nil {
             if gemma4Runtime != nil {
@@ -221,7 +225,21 @@ public final class LanguageModelContext: @unchecked Sendable {
                 context[key] = value
             }
             let rendered = try template.render(context)
-            return try await prepareRenderedPrompt(rendered, messages: messages)
+            let prepared = try await prepareRenderedPrompt(rendered, messages: messages)
+            let preparedTokenIDs: [Int]?
+            if prepared.multimodal == nil {
+                preparedTokenIDs = modelTokenizer.encode(
+                    text: prepared.text,
+                    addSpecialTokens: false
+                )
+            } else {
+                preparedTokenIDs = nil
+            }
+            return RenderedPrompt(
+                text: prepared.text,
+                tokenIDs: preparedTokenIDs,
+                multimodal: prepared.multimodal
+            )
         }
 
         if modelTokenizer.hasChatTemplate {
@@ -323,27 +341,9 @@ public final class LanguageModelContext: @unchecked Sendable {
 
     private func renderedMessagesWithThinkingControl(
         from messages: [InputMessage],
-        promptOptions: PromptPreparationOptions
+        promptOptions _: PromptPreparationOptions
     ) -> [InputMessage] {
-        guard shouldInjectDirectAnswerSystemPrompt(promptOptions: promptOptions),
-              messages.first?.role != .system else {
-            return messages
-        }
-
-        return [
-            .system([
-                .text(
-                    "Respond with the final answer only. Do not output internal reasoning, chain-of-thought, or <think> tags."
-                )
-            ])
-        ] + messages
-    }
-
-    private func shouldInjectDirectAnswerSystemPrompt(promptOptions: PromptPreparationOptions) -> Bool {
-        guard !promptOptions.isThinkingEnabled else { return false }
-        guard let chatTemplateSource else { return false }
-        return chatTemplateSource.contains("keep_past_thinking")
-            && !chatTemplateSource.contains("enable_thinking")
+        messages
     }
 
     private func jinjaPromptTemplateContext(
@@ -405,31 +405,22 @@ public final class LanguageModelContext: @unchecked Sendable {
             tokens: Array(promptTokenIDs.suffix(Self.promptStateSamplingTailLimit)),
             skipSpecialTokens: false
         )
-        let startsInsideReasoning = endsInsideReasoning(decodedPromptTail, policy: policy)
+        let startsInsideReasoning = Self.promptEndsInsideReasoning(decodedPromptTail, policy: policy)
         return startsInsideReasoning
     }
 
-    private func endsInsideReasoning(_ text: String, policy: ThinkingTagPolicy) -> Bool {
-        var index = text.startIndex
-        var insideReasoning = false
-
-        while index < text.endIndex {
-            if text[index...].hasPrefix(policy.openTag) {
-                insideReasoning = true
-                index = text.index(index, offsetBy: policy.openTag.count)
-                continue
-            }
-
-            if text[index...].hasPrefix(policy.closeTag) {
-                insideReasoning = false
-                index = text.index(index, offsetBy: policy.closeTag.count)
-                continue
-            }
-
-            index = text.index(after: index)
+    static func promptEndsInsideReasoning(_ text: String, policy: ThinkingTagPolicy) -> Bool {
+        guard let openRange = text.range(of: policy.openTag, options: .backwards) else {
+            return false
         }
 
-        return insideReasoning
+        if let closeRange = text.range(of: policy.closeTag, options: .backwards),
+           closeRange.lowerBound > openRange.lowerBound {
+            return false
+        }
+
+        let trailing = text[openRange.upperBound...]
+        return trailing.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     private func prepareRenderedPrompt(
@@ -615,6 +606,13 @@ public final class LanguageModelContext: @unchecked Sendable {
             emitsReasoning: parameters.reasoning.visibility == .separate,
             startsInsideReasoning: startsInsideReasoning
         )
+        let debugTokenLimit = InternalLog.generationDebugTokenLimit
+        InternalLog.generationDebug(
+            "[GenerationDebug] begin maxVisible=\(maxVisibleTokens) maxRaw=\(maxRawTokens) "
+                + "reasoning=\(parameters.reasoning.visibility) startsInsideReasoning=\(startsInsideReasoning) "
+                + "policy=\(visibilityPolicy.map { "\($0.openTag)...\($0.closeTag)" } ?? "none") "
+                + "debugTokenLimit=\(debugTokenLimit)"
+        )
 
         func emitBufferedChunkIfNeeded(force: Bool = false) {
             guard !bufferedRawTokenIDs.isEmpty else { return }
@@ -625,6 +623,14 @@ public final class LanguageModelContext: @unchecked Sendable {
             )
             bufferedRawTokenIDs.removeAll(keepingCapacity: true)
             let emitted = visibilityState.append(decodedText: decodedText)
+            if rawTokenCount <= debugTokenLimit || force {
+                InternalLog.generationDebug(
+                    "[GenerationDebug] chunk force=\(force) decoded=\"\(Self.debugSnippet(decodedText))\" "
+                        + "answer=\"\(Self.debugSnippet(emitted.answer))\" "
+                        + "reasoning=\"\(Self.debugSnippet(emitted.reasoning))\" "
+                        + "state=\(visibilityState.debugSummary)"
+                )
+            }
             if !emitted.answer.isEmpty {
                 visibleText += emitted.answer
                 continuation.yield(.text(emitted.answer))
@@ -638,6 +644,15 @@ public final class LanguageModelContext: @unchecked Sendable {
             rawTokenCount += 1
             if fallbackTokenIDs.count < maxVisibleTokens {
                 fallbackTokenIDs.append(Int(tokenID))
+            }
+            if InternalLog.generationDebugEnabled, rawTokenCount <= debugTokenLimit {
+                let decoded = self.modelTokenizer.decode(
+                    tokens: [Int(tokenID)],
+                    skipSpecialTokens: false
+                )
+                InternalLog.generationDebug(
+                    "[GenerationDebug] token index=\(rawTokenCount) id=\(tokenID) decoded=\"\(Self.debugSnippet(decoded))\""
+                )
             }
             bufferedRawTokenIDs.append(Int(tokenID))
             emitBufferedChunkIfNeeded()
@@ -717,6 +732,10 @@ public final class LanguageModelContext: @unchecked Sendable {
         let visibleTokenCount = visibleText.isEmpty
             ? 0
             : self.modelTokenizer.encode(text: visibleText, addSpecialTokens: false).count
+        InternalLog.generationDebug(
+            "[GenerationDebug] end rawCount=\(rawTokenCount) visibleTokenCount=\(visibleTokenCount) "
+                + "visible=\"\(Self.debugSnippet(visibleText))\" state=\(visibilityState.debugSummary)"
+        )
 
         let totalTime = CFAbsoluteTimeGetCurrent() - requestStartTime
         let tokensPerSecond = totalTime > 0 ? Double(visibleTokenCount) / totalTime : 0
@@ -2826,8 +2845,20 @@ public final class LanguageModelContext: @unchecked Sendable {
         reasoningVisibility: ReasoningOptions.Visibility
     ) -> Int {
         guard visibilityPolicy != nil else { return visibleLimit }
-        guard reasoningVisibility != .separate else { return visibleLimit }
-        return max(visibleLimit * 256, visibleLimit + 1024)
+        guard reasoningVisibility != .inline else { return visibleLimit }
+        return max(visibleLimit * 16, visibleLimit + 256)
+    }
+
+    private static func debugSnippet(_ text: String, limit: Int = 120) -> String {
+        let escaped = text
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\n", with: "\\n")
+            .replacingOccurrences(of: "\r", with: "\\r")
+            .replacingOccurrences(of: "\t", with: "\\t")
+        if escaped.count <= limit {
+            return escaped
+        }
+        return String(escaped.prefix(limit)) + "..."
     }
 
     private static func makeThinkingTagPolicy(
@@ -3077,6 +3108,16 @@ struct GenerationVisibilityState {
     private(set) var suppressingReasoning = false
     private(set) var didSuppressReasoning = false
     private var pendingText = ""
+
+    var debugSummary: String {
+        let pending = pendingText
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\n", with: "\\n")
+            .replacingOccurrences(of: "\r", with: "\\r")
+            .replacingOccurrences(of: "\t", with: "\\t")
+        let snippet = pending.count <= 80 ? pending : String(pending.prefix(80)) + "..."
+        return "suppressing=\(suppressingReasoning) didSuppress=\(didSuppressReasoning) pending=\"\(snippet)\""
+    }
 
     init(
         policy: ThinkingTagPolicy?,

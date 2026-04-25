@@ -5,9 +5,7 @@ import Testing
 
 @Suite("Chat Template Rendering", .serialized)
 struct ChatTemplateRenderingTests {
-    private static let lfmDirectory = URL(
-        fileURLWithPath: "/Users/1amageek/Desktop/swift-lm/TestData/LFM2.5-1.2B-Thinking"
-    )
+    private static let lfmDirectory = ReleaseSmokeTestSupport.localModelDirectory
     private static let gemmaDirectory = URL(
         fileURLWithPath: "/Users/1amageek/Desktop/swift-lm/TestData/gemma-4-E2B-it"
     )
@@ -149,6 +147,9 @@ struct ChatTemplateRenderingTests {
         print("[LFM rendered chat prompt]")
         print(prepared.renderedText)
 
+        let bosID = try #require(container.encode("<|startoftext|>", addSpecialTokens: false).first)
+        #expect(prepared.tokenIDs.first == bosID)
+        #expect(prepared.tokenIDs.dropFirst().first != bosID)
         #expect(prepared.renderedText.contains("What is the capital of Japan?"))
         #expect(!prepared.renderedText.contains("\"type\":\"text\""))
         #expect(!prepared.renderedText.contains(".\"}]"))

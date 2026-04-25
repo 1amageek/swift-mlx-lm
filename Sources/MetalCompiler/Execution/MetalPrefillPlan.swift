@@ -269,7 +269,7 @@ public struct MetalPrefillPlan: @unchecked Sendable {
     }
 
     package var requiresSequentialPromptIngestion: Bool {
-        if buffers.recurrentState != nil {
+        if buffers.convState != nil || buffers.recurrentState != nil {
             return true
         }
 

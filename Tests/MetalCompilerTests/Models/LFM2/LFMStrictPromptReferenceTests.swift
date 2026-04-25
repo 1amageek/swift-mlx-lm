@@ -105,6 +105,35 @@ struct LFMStrictPromptReferenceTests {
         #expect(metalTop.index == refTop.index, "Strict prompt prefill argmax mismatch")
     }
 
+    @Test("Strict prompt first decode step matches HuggingFace reference", .timeLimit(.minutes(2)))
+    func strictPromptFirstDecodeStepMatchesReference() throws {
+        let gpuLock = try GPUTestExclusion.acquire()
+        defer { gpuLock.release() }
+
+        let env = try setupOrSkip()
+        let tokens = try readInputTokens(env.ref)
+        var model = env.model
+
+        let firstToken = model.prefill(tokens: tokens)
+        let decodedToken = model.decodeSync(tokenID: firstToken)
+        let refLogits = try readRefTensorAsFloats(env.ref, name: "ref.decode_0.logits")
+        let metalLogits = readDecodeBuffer(model.buffers.logits, precision: model.buffers.bufferPrecision)
+        let metalTop = argmax(metalLogits)
+        let refTop = argmax(refLogits)
+        let maxErr = maxAbsoluteError(metalLogits, refLogits)
+
+        print("[StrictRef] decode0 input metal=\(firstToken)")
+        print("[StrictRef] decode0 output metal=\(decodedToken)")
+        print("[StrictRef] decode0 argmax metal=\(metalTop.index) python=\(refTop.index)")
+        print("[StrictRef] decode0 top-10 metal=\(formatTopK(topK(metalLogits, k: 10)))")
+        print("[StrictRef] decode0 top-10 python=\(formatTopK(topK(refLogits, k: 10)))")
+        print("[StrictRef] decode0 maxErr=\(String(format: "%.4f", maxErr))")
+
+        #expect(firstToken == 64400, "Strict prompt first token should be <think>")
+        #expect(Int(decodedToken) == refTop.index, "Strict prompt first decode token mismatch")
+        #expect(metalTop.index == refTop.index, "Strict prompt decode0 argmax mismatch")
+    }
+
     @Test("Layer13 dense MLP STAF rows match safetensors", .timeLimit(.minutes(2)))
     func layer13DenseMLPSTAFRowsMatchSafetensors() throws {
         let gpuLock = try GPUTestExclusion.acquire()

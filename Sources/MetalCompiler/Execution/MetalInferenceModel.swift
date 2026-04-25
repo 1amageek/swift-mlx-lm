@@ -582,7 +582,7 @@ public struct MetalInferenceModel: @unchecked Sendable {
         let schemes = Set(
             prefillPlan.quantizationKernelFamilies(path: nil)
         ).sorted().joined(separator: ", ")
-        InternalLog.error(
+        InternalLog.info(
             "[MetalInference] Sequence prefill is disabled for this plan; using decode-equivalent sequential prompt ingestion. Kernels: \(schemes)"
         )
     }

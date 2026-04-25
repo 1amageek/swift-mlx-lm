@@ -706,6 +706,15 @@ Evidence rules:
 - Do not use a suite-level green result if the intended case did not actually run.
 - If a real-bundle suite skips because assets are absent, record that as `partial`, not `done`.
 - If output correctness is unresolved, benchmark evidence can only raise an area to `partial`.
+- For thinking/reasoning models, do not accept tests that only assert non-empty
+  reasoning. A release-valid E2E must also assert non-empty final answer text,
+  expected answer content or reference-aligned token/prefix output, and no
+  reasoning tags leaked into the answer.
+- Validate each thinking-capable model family independently. Passing Qwen output
+  does not prove LFM or Gemma output, and passing `generate` does not prove
+  streaming.
+- Stop release validation if streaming emits reasoning deltas but never emits a
+  text delta, or if the accumulated answer is empty/whitespace-only.
 
 Recommended reporting format:
 
