@@ -33,6 +33,16 @@ struct UnifiedGEMVBitLevelTests {
         )
     }
 
+    @Test("Q3G64 GEMV matches reference dot product")
+    func q3Group64() throws {
+        try runSingleRowGEMVTest(
+            format: AffineQ3Group64Format(),
+            weights: (0..<64).map { UInt32($0 % 8) },
+            scale: 0.03125,
+            zero: 0.25
+        )
+    }
+
     // MARK: - Q5 (non-aligned)
 
     @Test("Q5G32 GEMV matches reference dot product")

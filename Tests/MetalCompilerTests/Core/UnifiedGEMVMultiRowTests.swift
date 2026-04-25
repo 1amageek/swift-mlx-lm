@@ -41,6 +41,11 @@ struct UnifiedGEMVMultiRowTests {
         try runMultiRowGEMVTest(format: AffineQ3Group32Format())
     }
 
+    @Test("Q3G64 multi-row GEMV aggregates per row")
+    func q3Group64MultiRow() throws {
+        try runMultiRowGEMVTest(format: AffineQ3Group64Format())
+    }
+
     // MARK: - Q4 (aligned)
 
     @Test("Q4G64 multi-row GEMV aggregates per row")

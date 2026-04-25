@@ -11,11 +11,14 @@ import LMIR
 /// Prerequisites:
 ///   1. Generate reference: `python3 scripts/hf/dump_lfm2_reference.py`
 ///   2. Have the STAF file in TestData/LFM2.5-1.2B-Thinking/model.staf
+#if ENABLE_METAL_PROBES
 @Suite("Reference Comparison", .serialized)
 struct ReferenceComparisonTests {
 
-    private static let referencePath = "/Users/1amageek/Desktop/swift-lm/TestData/lfm2_reference.safetensors"
-    private static let stafPath = "/Users/1amageek/Desktop/swift-lm/TestData/LFM2.5-1.2B-Thinking/model.staf"
+    private static let referencePath = URL(fileURLWithPath: BenchmarkSupport.testDataPath)
+        .appendingPathComponent("lfm2_reference.safetensors")
+        .path
+    private static let stafPath = BenchmarkSupport.stafPath
 
     // MARK: - Prefill Tests
 
@@ -1415,3 +1418,4 @@ struct ReferenceComparisonTests {
         case tensorNotFound(String)
     }
 }
+#endif

@@ -30,7 +30,7 @@ struct KVCacheKernelSupportContractTests {
     /// into the cache.
     static let sizableButUnsupportedSchemes: Set<QuantizationSchemeIdentifier> = [
         .q2Group16ScaleF16, .q2Group32ScaleF16,
-        .q3Group16ScaleF16, .q3Group32ScaleF16,
+        .q3Group16ScaleF16, .q3Group32ScaleF16, .q3Group64ScaleF16,
         .q5Group32ScaleF16, .q5Group64ScaleF16,
         .q6Group16ScaleF16, .q6Group32ScaleF16,
         .passthrough,

@@ -13,6 +13,7 @@ import Testing
 ///   - Cache : ~/.cache/huggingface/hub/models--Qwen--Qwen3.5-0.8B/snapshots/<hash>/
 ///
 /// If neither is present the test is skipped (`Issue.record`).
+#if ENABLE_METAL_PROBES
 @Suite("Qwen35 Benchmark", .serialized)
 struct Qwen35BenchmarkTests {
 
@@ -141,3 +142,4 @@ struct Qwen35BenchmarkTests {
         var relStddev: Double { mean == 0 ? 0 : stddev / mean }
     }
 }
+#endif

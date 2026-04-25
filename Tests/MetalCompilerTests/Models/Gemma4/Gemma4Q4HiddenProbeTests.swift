@@ -7,6 +7,7 @@ import ModelDeclarations
 @testable import MetalCompiler
 @testable import SwiftLM
 
+#if ENABLE_METAL_PROBES
 /// Per-layer hidden probe to locate where Q4 prefill diverges from BF16.
 ///
 /// Token agreement test shows 0% match with Q4 producing identity-like output
@@ -542,3 +543,4 @@ struct Gemma4Q4HiddenProbeTests {
         return denom > 0 ? dot / denom : Float.nan
     }
 }
+#endif

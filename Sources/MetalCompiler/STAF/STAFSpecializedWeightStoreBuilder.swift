@@ -141,6 +141,7 @@ struct STAFSpecializedWeightStoreBuilder {
                 }
             }
         }
+        packedBuffer.didModifyRange(0..<totalBytes)
         let labelSuffix: String
         switch layout {
         case .rowMajor:

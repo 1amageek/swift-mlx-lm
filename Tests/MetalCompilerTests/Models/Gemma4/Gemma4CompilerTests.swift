@@ -64,6 +64,106 @@ private func collectTensorNames(in region: Region, into names: inout [String]) {
     }
 }
 
+private func makeSyntheticWeightStore(
+    tensorNames: [String],
+    payloadSize: Int,
+    device: MTLDevice
+) throws -> STAFWeightStore {
+    guard let buffer = device.makeBuffer(length: payloadSize, options: .storageModeShared) else {
+        throw MetalCompilerError.deviceSetupFailed("Cannot allocate synthetic weight buffer")
+    }
+
+    var entries: [String: STAFTensorEntry] = [:]
+    for tensorName in Set(tensorNames) {
+        entries[tensorName] = STAFTensorEntry(
+            name: tensorName,
+            payloadOffset: 0,
+            payloadSize: payloadSize,
+            schemeIdentifier: .passthrough,
+            semanticRole: .unknown,
+            shape: [payloadSize / MemoryLayout<UInt16>.stride],
+            blockSize: 0,
+            groupSize: 0,
+            bufferOffset: 0
+        )
+    }
+
+    return STAFWeightStore(
+        buffer: buffer,
+        entries: entries,
+        metadata: .empty,
+        specializedBufferAccesses: [:]
+    )
+}
+
+private func appendGemma4TextSyntheticTensorNames(config: ModelConfig, to names: inout [String]) {
+    names.append(contentsOf: [
+        "model.language_model.embed_tokens.weight",
+        "model.language_model.norm.weight",
+        "model.embed_tokens.weight",
+        "model.norm.weight",
+        "lm_head.weight"
+    ])
+    for layerIndex in 0..<config.layerCount {
+        let prefixes = [
+            "model.language_model.layers.\(layerIndex)",
+            "model.layers.\(layerIndex)"
+        ]
+        for prefix in prefixes {
+            names.append(contentsOf: [
+                "\(prefix).input_layernorm.weight",
+                "\(prefix).post_attention_layernorm.weight",
+                "\(prefix).pre_feedforward_layernorm.weight",
+                "\(prefix).post_feedforward_layernorm.weight",
+                "\(prefix).self_attn.q_proj.weight",
+                "\(prefix).self_attn.k_proj.weight",
+                "\(prefix).self_attn.v_proj.weight",
+                "\(prefix).self_attn.o_proj.weight",
+                "\(prefix).self_attn.q_norm.weight",
+                "\(prefix).self_attn.k_norm.weight",
+                "\(prefix).mlp.gate_proj.weight",
+                "\(prefix).mlp.up_proj.weight",
+                "\(prefix).mlp.down_proj.weight",
+                "\(prefix).per_layer_embedding_table.weight",
+                "\(prefix).per_layer_model_projection.weight",
+                "\(prefix).per_layer_projection_norm.weight",
+                "\(prefix).per_layer_input_gate.weight",
+                "\(prefix).per_layer_projection.weight",
+                "\(prefix).post_per_layer_input_norm.weight",
+                "\(prefix).layer_scalar"
+            ])
+        }
+    }
+}
+
+private func appendGemma4VisionSyntheticTensorNames(layerCount: Int, to names: inout [String]) {
+    names.append(contentsOf: [
+        "model.vision_tower.patch_embedder.input_proj.weight",
+        "model.vision_tower.patch_embedder.position_embedding_table",
+        "model.vision_tower.std_bias",
+        "model.vision_tower.std_scale",
+        "model.embed_vision.embedding_projection.weight"
+    ])
+    for layerIndex in 0..<layerCount {
+        let prefix = "model.vision_tower.encoder.layers.\(layerIndex)"
+        names.append(contentsOf: [
+            "\(prefix).input_layernorm.weight",
+            "\(prefix).post_attention_layernorm.weight",
+            "\(prefix).pre_feedforward_layernorm.weight",
+            "\(prefix).post_feedforward_layernorm.weight",
+            "\(prefix).self_attn.q_proj.linear.weight",
+            "\(prefix).self_attn.k_proj.linear.weight",
+            "\(prefix).self_attn.v_proj.linear.weight",
+            "\(prefix).self_attn.o_proj.linear.weight",
+            "\(prefix).self_attn.q_norm.weight",
+            "\(prefix).self_attn.k_norm.weight",
+            "\(prefix).mlp.gate_proj.linear.weight",
+            "\(prefix).mlp.up_proj.linear.weight",
+            "\(prefix).mlp.down_proj.linear.weight"
+        ])
+    }
+}
+
 private func makeGemma4TextConfig(numKVSharedLayers: Int = 1) -> ModelConfig {
     ModelConfig(
         hiddenSize: 64,
@@ -120,12 +220,21 @@ struct Gemma4TextCompilerTests {
             let config = makeGemma4TextConfig()
             let graph = try ModelGraph(Gemma4(config: config))
             let resolvedGraph = ParameterResolver().resolve(graph: graph, convention: .gemma4Family)
+            var tensorNames: [String] = []
+            collectTensorNames(in: resolvedGraph.rootRegion, into: &tensorNames)
+            appendGemma4TextSyntheticTensorNames(config: config, to: &tensorNames)
+            let store = try makeSyntheticWeightStore(
+                tensorNames: tensorNames,
+                payloadSize: config.vocabSize * config.hiddenSize * MemoryLayout<UInt16>.stride,
+                device: device
+            )
             let compiler = MetalInferenceCompiler()
             var compiled = try compiler.compile(
                 graph: resolvedGraph,
                 hiddenSize: config.hiddenSize,
                 intermediateSize: config.intermediateSize,
                 vocabSize: config.vocabSize,
+                stafWeightStore: store,
                 device: device
             )
             let prefillPlan = try compiler.compilePrefill(
@@ -134,6 +243,7 @@ struct Gemma4TextCompilerTests {
                 intermediateSize: config.intermediateSize,
                 vocabSize: config.vocabSize,
                 inferencePolicy: InferencePolicy(maximumSequenceLength: 128),
+                stafWeightStore: store,
                 sharedKVCache: compiled.buffers.kvCache,
                 sharedConvState: compiled.buffers.convState,
                 sharedConvStateDimension: compiled.buffers.convStateDimension,
@@ -206,12 +316,21 @@ struct Gemma4TextCompilerTests {
         let residualCounts = try autoreleasepool {
             let graph = try ModelGraph(Gemma4(config: config))
             let resolvedGraph = ParameterResolver().resolve(graph: graph, convention: .gemma4Family)
+            var tensorNames: [String] = []
+            collectTensorNames(in: resolvedGraph.rootRegion, into: &tensorNames)
+            appendGemma4TextSyntheticTensorNames(config: config, to: &tensorNames)
+            let store = try makeSyntheticWeightStore(
+                tensorNames: tensorNames,
+                payloadSize: config.vocabSize * config.hiddenSize * MemoryLayout<UInt16>.stride,
+                device: device
+            )
             let compiler = MetalInferenceCompiler()
             let compiled = try compiler.compile(
                 graph: resolvedGraph,
                 hiddenSize: config.hiddenSize,
                 intermediateSize: config.intermediateSize,
                 vocabSize: config.vocabSize,
+                stafWeightStore: store,
                 device: device
             )
             let prefillPlan = try compiler.compilePrefill(
@@ -220,6 +339,7 @@ struct Gemma4TextCompilerTests {
                 intermediateSize: config.intermediateSize,
                 vocabSize: config.vocabSize,
                 inferencePolicy: InferencePolicy(maximumSequenceLength: 128),
+                stafWeightStore: store,
                 sharedKVCache: compiled.buffers.kvCache,
                 sharedConvState: compiled.buffers.convState,
                 sharedConvStateDimension: compiled.buffers.convStateDimension,
@@ -389,6 +509,14 @@ struct Gemma4VisionCompilerTests {
             )
             let graph = try ModelGraph(model)
             let resolved = ParameterResolver().resolve(graph: graph, convention: .gemma4VisionFamily)
+            var tensorNames: [String] = []
+            collectTensorNames(in: resolved.rootRegion, into: &tensorNames)
+            appendGemma4VisionSyntheticTensorNames(layerCount: 2, to: &tensorNames)
+            let store = try makeSyntheticWeightStore(
+                tensorNames: tensorNames,
+                payloadSize: 4 * 1024 * 1024,
+                device: device
+            )
             let compiler = MetalInferenceCompiler()
             let prefillPlan = try compiler.compilePrefill(
                 graph: resolved,
@@ -396,6 +524,7 @@ struct Gemma4VisionCompilerTests {
                 intermediateSize: 128,
                 vocabSize: 0,
                 inferencePolicy: InferencePolicy(maximumSequenceLength: 256),
+                stafWeightStore: store,
                 sharedKVCache: nil,
                 sharedConvState: nil,
                 sharedConvStateDimension: 0,

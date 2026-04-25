@@ -29,7 +29,13 @@ struct MetalDecodeExecutor: Sendable {
                 )
             }
             position += 1
-            return buffers.tokenOut.contents().bindMemory(to: Int32.self, capacity: 1).pointee
+            let tokenOut = buffers.tokenOut.contents().bindMemory(to: Int32.self, capacity: 1).pointee
+            if tokenOut < 0 {
+                InternalLog.error(
+                    "[MetalInference] Decode produced invalid token \(tokenOut) at position \(position - 1) for input token \(tokenID)"
+                )
+            }
+            return tokenOut
         } catch {
             InternalLog.error("[MetalInference] GPU error: \(error)")
             return -1
@@ -63,6 +69,11 @@ struct MetalDecodeExecutor: Sendable {
             }
             position += 1
             let token = buffers.tokenOut.contents().bindMemory(to: Int32.self, capacity: 1).pointee
+            if token < 0 {
+                InternalLog.error(
+                    "[MetalInference] Timed decode produced invalid token \(token) at position \(position - 1) for input token \(tokenID)"
+                )
+            }
             return (token, timing.gpuStartTime, timing.gpuEndTime)
         } catch {
             InternalLog.error("[MetalInference] GPU error: \(error)")

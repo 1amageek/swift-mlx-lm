@@ -51,27 +51,30 @@ struct OptimizerEntryContractTests {
         )
         let w1Projection = w1.projection
         let w3Projection = w3.projection
+        let projectionCount = try #require((w1.entry.fragment as? BatchedProjection)?.projections.count)
         let w1StepIndex = try #require(
-            matchingProjectionStepIndex(
+            matchingBatchedProjectionStepIndex(
                 in: plan,
                 entryIndex: w1.entry.index,
-                tensorName: w1.tensorName,
                 access: w1.access,
-                projection: w1Projection
+                projection: w1Projection,
+                projectionIndex: w1.projectionIndex,
+                projectionCount: projectionCount
             )
         )
         let w3StepIndex = try #require(
-            matchingProjectionStepIndex(
+            matchingBatchedProjectionStepIndex(
                 in: plan,
                 entryIndex: w3.entry.index,
-                tensorName: w3.tensorName,
                 access: w3.access,
-                projection: w3Projection
+                projection: w3Projection,
+                projectionIndex: w3.projectionIndex,
+                projectionCount: projectionCount
             )
         )
 
-        let w1WeightBinding = try #require(plan.steps[w1StepIndex].bindings.buffers.first(where: { $0.index == 1 }))
-        let w3WeightBinding = try #require(plan.steps[w3StepIndex].bindings.buffers.first(where: { $0.index == 1 }))
+        let w1WeightBinding = try #require(plan.steps[w1StepIndex].bindings.buffers.first(where: { $0.index == 1 + w1.projectionIndex }))
+        let w3WeightBinding = try #require(plan.steps[w3StepIndex].bindings.buffers.first(where: { $0.index == 1 + w3.projectionIndex }))
 
         #expect(
             w1WeightBinding.buffer === w1.access.buffer && w1WeightBinding.offset == w1.access.offset,
@@ -2956,6 +2959,7 @@ struct OptimizerEntryContractTests {
     ) -> (
         entry: DispatchEntry,
         projection: BatchedProjection.Entry,
+        projectionIndex: Int,
         tensorName: String,
         access: STAFWeightBufferAccess,
         schemeIdentifier: QuantizationSchemeIdentifier
@@ -2964,6 +2968,7 @@ struct OptimizerEntryContractTests {
         return collected.fusedEntries.compactMap { entry -> (
             entry: DispatchEntry,
             projection: BatchedProjection.Entry,
+            projectionIndex: Int,
             tensorName: String,
             access: STAFWeightBufferAccess,
             schemeIdentifier: QuantizationSchemeIdentifier
@@ -2981,9 +2986,10 @@ struct OptimizerEntryContractTests {
             }) else {
                 return nil
             }
-            guard let matchedProjection = batched.projections.first(where: { $0.field == role }) else {
+            guard let matchedProjectionIndex = batched.projections.firstIndex(where: { $0.field == role }) else {
                 return nil
             }
+            let matchedProjection = batched.projections[matchedProjectionIndex]
             guard let access = collected.store.resolvedBufferAccess(
                 for: resolver.accessRequest(
                     for: entry,
@@ -2999,6 +3005,7 @@ struct OptimizerEntryContractTests {
             return (
                 entry,
                 matchedProjection,
+                matchedProjectionIndex,
                 binding.tensorName,
                 access,
                 tensor.format.schemeIdentifier
@@ -3157,6 +3164,26 @@ struct OptimizerEntryContractTests {
         }?.offset
     }
 
+    private func matchingBatchedProjectionStepIndex(
+        in plan: MetalPrefillPlan,
+        entryIndex: Int,
+        access: STAFWeightBufferAccess,
+        projection: BatchedProjection.Entry,
+        projectionIndex: Int,
+        projectionCount: Int
+    ) -> Int? {
+        plan.steps.enumerated().first { _, step in
+            step.metadata.entryIndex == entryIndex
+                && batchedProjectionStepMatches(
+                    step,
+                    access: access,
+                    projection: projection,
+                    projectionIndex: projectionIndex,
+                    projectionCount: projectionCount
+                )
+        }?.offset
+    }
+
     private func uint32BindingValue(in step: MetalPrefillStep, at index: Int) -> Int? {
         if let binding = step.bytesBindings.first(where: { $0.index == index }) {
             guard binding.value.count == MemoryLayout<UInt32>.stride else {
@@ -3197,6 +3224,27 @@ struct OptimizerEntryContractTests {
         }
         return uint32BindingValue(in: step, at: 3) == projection.inputDimension
             && uint32BindingValue(in: step, at: 4) == projection.outputDimension
+    }
+
+    private func batchedProjectionStepMatches(
+        _ step: MetalPrefillStep,
+        access: STAFWeightBufferAccess,
+        projection: BatchedProjection.Entry,
+        projectionIndex: Int,
+        projectionCount: Int
+    ) -> Bool {
+        let weightBindingIndex = 1 + projectionIndex
+        guard
+            let weightBinding = step.bindings.buffers.first(where: { $0.index == weightBindingIndex }),
+            weightBinding.buffer === access.buffer,
+            weightBinding.offset == access.offset
+        else {
+            return false
+        }
+
+        let dimensionBase = 1 + 2 * projectionCount
+        return uint32BindingValue(in: step, at: dimensionBase) == projection.inputDimension
+            && uint32BindingValue(in: step, at: dimensionBase + 1 + projectionIndex) == projection.outputDimension
     }
 
     private func candidateProjectionStepSummaries(

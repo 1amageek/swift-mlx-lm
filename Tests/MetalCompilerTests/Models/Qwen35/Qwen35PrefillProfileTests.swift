@@ -8,6 +8,7 @@ import Testing
 /// Purpose: identify which prefill steps scale with sequence length. MLX keeps prefill
 /// at a constant ~41-43 ms for sequence length 16→128, while swift-lm grows linearly
 /// at ~2.2 ms/token. This test times each step individually to find the scaling culprit.
+#if ENABLE_METAL_PROBES
 @Suite("Qwen35 Prefill Profile", .serialized)
 struct Qwen35PrefillProfileTests {
 
@@ -351,3 +352,4 @@ struct Qwen35PrefillProfileTests {
         }
     }
 }
+#endif

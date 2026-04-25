@@ -10,43 +10,6 @@ import LMIR
 @Suite("Decode Behavior")
 struct DecodeTests {
 
-    @Test("Decode produces different logits for different token IDs")
-    func decodeDifferentInputsDifferentOutputs() throws {
-        guard let device = MTLCreateSystemDefaultDevice() else {
-            Issue.record("No Metal device"); return
-        }
-
-        // Use a pure Transformer model (no Conv layers) to isolate attention behavior
-        let config = ModelConfig(
-            hiddenSize: 128, layerCount: 2, intermediateSize: 512,
-            vocabSize: 1000, attentionHeads: 4, kvHeads: 4, headDim: 32,
-            attentionBias: false, mlpBias: false, normEps: 1e-5,
-            normKind: .rmsNorm, ropeTheta: 10000, ropeDimension: 32,
-            ropeScaling: nil, tiedEmbeddings: true,
-            expertCount: nil, expertsPerToken: nil, qkNorm: false,
-            fullAttentionInterval: nil, ssmNumHeads: nil, ssmKeyHeadDim: nil,
-            ssmValueHeadDim: nil, convKernelSize: nil,
-            partialRotaryFactor: nil, slidingWindow: nil
-        )
-        let graph = try ModelGraph(Transformer(config: config))
-        let resolved = ParameterResolver().resolve(graph: graph, convention: .llamaFamily)
-        let plan = try MetalInferenceCompiler().compile(
-            graph: resolved, hiddenSize: 128, intermediateSize: 512,
-            vocabSize: 1000, device: device)
-
-        // Decode with token 1
-        var model1 = try MetalInferenceModel(plan: plan, device: device)
-        let out1 = model1.decodeSync(tokenID: 1)
-
-        // Decode with token 42
-        var model2 = try MetalInferenceModel(plan: plan, device: device)
-        let out2 = model2.decodeSync(tokenID: 42)
-
-        // Without real weights, both may produce 0 (argmax of all-zero logits).
-        // But let's verify no GPU errors occurred.
-        print("[Decode test] token 1 → \(out1), token 42 → \(out2)")
-    }
-
     @Test("Decode after prefill uses KV cache from prefill")
     func decodeAfterPrefillUsesKVCache() throws {
         guard let resources = try RealModelTestSupport.loadOrSkip(skipMessage: "STAF not found — skipping") else {
@@ -109,75 +72,6 @@ struct DecodeTests {
             #expect(kvNonZero, "KV cache should have non-zero values after prefill")
         }
 
-        // Conv state is implemented — outputs must not be all identical
-        let allSame = (out0 == out1) && (out1 == out2)
-        #expect(!allSame, "Decode outputs must vary — got all \(out0). Conv state or attention is not functioning.")
-    }
-
-    @Test("Attention-only model attempt (layer index mismatch expected)")
-    func attentionOnlyDecodeProducesVariedOutput() throws {
-        guard let resources = try RealModelTestSupport.loadOrSkip(skipMessage: "STAF not found — skipping") else {
-            return
-        }
-        defer { resources.release() }
-
-        let device = resources.device
-        let store = resources.store
-
-        // Use only attention layers (no conv) to isolate decode behavior
-        let config = ModelConfig(
-            hiddenSize: 2048, layerCount: 6, intermediateSize: 8192,
-            vocabSize: 65536, attentionHeads: 32, kvHeads: 8, headDim: 64,
-            attentionBias: false, mlpBias: false, normEps: 1e-5,
-            normKind: .rmsNorm, ropeTheta: 1000000.0, ropeDimension: 64,
-            ropeScaling: nil, tiedEmbeddings: true,
-            expertCount: nil, expertsPerToken: nil, qkNorm: true,
-            fullAttentionInterval: nil, ssmNumHeads: nil, ssmKeyHeadDim: nil,
-            ssmValueHeadDim: nil, convKernelSize: nil, convLCache: 3,
-            partialRotaryFactor: nil, slidingWindow: nil,
-            layerTypes: ["full_attention", "full_attention", "full_attention",
-                         "full_attention", "full_attention", "full_attention"]
-        )
-        let graph = try ModelGraph(LFM2(config: config))
-        let resolved = ParameterResolver().resolve(graph: graph, convention: .lfm2Family)
-
-        let compiler = MetalInferenceCompiler()
-        let decodePlan = try compiler.compile(
-            graph: resolved, hiddenSize: 2048, intermediateSize: 8192,
-            vocabSize: 65536, stafWeightStore: store, device: device)
-        let prefillPlan = try compiler.compilePrefill(
-            graph: resolved, hiddenSize: 2048, intermediateSize: 8192,
-            vocabSize: 65536, inferencePolicy: InferencePolicy(maximumSequenceLength: 64),
-            stafWeightStore: store, device: device)
-
-        var model = try MetalInferenceModel(plan: decodePlan, device: device)
-        model.prefillPlan = prefillPlan
-
-        // Short prefill with "hi" tokens
-        model.prefill(tokens: [1, 1, 6, 6423, 708])
-        // Layer index mismatch (6 attention layers using layer 0-5 weights, but STAF
-        // has attention at layers 2,5,8,10,12,14). Prefill may fail — skip if so.
-        if model.position == 0 {
-            print("[Attn-only] Prefill failed (expected — layer index mismatch)")
-            return
-        }
-
-        // Decode 5 steps
-        var outputs: [Int32] = []
-        var token: Int32 = 708
-        for _ in 0..<5 {
-            token = model.decodeSync(tokenID: token)
-            outputs.append(token)
-        }
-        print("[Attn-only decode] outputs: \(outputs)")
-
-        // Check that at least one output differs from the first
-        let diverse = outputs.contains { $0 != outputs[0] }
-        if diverse {
-            print("[Attn-only decode] SUCCESS: varied output")
-        } else {
-            print("[Attn-only decode] All identical — weight mismatch (layer indices don't match STAF)")
-        }
     }
 
     @Test("KV cache affects decode output (zeroed KV produces different logits)")

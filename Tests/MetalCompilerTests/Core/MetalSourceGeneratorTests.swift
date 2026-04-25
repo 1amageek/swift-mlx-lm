@@ -4,19 +4,25 @@ import Metal
 
 /// Verify MetalSourceGenerator produces valid, compilable MSL
 /// that computes the same results as the hardcoded kernels.
-@Suite("Metal Source Generator")
+@Suite("Metal Source Generator", .serialized)
 struct MetalSourceGeneratorTests {
 
     @Test("Generated RMSNorm compiles for all precision × weight format combinations")
     func rmsNormCompiles() throws {
         guard let device = MTLCreateSystemDefaultDevice() else { return }
 
-        let precisions: [MetalSourceGenerator.BufferPrecision] = [.float16, .float32]
-        let weightFormats: [MetalSourceGenerator.WeightFormat] = [.float16, .bfloat16]
+        let precisions: [(MetalSourceGenerator.BufferPrecision, String)] = [
+            (.float16, "f16"),
+            (.float32, "f32"),
+        ]
+        let weightFormats: [(MetalSourceGenerator.WeightFormat, String)] = [
+            (.float16, "fp16"),
+            (.bfloat16, "bf16"),
+        ]
 
-        for precision in precisions {
-            for weightFormat in weightFormats {
-                let name = "rms_norm_\(precision)_\(weightFormat)"
+        for (precision, precisionLabel) in precisions {
+            for (weightFormat, weightLabel) in weightFormats {
+                let name = "rms_norm_\(precisionLabel)_\(weightLabel)"
                 let source = MetalSourceGenerator.commonHeader + "\n\n"
                     + MetalSourceGenerator.generateReduction(
                         name: name, dimension: 2048, epsilon: 1e-5,
@@ -76,6 +82,8 @@ struct MetalSourceGeneratorTests {
             Issue.record("No Metal device")
             return
         }
+        let gpuLock = try GPUTestExclusion.acquire()
+        defer { gpuLock.release() }
 
         let inputDimension = 7
         let outputDimension = 5
@@ -173,12 +181,164 @@ struct MetalSourceGeneratorTests {
         #expect(maxError < 0.01, "MPP GEMM drifted: maxError=\(maxError)")
     }
 
+    @Test("Q3G64 dequant then MPP GEMM matches CPU reference")
+    func q3Group64DequantThenMPPGEMMMatchesCPUReference() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else {
+            Issue.record("No Metal device")
+            return
+        }
+        let gpuLock = try GPUTestExclusion.acquire()
+        defer { gpuLock.release() }
+
+        let format = AffineQ3Group64Format()
+        let inputDimension = 128
+        let outputDimension = 5
+        let sequenceLength = 4
+        let blocksPerRow = inputDimension / format.groupSize
+
+        var packedWeights: [UInt8] = []
+        var dequantizedWeights: [Float] = []
+        for row in 0..<outputDimension {
+            for block in 0..<blocksPerRow {
+                let scale = 0.03125 * Float(block + 1) + 0.0078125 * Float(row)
+                let zero = -0.125 + 0.0625 * Float(row) - 0.015625 * Float(block)
+                let weights = (0..<format.groupSize).map {
+                    UInt32(($0 + block * 3 + row * 5) % 8)
+                }
+                packedWeights.append(contentsOf: makeQuantizedBlock(
+                    weights: weights,
+                    bits: format.bits,
+                    scale: scale,
+                    zero: zero,
+                    payloadByteCount: format.bytesPerBlock - 4
+                ))
+                dequantizedWeights.append(contentsOf: weights.map { scale * Float($0) + zero })
+            }
+        }
+
+        var input: [Float] = (0..<(inputDimension * sequenceLength)).map {
+            Float(($0 % 17) - 8) * 0.0625
+        }
+        var output = [Float](repeating: .zero, count: outputDimension * sequenceLength)
+
+        let packedBuffer = try #require(device.makeBuffer(
+            bytes: packedWeights,
+            length: packedWeights.count,
+            options: .storageModeShared
+        ))
+        let scratchBuffer = try #require(device.makeBuffer(
+            length: outputDimension * inputDimension * MemoryLayout<UInt16>.stride,
+            options: .storageModePrivate
+        ))
+        let inputBuffer = try #require(device.makeBuffer(
+            bytes: &input,
+            length: input.count * MemoryLayout<Float>.stride,
+            options: .storageModeShared
+        ))
+        let outputBuffer = try #require(device.makeBuffer(
+            bytes: &output,
+            length: output.count * MemoryLayout<Float>.stride,
+            options: .storageModeShared
+        ))
+
+        let dequantName = "test_dequant_q3_g64_bf16"
+        let gemmName = "test_mpp_q3_g64_bf16_f32s"
+        let source = MetalSourceGenerator.commonHeader + "\n\n"
+            + MetalSourceGenerator.generateUnifiedDequantToBFloat(
+                name: dequantName,
+                format: format
+            ) + "\n\n"
+            + MetalSourceGenerator.generateMPPGEMM(
+                name: gemmName,
+                bufferPrecision: .float32,
+                weightFormat: .bfloat16
+            )
+        let options = MTLCompileOptions()
+        options.languageVersion = .version4_0
+        let library = try device.makeLibrary(source: source, options: options)
+        let dequantPipeline = try device.makeComputePipelineState(
+            function: try #require(library.makeFunction(name: dequantName))
+        )
+        let gemmPipeline = try device.makeComputePipelineState(
+            function: try #require(library.makeFunction(name: gemmName))
+        )
+
+        let queue = try #require(device.makeCommandQueue())
+        let commandBuffer = try #require(queue.makeCommandBuffer())
+        let encoder = try #require(commandBuffer.makeComputeCommandEncoder())
+
+        var inDim = UInt32(inputDimension)
+        var outDim = UInt32(outputDimension)
+        var seqLen = UInt32(sequenceLength)
+        var rowStride = UInt32(inputDimension)
+
+        encoder.setComputePipelineState(dequantPipeline)
+        encoder.setBuffer(packedBuffer, offset: 0, index: 0)
+        encoder.setBuffer(scratchBuffer, offset: 0, index: 1)
+        encoder.setBytes(&inDim, length: MemoryLayout<UInt32>.stride, index: 2)
+        encoder.setBytes(&outDim, length: MemoryLayout<UInt32>.stride, index: 3)
+        encoder.dispatchThreadgroups(
+            MTLSize(width: outputDimension, height: 1, depth: 1),
+            threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1)
+        )
+        encoder.memoryBarrier(resources: [scratchBuffer])
+
+        encoder.setComputePipelineState(gemmPipeline)
+        encoder.setBuffer(inputBuffer, offset: 0, index: 0)
+        encoder.setBuffer(scratchBuffer, offset: 0, index: 1)
+        encoder.setBuffer(outputBuffer, offset: 0, index: 2)
+        encoder.setBytes(&inDim, length: MemoryLayout<UInt32>.stride, index: 3)
+        encoder.setBytes(&outDim, length: MemoryLayout<UInt32>.stride, index: 4)
+        encoder.setBytes(&seqLen, length: MemoryLayout<UInt32>.stride, index: 5)
+        encoder.setBytes(&rowStride, length: MemoryLayout<UInt32>.stride, index: 6)
+        encoder.dispatchThreadgroups(
+            MTLSize(
+                width: (outputDimension + 31) / 32,
+                height: (sequenceLength + 63) / 64,
+                depth: 1
+            ),
+            threadsPerThreadgroup: MTLSize(
+                width: min(gemmPipeline.threadExecutionWidth * 4, gemmPipeline.maxTotalThreadsPerThreadgroup),
+                height: 1,
+                depth: 1
+            )
+        )
+        encoder.endEncoding()
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+
+        if let error = commandBuffer.error {
+            throw error
+        }
+
+        let actualPointer = outputBuffer.contents().bindMemory(to: Float.self, capacity: output.count)
+        let actual = (0..<output.count).map { actualPointer[$0] }
+        var expected = [Float](repeating: .zero, count: output.count)
+        for seq in 0..<sequenceLength {
+            for row in 0..<outputDimension {
+                var sum: Float = 0
+                for column in 0..<inputDimension {
+                    sum += input[seq * inputDimension + column]
+                        * dequantizedWeights[row * inputDimension + column]
+                }
+                expected[seq * outputDimension + row] = sum
+            }
+        }
+
+        let maxError = zip(actual, expected).reduce(Float.zero) { partial, pair in
+            max(partial, abs(pair.0 - pair.1))
+        }
+        #expect(maxError < 0.02, "Q3G64 dequant to MPP GEMM drifted: maxError=\(maxError)")
+    }
+
     @Test("MPP GEMM matches CPU reference for FP16 prefill projection")
     func mppFP16GEMMMatchesCPUReference() throws {
         guard let device = MTLCreateSystemDefaultDevice() else {
             Issue.record("No Metal device")
             return
         }
+        let gpuLock = try GPUTestExclusion.acquire()
+        defer { gpuLock.release() }
 
         let inputDimension = 7
         let outputDimension = 5
@@ -282,9 +442,11 @@ struct MetalSourceGeneratorTests {
             Issue.record("No Metal device")
             return
         }
+        let gpuLock = try GPUTestExclusion.acquire()
+        defer { gpuLock.release() }
 
         let inputDimension = 64
-        let outputDimension = 3
+        let outputDimension = 4
         let sequenceLength = 4
         let inputRowStride = 256
 
@@ -510,12 +672,14 @@ struct MetalSourceGeneratorTests {
             )
             // MLX extract_bits<6>: 4 weights span 3 bytes. Each weight slot is
             // selected by a ternary chain keyed on `k & 3`.
-            #expect(source.contains("b0 & 0x3f"), "Missing w[0] extraction for \(format.schemeIdentifier)")
-            #expect(source.contains("((b0 >> 6) & 0x03) | ((b1 & 0x0f) << 2)"),
+            #expect(source.contains("qs[(((k)) >> 2) * 3 + 0] & 0x3f"),
+                "Missing w[0] extraction for \(format.schemeIdentifier)")
+            #expect(source.contains("((qs[(((k)) >> 2) * 3 + 0] >> 6) & 0x03) | ((qs[(((k)) >> 2) * 3 + 1] & 0x0f) << 2)"),
                 "Missing w[1] extraction for \(format.schemeIdentifier)")
-            #expect(source.contains("((b1 >> 4) & 0x0f) | ((b2 & 0x03) << 4)"),
+            #expect(source.contains("((qs[(((k)) >> 2) * 3 + 1] >> 4) & 0x0f) | ((qs[(((k)) >> 2) * 3 + 2] & 0x03) << 4)"),
                 "Missing w[2] extraction for \(format.schemeIdentifier)")
-            #expect(source.contains("b2 >> 2"), "Missing w[3] extraction for \(format.schemeIdentifier)")
+            #expect(source.contains("qs[(((k)) >> 2) * 3 + 2] >> 2"),
+                "Missing w[3] extraction for \(format.schemeIdentifier)")
         }
     }
 
@@ -589,6 +753,7 @@ struct MetalSourceGeneratorTests {
         let formats: [any QuantizationFormat] = [
             AffineQ3Group16Format(),
             AffineQ3Group32Format(),
+            AffineQ3Group64Format(),
         ]
         for format in formats {
             let source = MetalSourceGenerator.generateUnifiedQuantizedGEMV(
@@ -597,24 +762,22 @@ struct MetalSourceGeneratorTests {
                 bufferPrecision: .float16
             )
             // MLX extract_bits<3>: 8 weights span 3 bytes.
-            #expect(source.contains("b0 & 0x07"),
+            #expect(source.contains("qs[(((k)) >> 3) * 3 + 0] & 0x07"),
                 "Missing Q3 w[0] extraction for \(format.schemeIdentifier)")
-            #expect(source.contains("(b0 >> 3) & 0x07"),
+            #expect(source.contains("(qs[(((k)) >> 3) * 3 + 0] >> 3) & 0x07"),
                 "Missing Q3 w[1] extraction for \(format.schemeIdentifier)")
-            #expect(source.contains("((b0 >> 6) & 0x03) | ((b1 & 0x01) << 2)"),
+            #expect(source.contains("((qs[(((k)) >> 3) * 3 + 0] >> 6) & 0x03) | ((qs[(((k)) >> 3) * 3 + 1] & 0x01) << 2)"),
                 "Missing Q3 w[2] extraction for \(format.schemeIdentifier)")
-            #expect(source.contains("(b1 >> 1) & 0x07"),
+            #expect(source.contains("(qs[(((k)) >> 3) * 3 + 1] >> 1) & 0x07"),
                 "Missing Q3 w[3] extraction for \(format.schemeIdentifier)")
-            #expect(source.contains("(b1 >> 4) & 0x07"),
+            #expect(source.contains("(qs[(((k)) >> 3) * 3 + 1] >> 4) & 0x07"),
                 "Missing Q3 w[4] extraction for \(format.schemeIdentifier)")
-            #expect(source.contains("((b1 >> 7) & 0x01) | ((b2 & 0x03) << 1)"),
+            #expect(source.contains("((qs[(((k)) >> 3) * 3 + 1] >> 7) & 0x01) | ((qs[(((k)) >> 3) * 3 + 2] & 0x03) << 1)"),
                 "Missing Q3 w[5] extraction for \(format.schemeIdentifier)")
-            #expect(source.contains("(b2 >> 2) & 0x07"),
+            #expect(source.contains("(qs[(((k)) >> 3) * 3 + 2] >> 2) & 0x07"),
                 "Missing Q3 w[6] extraction for \(format.schemeIdentifier)")
-            #expect(source.contains("(b2 >> 5) & 0x07"),
+            #expect(source.contains("(qs[(((k)) >> 3) * 3 + 2] >> 5) & 0x07"),
                 "Missing Q3 w[7] extraction for \(format.schemeIdentifier)")
-            #expect(source.contains("weights_f32[\(format.weightsPerBlock)]"),
-                "Missing weights_f32 array for \(format.schemeIdentifier)")
         }
     }
 
@@ -631,30 +794,30 @@ struct MetalSourceGeneratorTests {
                 bufferPrecision: .float16
             )
             // MLX extract_bits<5>: 8 weights span 5 bytes.
-            #expect(source.contains("b0 & 0x1f"),
+            #expect(source.contains("qs[(((k)) >> 3) * 5 + 0] & 0x1f"),
                 "Missing Q5 w[0] extraction for \(format.schemeIdentifier)")
-            #expect(source.contains("((b0 >> 5) & 0x07) | ((b1 & 0x03) << 3)"),
+            #expect(source.contains("((qs[(((k)) >> 3) * 5 + 0] >> 5) & 0x07) | ((qs[(((k)) >> 3) * 5 + 1] & 0x03) << 3)"),
                 "Missing Q5 w[1] extraction for \(format.schemeIdentifier)")
-            #expect(source.contains("(b1 >> 2) & 0x1f"),
+            #expect(source.contains("(qs[(((k)) >> 3) * 5 + 1] >> 2) & 0x1f"),
                 "Missing Q5 w[2] extraction for \(format.schemeIdentifier)")
-            #expect(source.contains("((b1 >> 7) & 0x01) | ((b2 & 0x0f) << 1)"),
+            #expect(source.contains("((qs[(((k)) >> 3) * 5 + 1] >> 7) & 0x01) | ((qs[(((k)) >> 3) * 5 + 2] & 0x0f) << 1)"),
                 "Missing Q5 w[3] extraction for \(format.schemeIdentifier)")
-            #expect(source.contains("((b2 >> 4) & 0x0f) | ((b3 & 0x01) << 4)"),
+            #expect(source.contains("((qs[(((k)) >> 3) * 5 + 2] >> 4) & 0x0f) | ((qs[(((k)) >> 3) * 5 + 3] & 0x01) << 4)"),
                 "Missing Q5 w[4] extraction for \(format.schemeIdentifier)")
-            #expect(source.contains("(b3 >> 1) & 0x1f"),
+            #expect(source.contains("(qs[(((k)) >> 3) * 5 + 3] >> 1) & 0x1f"),
                 "Missing Q5 w[5] extraction for \(format.schemeIdentifier)")
-            #expect(source.contains("((b3 >> 6) & 0x03) | ((b4 & 0x07) << 2)"),
+            #expect(source.contains("((qs[(((k)) >> 3) * 5 + 3] >> 6) & 0x03) | ((qs[(((k)) >> 3) * 5 + 4] & 0x07) << 2)"),
                 "Missing Q5 w[6] extraction for \(format.schemeIdentifier)")
-            #expect(source.contains("(b4 >> 3) & 0x1f"),
+            #expect(source.contains("(qs[(((k)) >> 3) * 5 + 4] >> 3) & 0x1f"),
                 "Missing Q5 w[7] extraction for \(format.schemeIdentifier)")
-            #expect(source.contains("weights_f32[\(format.weightsPerBlock)]"),
-                "Missing weights_f32 array for \(format.schemeIdentifier)")
         }
     }
 
     @Test("Unified quantized GEMV compiles for Q6 group16 and group32")
     func unifiedQuantizedGEMVQ6Compiles() throws {
         guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let gpuLock = try GPUTestExclusion.acquire()
+        defer { gpuLock.release() }
 
         let formats: [any QuantizationFormat] = [
             AffineQ6Group16Format(),
@@ -803,5 +966,44 @@ struct MetalSourceGeneratorTests {
         ] {
             #expect(library.makeFunction(name: name) != nil, "Missing: \(name)")
         }
+    }
+
+    private func makeQuantizedBlock(
+        weights: [UInt32],
+        bits: Int,
+        scale: Float,
+        zero: Float,
+        payloadByteCount: Int
+    ) -> [UInt8] {
+        var bytes = [UInt8]()
+        bytes.reserveCapacity(4 + payloadByteCount)
+        let scaleBits = Float16(scale).bitPattern
+        let zeroBits = Float16(zero).bitPattern
+        bytes.append(UInt8(scaleBits & 0x00FF))
+        bytes.append(UInt8((scaleBits >> 8) & 0x00FF))
+        bytes.append(UInt8(zeroBits & 0x00FF))
+        bytes.append(UInt8((zeroBits >> 8) & 0x00FF))
+        bytes.append(contentsOf: packLSBFirstBitStream(weights: weights, bits: bits))
+        #expect(bytes.count == 4 + payloadByteCount)
+        return bytes
+    }
+
+    private func packLSBFirstBitStream(weights: [UInt32], bits: Int) -> [UInt8] {
+        let totalBits = weights.count * bits
+        let byteCount = (totalBits + 7) / 8
+        var result = [UInt8](repeating: 0, count: byteCount)
+        let mask = (UInt64(1) << bits) - 1
+        for (index, weight) in weights.enumerated() {
+            let value = UInt64(weight) & mask
+            let bitOffset = index * bits
+            let byteIndex = bitOffset / 8
+            let bitIndex = bitOffset % 8
+            let shifted = value << bitIndex
+            let spannedBytes = (bitIndex + bits + 7) / 8
+            for offset in 0..<spannedBytes {
+                result[byteIndex + offset] |= UInt8((shifted >> (offset * 8)) & 0xFF)
+            }
+        }
+        return result
     }
 }

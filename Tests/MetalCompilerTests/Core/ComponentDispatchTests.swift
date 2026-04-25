@@ -117,20 +117,21 @@ struct ComponentDispatchTests {
         #expect(linears[0].inputDimension == 32 * 64)
     }
 
-    @Test("Attention with qkNorm generates batched QKNormFragments")
-    func attentionQKNormDispatches() {
+    @Test("Attention with qkNorm and RoPE generates fused QKNorm RoPE fragment")
+    func attentionQKNormDispatches() throws {
         let attn = AttentionAttributes(hiddenSize: 2048, headCount: 32, kvHeadCount: 8,
                                        headDimension: 64, bias: false, causal: true,
                                        rope: RoPEAttributes(dimension: 64, base: 500000.0),
                                        qkNorm: .rmsNorm)
         let primitives = collectPrimitives(fragmentTree(attn))
-        // QKNorm is batched (component-internal optimization)
-        let batchedFragments = primitives.compactMap { $0 as? BatchedFragment }
-        #expect(batchedFragments.count == 1)
-        let qkNorms = batchedFragments[0].fragments.compactMap { $0 as? QKNormFragment }
-        #expect(qkNorms.count == 2)
-        #expect(qkNorms[0].weightRole == "q_layernorm")
-        #expect(qkNorms[1].weightRole == "k_layernorm")
+        // QKNorm + RoPE is fused for prefill to avoid an extra dispatch.
+        let fusedFragments = primitives.compactMap { $0 as? BatchedQKNormRoPEFragment }
+        #expect(fusedFragments.count == 1)
+        let fragment = try #require(fusedFragments.first)
+        #expect(fragment.qNorm.weightRole == "q_layernorm")
+        #expect(fragment.kNorm.weightRole == "k_layernorm")
+        #expect(fragment.ropeDimension == 64)
+        #expect(fragment.ropeBase == 500000.0)
     }
 
     // MARK: - ShortConv

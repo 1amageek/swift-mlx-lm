@@ -41,6 +41,11 @@ struct UnifiedGEMVMultiBlockTests {
         try runMultiBlockGEMVTest(format: AffineQ3Group32Format())
     }
 
+    @Test("Q3G64 multi-block GEMV aggregates across blocks")
+    func q3Group64MultiBlock() throws {
+        try runMultiBlockGEMVTest(format: AffineQ3Group64Format())
+    }
+
     // MARK: - Q4 (aligned)
 
     @Test("Q4G64 multi-block GEMV aggregates across blocks")

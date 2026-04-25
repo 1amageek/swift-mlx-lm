@@ -206,7 +206,7 @@ struct MetalSubmissionContext: @unchecked Sendable {
                 encoder.fill(buffer: fill.buffer, range: 0..<fill.buffer.length, value: fill.value)
             }
             encoder.barrier(
-                afterEncoderStages: .dispatch,
+                afterEncoderStages: [.dispatch, .blit],
                 beforeEncoderStages: .dispatch,
                 visibilityOptions: .device
             )
@@ -235,6 +235,11 @@ struct MetalSubmissionContext: @unchecked Sendable {
                     size: copy.size
                 )
             }
+            encoder.barrier(
+                afterEncoderStages: .blit,
+                beforeEncoderStages: .dispatch,
+                visibilityOptions: .device
+            )
         }
     }
 

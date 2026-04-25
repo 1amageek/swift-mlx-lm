@@ -14,6 +14,7 @@ public struct MetalInferenceModel: @unchecked Sendable {
     private let prefillExecutor: MetalPrefillExecutor
     private let promptStateStore = MetalPromptStateStore()
     private var hiddenOverrideStagingWorkspace: MetalHiddenOverrideWorkspace?
+    private var reportedSequentialPromptIngestion = false
 
     /// Runtime constant buffer for hidden override decode path.
     /// Layout: [hiddenElementCount: UInt32] at offset 0.
@@ -30,7 +31,11 @@ public struct MetalInferenceModel: @unchecked Sendable {
             do {
                 try rebuildStableResidencyRegistry()
                 if let prefillPlan = newValue {
-                    try Self.zeroStateBuffers(prefillPlan.buffers, submission: &submission)
+                    try Self.zeroStateBuffers(
+                        prefillPlan.buffers,
+                        submission: &submission,
+                        residency: stableResidencyLease
+                    )
                 }
             } catch {
                 preconditionFailure("Failed to rebuild Metal stable residency: \(error)")
@@ -429,8 +434,53 @@ public struct MetalInferenceModel: @unchecked Sendable {
     public mutating func prefill(tokens: [Int32]) -> Int32 {
         guard let prefillPlan else {
             var lastOutput: Int32 = -1
-            for token in tokens {
+            for (tokenIndex, token) in tokens.enumerated() {
                 lastOutput = decodeSync(tokenID: token)
+                guard lastOutput >= 0 else {
+                    InternalLog.error(
+                        "[MetalInference] Sequential prompt ingestion failed at token index \(tokenIndex) / \(tokens.count)"
+                    )
+                    return -1
+                }
+            }
+            return lastOutput
+        }
+        if prefillPlan.requiresSequentialPromptIngestion {
+            reportSequentialPromptIngestionIfNeeded(prefillPlan: prefillPlan)
+            var lastOutput: Int32 = -1
+            for (tokenIndex, token) in tokens.enumerated() {
+                lastOutput = decodeSync(tokenID: token)
+                guard lastOutput >= 0 else {
+                    InternalLog.error(
+                        "[MetalInference] Sequential prompt ingestion failed at token index \(tokenIndex) / \(tokens.count)"
+                    )
+                    return -1
+                }
+            }
+            return lastOutput
+        }
+
+        let chunkSize = prefillPlan.maximumSequenceLength
+        if tokens.count > chunkSize {
+            var lastOutput: Int32 = -1
+            var startIndex = 0
+            while startIndex < tokens.count {
+                let endIndex = min(startIndex + chunkSize, tokens.count)
+                lastOutput = prefillExecutor.prefill(
+                    prefillPlan: prefillPlan,
+                    decodePlan: decodePlan,
+                    submission: &submission,
+                    position: &position,
+                    tokens: Array(tokens[startIndex..<endIndex]),
+                    ephemeralResidency: stableResidencyLease
+                )
+                guard lastOutput >= 0 else {
+                    InternalLog.error(
+                        "[MetalInference] Chunked text prefill failed for token range \(startIndex)..<\(endIndex) of \(tokens.count)"
+                    )
+                    return -1
+                }
+                startIndex = endIndex
             }
             return lastOutput
         }
@@ -477,6 +527,25 @@ public struct MetalInferenceModel: @unchecked Sendable {
             }
             return lastOutput
         }
+        if prefillPlan.requiresSequentialPromptIngestion {
+            reportSequentialPromptIngestionIfNeeded(prefillPlan: prefillPlan)
+            var lastOutput: Int32 = -1
+            for tokenIndex in hiddenStates.indices {
+                lastOutput = try decodeSync(
+                    hiddenState: hiddenStates[tokenIndex],
+                    ropePositionAxes: ropePositionAxes[tokenIndex],
+                    deepstackFeaturesByLayer: deepstackFeaturesByLayer,
+                    tokenIndex: tokenIndex
+                )
+                guard lastOutput >= 0 else {
+                    InternalLog.error(
+                        "[MetalInference] Sequential embedding prompt ingestion failed at token index \(tokenIndex) / \(hiddenStates.count)"
+                    )
+                    return -1
+                }
+            }
+            return lastOutput
+        }
 
         var hiddenOverridesByTokenIndex: [Int: [Float]] = [:]
         hiddenOverridesByTokenIndex.reserveCapacity(hiddenStates.count)
@@ -507,6 +576,17 @@ public struct MetalInferenceModel: @unchecked Sendable {
         )
     }
 
+    private mutating func reportSequentialPromptIngestionIfNeeded(prefillPlan: MetalPrefillPlan) {
+        guard !reportedSequentialPromptIngestion else { return }
+        reportedSequentialPromptIngestion = true
+        let schemes = Set(
+            prefillPlan.quantizationKernelFamilies(path: nil)
+        ).sorted().joined(separator: ", ")
+        InternalLog.error(
+            "[MetalInference] Sequence prefill is disabled for this plan; using decode-equivalent sequential prompt ingestion. Kernels: \(schemes)"
+        )
+    }
+
     @discardableResult
     public mutating func prefill(
         tokens: [Int32],
@@ -517,6 +597,11 @@ public struct MetalInferenceModel: @unchecked Sendable {
         guard let prefillPlan else {
             throw MetalCompilerError.deviceSetupFailed(
                 "Multimodal prefill requires a sequence prefill plan"
+            )
+        }
+        if prefillPlan.requiresSequentialPromptIngestion {
+            throw MetalCompilerError.deviceSetupFailed(
+                "Multimodal sequence prefill is disabled for this plan because the sequence prefill path is not output-equivalent to decode ingestion"
             )
         }
         let chunkSize = prefillPlan.maximumSequenceLength
@@ -1783,9 +1868,17 @@ public struct MetalInferenceModel: @unchecked Sendable {
         position = 0
         submission.resetReuseState()
         do {
-            try Self.zeroStateBuffers(decodePlan.buffers, submission: &submission)
+            try Self.zeroStateBuffers(
+                decodePlan.buffers,
+                submission: &submission,
+                residency: stableResidencyLease
+            )
             if let prefillPlan {
-                try Self.zeroStateBuffers(prefillPlan.buffers, submission: &submission)
+                try Self.zeroStateBuffers(
+                    prefillPlan.buffers,
+                    submission: &submission,
+                    residency: stableResidencyLease
+                )
             }
         } catch {
             InternalLog.error("[MetalInference] Failed to reset GPU state: \(error)")

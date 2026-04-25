@@ -54,7 +54,11 @@ struct STAFDeepTests {
             to: safetensorsURL)
 
         let stafURL = tempDirectory.appendingPathComponent("model.staf")
-        try STAFConverter().convert(safetensorsURLs: [safetensorsURL], outputURL: stafURL)
+        try STAFConverter().convert(
+            safetensorsURLs: [safetensorsURL],
+            outputURL: stafURL,
+            quantization: MLXQuantizationHint(bits: 4, groupSize: 64)
+        )
         let store = try STAFLoader().load(at: stafURL, device: device)
 
         guard let access = store.bufferAccess(for: "test.weight") else {
@@ -306,7 +310,11 @@ struct STAFDeepTests {
             to: safetensorsURL)
 
         let stafURL = tempDirectory.appendingPathComponent("model.staf")
-        try STAFConverter().convert(safetensorsURLs: [safetensorsURL], outputURL: stafURL)
+        try STAFConverter().convert(
+            safetensorsURLs: [safetensorsURL],
+            outputURL: stafURL,
+            quantization: MLXQuantizationHint(bits: 4, groupSize: 64)
+        )
         let store = try STAFLoader().load(at: stafURL, device: device)
 
         guard let entry = store.entries["large.weight"] else {
@@ -379,7 +387,11 @@ struct STAFDeepTests {
             to: safetensorsURL)
 
         let stafURL = tempDirectory.appendingPathComponent("model.staf")
-        try STAFConverter().convert(safetensorsURLs: [safetensorsURL], outputURL: stafURL)
+        try STAFConverter().convert(
+            safetensorsURLs: [safetensorsURL],
+            outputURL: stafURL,
+            quantization: MLXQuantizationHint(bits: 4, groupSize: 64)
+        )
         let store = try STAFLoader().load(at: stafURL, device: device)
 
         guard let entry = store.entries["test.weight"] else {
@@ -453,7 +465,11 @@ struct STAFDeepTests {
             to: safetensorsURL)
 
         let stafURL = tempDirectory.appendingPathComponent("model.staf")
-        try STAFConverter().convert(safetensorsURLs: [safetensorsURL], outputURL: stafURL)
+        try STAFConverter().convert(
+            safetensorsURLs: [safetensorsURL],
+            outputURL: stafURL,
+            quantization: MLXQuantizationHint(bits: 4, groupSize: 128)
+        )
         let store = try STAFLoader().load(at: stafURL, device: device)
 
         guard let entry = store.entries["test.weight"] else {
@@ -604,7 +620,10 @@ struct STAFDeepTests {
 
     // MARK: - All QuantizationFormat Scheme Detection
 
-    @Test("Converter correctly detects all quantization schemes")
+    @Test(
+        "Converter correctly detects all quantization schemes",
+        .disabled("Mixed MLX quantization hints are no longer valid in a single conversion")
+    )
     func allQuantizationSchemeDetection() throws {
         guard let device = MTLCreateSystemDefaultDevice() else {
             Issue.record("No Metal device")

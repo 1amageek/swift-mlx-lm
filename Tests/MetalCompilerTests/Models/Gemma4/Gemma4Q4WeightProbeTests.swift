@@ -3,6 +3,7 @@ import Metal
 import Testing
 @testable import MetalCompiler
 
+#if ENABLE_METAL_PROBES
 /// Software-dequant probe: verifies that Q4-packed weights in the STAF file
 /// match the corresponding BF16 weights within quantization noise. This
 /// bypasses all Metal kernels and directly inspects the STAF block layout.
@@ -15,8 +16,16 @@ import Testing
 @Suite("Gemma4 Q4 Weight Probe", .serialized)
 struct Gemma4Q4WeightProbeTests {
 
-    static let bf16BundlePath = "/Users/1amageek/Desktop/swift-lm/TestData/gemma-4-E2B-it"
-    static let q4BundlePath = "/Users/1amageek/Desktop/swift-lm/TestData/gemma-4-E2B-it-4bit"
+    static let testDataRoot = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+        .appendingPathComponent("TestData")
+        .path
+    static let bf16BundlePath = "\(testDataRoot)/gemma-4-E2B-it"
+    static let q4BundlePath = "\(testDataRoot)/gemma-4-E2B-it-4bit"
 
     // Tensors to probe. Embedding is the most critical — if it is wrong, every
     // layer's input is already poisoned.
@@ -43,6 +52,7 @@ struct Gemma4Q4WeightProbeTests {
 
         print("\n=== Gemma4-E2B Q4 Block-Level Weight Probe ===")
 
+        var comparedTensorCount = 0
         for tensorName in Self.tensorsToCheck {
             print("\nTensor: \(tensorName)")
 
@@ -91,9 +101,10 @@ struct Gemma4Q4WeightProbeTests {
             let meanAbs = sumAbs / Float(n)
             print(String(format: "  diff: max_abs=%.6f  mean_abs=%.6f  max_rel=%.4f  (n=%d)",
                          maxAbs, meanAbs, maxRel, n))
+            comparedTensorCount += 1
         }
 
-        #expect(true)  // diagnostic only
+        #expect(comparedTensorCount > 0)
     }
 
     // MARK: - Helpers
@@ -159,3 +170,4 @@ struct Gemma4Q4WeightProbeTests {
                      scale, UInt32(scaleBits), zero, UInt32(zeroBits), qsHex))
     }
 }
+#endif

@@ -41,6 +41,11 @@ struct STAFEndToEndGEMVTests {
         try runEndToEndTest(format: AffineQ3Group32Format())
     }
 
+    @Test("Q3G64 MLX→STAF→GEMV end-to-end")
+    func q3Group64EndToEnd() throws {
+        try runEndToEndTest(format: AffineQ3Group64Format())
+    }
+
     // MARK: - Q4 (aligned)
 
     @Test("Q4G64 MLX→STAF→GEMV end-to-end")

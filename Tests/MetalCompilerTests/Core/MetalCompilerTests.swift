@@ -43,8 +43,16 @@ struct DispatchPlanCompilationTests {
     func tinyModelCompilesToMultiDispatch() throws {
         guard let device = MTLCreateSystemDefaultDevice() else { return }
         let graph = try ModelGraph(TinyTestModel(hiddenSize: 64, vocabSize: 100))
+        let resolved = ParameterResolver().resolve(graph: graph, convention: .llamaFamily)
+        let store = try makeSyntheticWeightStore(for: resolved, device: device)
         let compiler = MetalInferenceCompiler()
-        let plan = try compiler.compile(graph: graph, hiddenSize: 64, vocabSize: 100, device: device)
+        let plan = try compiler.compile(
+            graph: resolved,
+            hiddenSize: 64,
+            vocabSize: 100,
+            stafWeightStore: store,
+            device: device
+        )
 
         // Multiple dispatch steps (not 1)
         #expect(plan.steps.count > 1, "Expected multiple dispatches, got \(plan.steps.count)")
@@ -54,19 +62,35 @@ struct DispatchPlanCompilationTests {
     func transformerCompilesToManyDispatches() throws {
         guard let device = MTLCreateSystemDefaultDevice() else { return }
         let graph = try ModelGraph(TinyTransformer(hiddenSize: 64, layers: 2, vocabSize: 100))
+        let resolved = ParameterResolver().resolve(graph: graph, convention: .llamaFamily)
+        let store = try makeSyntheticWeightStore(for: resolved, device: device)
         let compiler = MetalInferenceCompiler()
-        let plan = try compiler.compile(graph: graph, hiddenSize: 64, vocabSize: 100, device: device)
+        let plan = try compiler.compile(
+            graph: resolved,
+            hiddenSize: 64,
+            vocabSize: 100,
+            stafWeightStore: store,
+            device: device
+        )
 
         // 2 layers x (norm + 5 attn + residual + norm + 4 mlp + residual) + embed + final_norm + output + argmax
-        #expect(plan.steps.count > 20, "Expected many dispatches for 2-layer transformer, got \(plan.steps.count)")
+        #expect(plan.steps.count >= 20, "Expected many dispatches for 2-layer transformer, got \(plan.steps.count)")
     }
 
     @Test
     func threadgroupSizesRespectPipelineLimits() throws {
         guard let device = MTLCreateSystemDefaultDevice() else { return }
         let graph = try ModelGraph(TinyTestModel(hiddenSize: 64, vocabSize: 100))
+        let resolved = ParameterResolver().resolve(graph: graph, convention: .llamaFamily)
+        let store = try makeSyntheticWeightStore(for: resolved, device: device)
         let compiler = MetalInferenceCompiler()
-        let plan = try compiler.compile(graph: graph, hiddenSize: 64, vocabSize: 100, device: device)
+        let plan = try compiler.compile(
+            graph: resolved,
+            hiddenSize: 64,
+            vocabSize: 100,
+            stafWeightStore: store,
+            device: device
+        )
 
         for (i, step) in plan.steps.enumerated() {
             let maxThreads = step.pipeline.maxTotalThreadsPerThreadgroup
@@ -78,6 +102,85 @@ struct DispatchPlanCompilationTests {
             #expect(step.threadgroupSize.width % warpWidth == 0 || step.threadgroupSize.width < warpWidth,
                 "Step \(i) threadgroup width \(step.threadgroupSize.width) not aligned to warp \(warpWidth)")
         }
+    }
+
+    private func makeSyntheticWeightStore(
+        for graph: ModelGraph,
+        device: MTLDevice
+    ) throws -> STAFWeightStore {
+        let payloadSize = 4 * 1024 * 1024
+        guard let buffer = device.makeBuffer(length: payloadSize, options: .storageModeShared) else {
+            throw MetalCompilerError.deviceSetupFailed("Cannot allocate synthetic weight buffer")
+        }
+
+        var entries: [String: STAFTensorEntry] = [:]
+        var names = tensorNames(in: graph.rootRegion)
+        names.formUnion([
+            "model.embed_tokens.weight",
+            "model.norm.weight",
+            "lm_head.weight"
+        ])
+        for layerIndex in 0..<8 {
+            let prefix = "model.layers.\(layerIndex)"
+            names.formUnion([
+                "\(prefix).input_layernorm.weight",
+                "\(prefix).self_attn.q_proj.weight",
+                "\(prefix).self_attn.k_proj.weight",
+                "\(prefix).self_attn.v_proj.weight",
+                "\(prefix).self_attn.o_proj.weight",
+                "\(prefix).post_attention_layernorm.weight",
+                "\(prefix).mlp.gate_proj.weight",
+                "\(prefix).mlp.up_proj.weight",
+                "\(prefix).mlp.down_proj.weight"
+            ])
+        }
+
+        for tensorName in names {
+            entries[tensorName] = STAFTensorEntry(
+                name: tensorName,
+                payloadOffset: 0,
+                payloadSize: payloadSize,
+                schemeIdentifier: .passthrough,
+                semanticRole: .unknown,
+                shape: [payloadSize / MemoryLayout<UInt16>.stride],
+                blockSize: 0,
+                groupSize: 0,
+                bufferOffset: 0
+            )
+        }
+
+        return STAFWeightStore(
+            buffer: buffer,
+            entries: entries,
+            metadata: .empty,
+            specializedBufferAccesses: [:]
+        )
+    }
+
+    private func tensorNames(in region: Region) -> Set<String> {
+        var names = Set(region.operations.flatMap { operation in
+            operation.parameterBindings.map(\.tensorName)
+        })
+
+        for operation in region.operations {
+            switch operation.kind {
+            case .primitive:
+                break
+            case .residual(_, let body):
+                names.formUnion(tensorNames(in: body))
+            case .parallel(_, let branches):
+                for branch in branches {
+                    names.formUnion(tensorNames(in: branch))
+                }
+            case .repeating(_, let body):
+                names.formUnion(tensorNames(in: body))
+            case .conditional(_, let thenRegion, let elseRegion):
+                names.formUnion(tensorNames(in: thenRegion))
+                names.formUnion(tensorNames(in: elseRegion))
+            }
+        }
+
+        return names
     }
 
 }

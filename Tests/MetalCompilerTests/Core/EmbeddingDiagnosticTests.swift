@@ -3,6 +3,7 @@ import Metal
 import Foundation
 @testable import MetalCompiler
 
+#if ENABLE_METAL_PROBES
 /// Diagnostic test: verify embedding lookup kernel works with real STAF data formats.
 /// Tests BF16, FP16, and quantized embeddings in isolation.
 @Suite("Embedding Diagnostic")
@@ -368,6 +369,7 @@ struct EmbeddingDiagnosticTests {
         }
     }
 }
+#endif
 
 // MARK: - Helpers
 

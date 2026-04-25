@@ -66,6 +66,35 @@ struct MetalResidencyOwnershipTests {
         #expect(encodedTable.ownedResidencyBuffers.contains { $0 === encoded })
     }
 
+    @Test("prepared argument allocator leaves sliced buffers unmaterialized")
+    func preparedArgumentAllocatorLeavesSlicedBuffersUnmaterialized() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else {
+            Issue.record("No Metal device")
+            return
+        }
+
+        let resource = try #require(device.makeBuffer(length: 256, options: .storageModeShared))
+        let plannedTable = MetalBindingTable(
+            bufferBindings: .argumentTable(MetalArgumentTableBindings(
+                layout: MetalArgumentTableLayout(id: 1, indices: [0]),
+                bindings: [MetalBufferBinding(index: 0, buffer: resource, offset: 16)],
+                encodingState: .planned
+            )),
+            constantBindings: .inline([])
+        )
+
+        let allocator = MetalPreparedArgumentBufferAllocator(device: device)
+        let preparedTables = try allocator.makeBindingTables(from: [plannedTable])
+        guard case .argumentTable(let argumentTable) = preparedTables[0].bufferBindings else {
+            Issue.record("Expected argument table")
+            return
+        }
+        guard case .planned = argumentTable.encodingState else {
+            Issue.record("Sliced argument table should stay planned")
+            return
+        }
+    }
+
     @Test("prompt state owns snapshot residency for restore")
     func promptStateOwnsSnapshotResidency() throws {
         guard let device = MTLCreateSystemDefaultDevice() else {

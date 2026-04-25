@@ -3,6 +3,7 @@ import Metal
 import Testing
 @testable import MetalCompiler
 
+#if ENABLE_METAL_PROBES
 @Suite("Decode Layerwise Diagnostics", .serialized)
 struct DecodeLayerwiseDiagnosticTests {
     private static let referencePath = "/Users/1amageek/Desktop/swift-lm/TestData/lfm2_reference.safetensors"
@@ -343,3 +344,4 @@ struct DecodeLayerwiseDiagnosticTests {
         case tensorNotFound(String)
     }
 }
+#endif

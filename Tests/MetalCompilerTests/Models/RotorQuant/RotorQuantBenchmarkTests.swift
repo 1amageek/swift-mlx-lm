@@ -10,6 +10,7 @@ import Testing
 ///
 /// Measures throughput, memory, and quality impact of RotorQuant
 /// (Hadamard-rotated quantization) versus baseline FP16 and raw Q8 KV caches.
+#if ENABLE_METAL_PROBES
 @Suite("RotorQuant KV Cache Benchmark", .serialized)
 struct RotorQuantBenchmarkTests {
 
@@ -370,7 +371,9 @@ struct RotorQuantBenchmarkTests {
 
     // MARK: - Gemma4 (Pure Transformer) Benchmarks
 
-    static let gemma4BundlePath = "/Users/1amageek/Desktop/swift-lm/TestData/gemma-4-E2B-it"
+    static let gemma4BundlePath = URL(fileURLWithPath: BenchmarkSupport.testDataPath)
+        .appendingPathComponent("gemma-4-E2B-it")
+        .path
 
     @Test("Gemma4 decode throughput: FP16 vs RotorQ8 vs RotorQ4")
     func gemma4DecodeComparison() throws {
@@ -973,3 +976,4 @@ struct RotorQuantBenchmarkTests {
         }
     }
 }
+#endif

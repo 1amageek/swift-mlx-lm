@@ -1,3 +1,4 @@
+import Foundation
 import MetalCompiler
 
 /// A reusable snapshot of decode state for a prepared prompt prefix.
@@ -52,7 +53,7 @@ public struct PromptSnapshot: @unchecked Sendable {
 }
 
 /// Errors produced by ``LanguageModelContext``.
-public enum LanguageModelContextError: Error {
+public enum LanguageModelContextError: Error, LocalizedError, CustomStringConvertible {
     /// Prefill did not produce a valid first token.
     case invalidPrefillResult
     /// The input asks for a modality the loaded model does not declare.
@@ -66,4 +67,38 @@ public enum LanguageModelContextError: Error {
     case conflictingPromptThinkingConfiguration(String)
     /// A known prompt-template variable was provided with an invalid value type.
     case invalidPromptTemplateVariable(String)
+
+    public var errorDescription: String? {
+        switch self {
+        case .invalidPrefillResult:
+            return "Prefill did not produce a valid first token."
+        case .unsupportedInputForModel(let reason):
+            return "Unsupported input for model: \(reason)"
+        case .multimodalInputNotSupported(let reason):
+            return "Multimodal input is not supported: \(reason)"
+        case .promptSnapshotRestoreFailed(let reason):
+            return "Prompt snapshot restore failed: \(reason)"
+        case .conflictingPromptThinkingConfiguration(let reason):
+            return "Conflicting prompt thinking configuration: \(reason)"
+        case .invalidPromptTemplateVariable(let reason):
+            return "Invalid prompt template variable: \(reason)"
+        }
+    }
+
+    public var description: String {
+        switch self {
+        case .invalidPrefillResult:
+            return "LanguageModelContextError.invalidPrefillResult"
+        case .unsupportedInputForModel(let reason):
+            return "LanguageModelContextError.unsupportedInputForModel(\(reason))"
+        case .multimodalInputNotSupported(let reason):
+            return "LanguageModelContextError.multimodalInputNotSupported(\(reason))"
+        case .promptSnapshotRestoreFailed(let reason):
+            return "LanguageModelContextError.promptSnapshotRestoreFailed(\(reason))"
+        case .conflictingPromptThinkingConfiguration(let reason):
+            return "LanguageModelContextError.conflictingPromptThinkingConfiguration(\(reason))"
+        case .invalidPromptTemplateVariable(let reason):
+            return "LanguageModelContextError.invalidPromptTemplateVariable(\(reason))"
+        }
+    }
 }

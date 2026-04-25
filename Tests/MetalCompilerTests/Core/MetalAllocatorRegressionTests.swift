@@ -62,6 +62,7 @@ struct MetalAllocatorRegressionTests {
 
         let graph = try ModelGraph(Qwen35(config: config))
         let resolved = ParameterResolver().resolve(graph: graph, convention: .qwen35Family)
+        let store = try makeWeightStore(for: resolved, device: device)
         let compiler = MetalInferenceCompiler()
         let maxSequenceLength = 8
         let plan = try compiler.compilePrefill(
@@ -70,6 +71,7 @@ struct MetalAllocatorRegressionTests {
             intermediateSize: config.intermediateSize,
             vocabSize: config.vocabSize,
             inferencePolicy: InferencePolicy(maximumSequenceLength: maxSequenceLength),
+            stafWeightStore: store,
             device: device
         )
 
@@ -79,5 +81,62 @@ struct MetalAllocatorRegressionTests {
             slotDimension >= 6144,
             "Qwen DeltaNet scratch slot must fit in_proj_qkv (6144), got \(slotDimension)"
         )
+    }
+
+    private func makeWeightStore(
+        for graph: ModelGraph,
+        device: MTLDevice
+    ) throws -> STAFWeightStore {
+        guard let buffer = device.makeBuffer(length: MemoryLayout<Float16>.size, options: .storageModeShared) else {
+            throw MetalCompilerError.deviceSetupFailed("Cannot allocate dummy STAF weight buffer")
+        }
+
+        var entries: [String: STAFTensorEntry] = [:]
+        for tensorName in tensorNames(in: graph.rootRegion) {
+            entries[tensorName] = STAFTensorEntry(
+                name: tensorName,
+                payloadOffset: 0,
+                payloadSize: buffer.length,
+                schemeIdentifier: .passthrough,
+                semanticRole: .unknown,
+                shape: [1],
+                blockSize: 0,
+                groupSize: 0,
+                bufferOffset: 0
+            )
+        }
+
+        return STAFWeightStore(
+            buffer: buffer,
+            entries: entries,
+            metadata: .empty,
+            specializedBufferAccesses: [:]
+        )
+    }
+
+    private func tensorNames(in region: Region) -> Set<String> {
+        var names = Set(region.operations.flatMap { operation in
+            operation.parameterBindings.map(\.tensorName)
+        })
+
+        for operation in region.operations {
+            switch operation.kind {
+            case .primitive:
+                break
+            case .residual(_, let body):
+                names.formUnion(tensorNames(in: body))
+            case .parallel(_, let branches):
+                for branch in branches {
+                    names.formUnion(tensorNames(in: branch))
+                }
+            case .repeating(_, let body):
+                names.formUnion(tensorNames(in: body))
+            case .conditional(_, let thenRegion, let elseRegion):
+                names.formUnion(tensorNames(in: thenRegion))
+                names.formUnion(tensorNames(in: elseRegion))
+            }
+        }
+
+        return names
     }
 }

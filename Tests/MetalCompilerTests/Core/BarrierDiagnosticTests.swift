@@ -6,6 +6,7 @@ import LMArchitecture
 import ModelDeclarations
 import LMIR
 
+#if ENABLE_METAL_PROBES
 /// Diagnostic tests that dump barrier patterns for analysis.
 /// These are not correctness tests — they print detailed information about
 /// which steps have barriers and why.
@@ -177,3 +178,4 @@ struct BarrierDiagnosticTests {
         return name
     }
 }
+#endif

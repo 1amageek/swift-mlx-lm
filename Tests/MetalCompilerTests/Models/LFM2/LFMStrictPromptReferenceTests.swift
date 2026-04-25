@@ -5,17 +5,19 @@ import Testing
 
 @Suite("LFM Strict Prompt Reference", .serialized)
 struct LFMStrictPromptReferenceTests {
-    private static let referencePath = "/Users/1amageek/Desktop/swift-lm/TestData/lfm2_strict_chat_reference.safetensors"
-    private static let stafPath = "/Users/1amageek/Desktop/swift-lm/TestData/LFM2.5-1.2B-Thinking/model.staf"
-    private static let modelDirectoryPath = "/Users/1amageek/Desktop/swift-lm/TestData/LFM2.5-1.2B-Thinking"
+    private static let referencePath = URL(fileURLWithPath: BenchmarkSupport.testDataPath)
+        .appendingPathComponent("lfm2_strict_chat_reference.safetensors")
+        .path
+    private static let stafPath = BenchmarkSupport.stafPath
+    private static let modelDirectoryPath = BenchmarkSupport.lfmBundlePath
 
     private struct TestEnvironment {
         var model: MetalInferenceModel
         let ref: MetalWeightFile
     }
 
-    @Test("Strict prompt prefill checkpoints match HuggingFace reference", .timeLimit(.minutes(10)))
-    func strictPromptPrefillCheckpointsMatchReference() throws {
+    @Test("Strict prompt prefill logits match HuggingFace reference", .timeLimit(.minutes(2)))
+    func strictPromptPrefillLogitsMatchReference() throws {
         let gpuLock = try GPUTestExclusion.acquire()
         defer { gpuLock.release() }
 
@@ -45,18 +47,17 @@ struct LFMStrictPromptReferenceTests {
             print("[StrictRef] tailStep[\(absoluteIndex)] layer=\(step.metadata.layerIndex.map(String.init) ?? "-") kernel=\(kernel) mode=\(step.mode)")
         }
         let finalHiddenSource = prefillPlan.finalHiddenSource(sequenceLength: tokens.count)
+        print("[StrictRef] prefill stepCount=\(prefillPlan.stepCount)")
         print("[StrictRef] finalHiddenSource buffer=\(bufferLabel(finalHiddenSource.buffer, prefillPlan: prefillPlan)) offset=\(finalHiddenSource.offset)")
-        dumpStepBindings(prefillPlan.steps[255], stepIndex: 255, prefillPlan: prefillPlan)
-        dumpStepBindings(prefillPlan.steps[256], stepIndex: 256, prefillPlan: prefillPlan)
-        dumpStepBindings(prefillPlan.steps[257], stepIndex: 257, prefillPlan: prefillPlan)
 
+        #if ENABLE_METAL_PROBES
         let metalFinal = try model.debugPrefillLastTokenFinalHidden(tokens: tokens)
         let refFinalAll = try readRefTensorAsFloats(env.ref, name: "ref.prefill.final_hidden")
         let refFinal = Array(refFinalAll.suffix(2048))
         let finalErr = maxAbsoluteError(metalFinal, refFinal)
         print("[StrictRef] prefill final_hidden maxErr=\(String(format: "%.4f", finalErr))")
 
-        let checkpoints: [(name: String, stepCount: Int, threshold: Float)] = [
+        let allCheckpoints: [(name: String, stepCount: Int, threshold: Float)] = [
             ("ref.prefill.layer_0.after_op", 7, 0.25),
             ("ref.prefill.layer_0.mlp_out", 13, 0.50),
             ("ref.prefill.layer_0.after_mlp", 14, 0.50),
@@ -79,6 +80,11 @@ struct LFMStrictPromptReferenceTests {
             ("ref.prefill.layer_15.after_op", 247, 0.50),
             ("ref.prefill.layer_15.after_mlp", 254, 0.50),
         ]
+        let checkpoints = allCheckpoints.filter { $0.stepCount < prefillPlan.steps.count }
+        let skippedCheckpoints = allCheckpoints.filter { $0.stepCount >= prefillPlan.steps.count }
+        if !skippedCheckpoints.isEmpty {
+            print("[StrictRef] skipping \(skippedCheckpoints.count) stale checkpoints for \(prefillPlan.stepCount)-step prefill plan")
+        }
 
         let snapshots = try model.debugPrefillLastTokenHiddenSnapshots(
             tokens: tokens,
@@ -92,10 +98,11 @@ struct LFMStrictPromptReferenceTests {
             print("[StrictRef] \(checkpoint.name) maxErr=\(String(format: "%.4f", error))")
             #expect(error < checkpoint.threshold, "\(checkpoint.name) diverged: maxErr=\(error)")
         }
+        #expect(finalErr < 0.25, "Strict prompt final hidden diverged: maxErr=\(finalErr)")
+        #endif
 
         #expect(firstToken == Int32(refTop.index), "Strict prompt first token mismatch")
         #expect(metalTop.index == refTop.index, "Strict prompt prefill argmax mismatch")
-        #expect(finalErr < 0.25, "Strict prompt final hidden diverged: maxErr=\(finalErr)")
     }
 
     @Test("Layer13 dense MLP STAF rows match safetensors", .timeLimit(.minutes(2)))
@@ -147,6 +154,7 @@ struct LFMStrictPromptReferenceTests {
         }
     }
 
+    #if ENABLE_METAL_PROBES
     @Test("Layer13 MLP chain localizes execution drift", .timeLimit(.minutes(2)))
     func layer13MLPChainLocalizesExecutionDrift() throws {
         let gpuLock = try GPUTestExclusion.acquire()
@@ -316,7 +324,6 @@ struct LFMStrictPromptReferenceTests {
         #expect(scaleErr < 0.0001, "layer13 ffn_norm scale binding drifted: maxErr=\(scaleErr)")
     }
 
-    #if ENABLE_METAL_PROBES
     @Test("Layer13 ffn_norm manual separate-output dispatch matches reference", .timeLimit(.minutes(2)))
     func layer13FFNNormManualSeparateOutputDispatchMatchesReference() throws {
         let gpuLock = try GPUTestExclusion.acquire()

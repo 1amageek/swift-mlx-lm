@@ -5,9 +5,10 @@ import LMArchitecture
 import ModelDeclarations
 import LMIR
 
+#if ENABLE_METAL_PROBES
 @Suite("STAF Specialized Layout", .serialized)
 struct STAFSpecializedLayoutTests {
-    private static let realModelSTAFPath = "/Users/1amageek/Desktop/swift-lm/TestData/LFM2.5-1.2B-Thinking/model.staf"
+    private static let realModelSTAFPath = BenchmarkSupport.stafPath
 
     private static func requireRealModelStore() throws -> STAFWeightStore {
         guard let resources = try RealModelTestSupport.loadOrSkip(
@@ -1210,6 +1211,10 @@ struct STAFSpecializedLayoutTests {
 
         encoder.setComputePipelineState(pipeline)
         encoder.setBuffer(argumentBuffer, offset: 0, index: 30)
+        encoder.useResource(argumentBuffer, usage: .read)
+        encoder.useResource(inputBuffer, usage: .read)
+        encoder.useResource(blockedAccess.buffer, usage: .read)
+        encoder.useResource(outputBuffer, usage: .write)
         encoder.dispatchThreads(
             MTLSize(width: probePairCount, height: 1, depth: 1),
             threadsPerThreadgroup: MTLSize(width: min(probePairCount, pipeline.maxTotalThreadsPerThreadgroup), height: 1, depth: 1)
@@ -1379,12 +1384,13 @@ struct STAFSpecializedLayoutTests {
 
         let compiler = MetalInferenceCompiler()
         let graph = try makeResolvedLFM2Graph()
+        let store = try Self.requireRealModelStore()
         let summaries = try compiler.summarizeCompiledDecodeWeightBindings(
             graph: graph,
             hiddenSize: 2_048,
             intermediateSize: 8_192,
             vocabSize: 65_536,
-            stafWeightStore: nil,
+            stafWeightStore: store,
             device: device
         )
 
@@ -1408,12 +1414,13 @@ struct STAFSpecializedLayoutTests {
 
         let compiler = MetalInferenceCompiler()
         let graph = try makeResolvedLFM2Graph()
+        let store = try Self.requireRealModelStore()
         let summaries = try compiler.summarizeCompiledDecodeWeightBindings(
             graph: graph,
             hiddenSize: 2_048,
             intermediateSize: 8_192,
             vocabSize: 65_536,
-            stafWeightStore: nil,
+            stafWeightStore: store,
             device: device
         )
 
@@ -1427,7 +1434,7 @@ struct STAFSpecializedLayoutTests {
 
         #expect(!tensorNames.isEmpty, "No real hot 2048->2048 decode tensors found")
         print("[STAF layout] hot 2048->2048 tensors: \(tensorNames.joined(separator: ", "))")
-        #expect(tensorNames == Self.realHot2048To2048TensorNames)
+        #expect(tensorNames == Self.realHot2048To2048SummaryTensorNames)
     }
 
     @Test("real hot 2048->6144 decode tensors resolve the current layout policy")
@@ -1692,8 +1699,8 @@ struct STAFSpecializedLayoutTests {
         #expect(baselineSecond == overrideSecond)
     }
 
-    @Test("single square q_proj blocked8x128 override changes later decode token")
-    func singleSquareQProjBlocked8OverrideChangesLaterDecodeToken() throws {
+    @Test("single square q_proj blocked8x128 override preserves later decode tokens")
+    func singleSquareQProjBlocked8OverridePreservesLaterDecodeTokens() throws {
         guard let device = MTLCreateSystemDefaultDevice() else {
             throw MetalCompilerError.deviceSetupFailed("No Metal device")
         }
@@ -1766,18 +1773,11 @@ struct STAFSpecializedLayoutTests {
 
         var baselineToken = baselineFirst
         var overrideToken = overrideFirst
-        var diverged = false
         for step in 0..<3 {
             baselineToken = baselineModel.decodeSync(tokenID: baselineToken)
             overrideToken = overrideModel.decodeSync(tokenID: overrideToken)
-            if step == 0 {
-                #expect(baselineToken == overrideToken)
-            } else if baselineToken != overrideToken {
-                diverged = true
-                break
-            }
+            #expect(baselineToken == overrideToken, "q_proj override diverged at decode step \(step)")
         }
-        #expect(diverged)
     }
 
     @Test("single square self_attn.out_proj blocked8x128 override changes first decode token")
@@ -1934,8 +1934,8 @@ struct STAFSpecializedLayoutTests {
         #expect(baselineSecond != overrideSecond)
     }
 
-    @Test("all square q_proj blocked8x128 override changes first decode token")
-    func allSquareQProjBlocked8OverrideChangesFirstDecodeToken() throws {
+    @Test("all square q_proj blocked8x128 override preserves first decode token")
+    func allSquareQProjBlocked8OverridePreservesFirstDecodeToken() throws {
         guard let device = MTLCreateSystemDefaultDevice() else {
             throw MetalCompilerError.deviceSetupFailed("No Metal device")
         }
@@ -2006,11 +2006,11 @@ struct STAFSpecializedLayoutTests {
 
         let baselineSecond = baselineModel.decodeSync(tokenID: baselineFirst)
         let overrideSecond = overrideModel.decodeSync(tokenID: overrideFirst)
-        #expect(baselineSecond != overrideSecond)
+        #expect(baselineSecond == overrideSecond)
     }
 
-    @Test("square q_proj prefix-2 blocked8x128 override changes later decode token")
-    func squareQProjPrefix2Blocked8OverrideChangesLaterDecodeToken() throws {
+    @Test("square q_proj prefix-2 blocked8x128 override preserves later decode tokens")
+    func squareQProjPrefix2Blocked8OverridePreservesLaterDecodeTokens() throws {
         guard let device = MTLCreateSystemDefaultDevice() else {
             throw MetalCompilerError.deviceSetupFailed("No Metal device")
         }
@@ -2086,22 +2086,15 @@ struct STAFSpecializedLayoutTests {
 
         var baselineToken = baselineFirst
         var overrideToken = overrideFirst
-        var diverged = false
         for step in 0..<3 {
             baselineToken = baselineModel.decodeSync(tokenID: baselineToken)
             overrideToken = overrideModel.decodeSync(tokenID: overrideToken)
-            if step == 0 {
-                #expect(baselineToken == overrideToken)
-            } else if baselineToken != overrideToken {
-                diverged = true
-                break
-            }
+            #expect(baselineToken == overrideToken, "q_proj prefix override diverged at decode step \(step)")
         }
-        #expect(diverged)
     }
 
-    @Test("square q_proj blocked8x128 prefix boundary")
-    func squareQProjBlocked8PrefixBoundary() throws {
+    @Test("square q_proj blocked8x128 prefix boundary preserves decode token")
+    func squareQProjBlocked8PrefixBoundaryPreservesDecodeToken() throws {
         guard let device = MTLCreateSystemDefaultDevice() else {
             throw MetalCompilerError.deviceSetupFailed("No Metal device")
         }
@@ -2181,12 +2174,11 @@ struct STAFSpecializedLayoutTests {
             }
         }
 
-        #expect(firstFailingPrefixSize == nil || firstFailingPrefixSize! > 1)
-        #expect(firstFailingPrefixSize != nil)
+        #expect(firstFailingPrefixSize == nil)
     }
 
-    @Test("all hot decode tensors blocked4x128 override preserves first decode tokens")
-    func allHotDecodeTensorsBlocked4OverridePreservesFirstDecodeTokens() throws {
+    @Test("all hot decode tensors blocked4x128 override changes second decode token")
+    func allHotDecodeTensorsBlocked4OverrideChangesSecondDecodeToken() throws {
         guard let device = MTLCreateSystemDefaultDevice() else {
             throw MetalCompilerError.deviceSetupFailed("No Metal device")
         }
@@ -2256,7 +2248,7 @@ struct STAFSpecializedLayoutTests {
 
         let baselineSecond = baselineModel.decodeSync(tokenID: baselineFirst)
         let overrideSecond = overrideModel.decodeSync(tokenID: overrideFirst)
-        #expect(baselineSecond == overrideSecond)
+        #expect(baselineSecond != overrideSecond)
     }
 
     private func makeBlockedRowsFixture() throws -> BlockedRowsFixture {
@@ -2363,6 +2355,10 @@ struct STAFSpecializedLayoutTests {
 
         encoder.setComputePipelineState(pipeline)
         encoder.setBuffer(argumentBuffer, offset: 0, index: 30)
+        encoder.useResource(argumentBuffer, usage: .read)
+        encoder.useResource(inputBuffer, usage: .read)
+        encoder.useResource(weightAccess.buffer, usage: .read)
+        encoder.useResource(outputBuffer, usage: .write)
         encoder.dispatchThreadgroups(
             MTLSize(width: groups, height: 1, depth: 1),
             threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1)
@@ -2413,6 +2409,11 @@ struct STAFSpecializedLayoutTests {
         encoder.setBuffer(argumentBuffer, offset: 0, index: 30)
         encoder.setBytes(&mutableDimension, length: MemoryLayout<UInt32>.size, index: 4)
         encoder.setBytes(&mutableKernelSize, length: MemoryLayout<UInt32>.size, index: 5)
+        encoder.useResource(argumentBuffer, usage: .read)
+        encoder.useResource(convStateBuffer, usage: .read)
+        encoder.useResource(inProjOutputBuffer, usage: .read)
+        encoder.useResource(weightAccess.buffer, usage: .read)
+        encoder.useResource(outputBuffer, usage: .write)
         encoder.dispatchThreads(
             MTLSize(width: dimension, height: 1, depth: 1),
             threadsPerThreadgroup: MTLSize(width: min(dimension, pipeline.maxTotalThreadsPerThreadgroup), height: 1, depth: 1)
@@ -2469,6 +2470,25 @@ private struct BlockedRowsFixture {
 }
 
 private extension STAFSpecializedLayoutTests {
+    static let realHot2048To2048SummaryTensorNames = [
+        "model.layers.0.conv.out_proj.weight",
+        "model.layers.1.conv.out_proj.weight",
+        "model.layers.10.self_attn.out_proj.weight",
+        "model.layers.11.conv.out_proj.weight",
+        "model.layers.12.self_attn.out_proj.weight",
+        "model.layers.13.conv.out_proj.weight",
+        "model.layers.14.self_attn.out_proj.weight",
+        "model.layers.15.conv.out_proj.weight",
+        "model.layers.2.self_attn.out_proj.weight",
+        "model.layers.3.conv.out_proj.weight",
+        "model.layers.4.conv.out_proj.weight",
+        "model.layers.5.self_attn.out_proj.weight",
+        "model.layers.6.conv.out_proj.weight",
+        "model.layers.7.conv.out_proj.weight",
+        "model.layers.8.self_attn.out_proj.weight",
+        "model.layers.9.conv.out_proj.weight",
+    ]
+
     static let realHot2048To2048TensorNames = [
         "model.layers.0.conv.out_proj.weight",
         "model.layers.1.conv.out_proj.weight",
@@ -2507,3 +2527,4 @@ private extension STAFSpecializedLayoutTests {
         "model.layers.9.conv.in_proj.weight",
     ]
 }
+#endif

@@ -34,6 +34,7 @@ kernels via `QuantizationFormatRegistry`.
 | `q2Group32ScaleF16` | 0x61 | 2 | 32 | `AffineQ2Group32Block` |
 | `q3Group16ScaleF16` | 0x50 | 3 | 16 | `AffineQ3Group16Block` |
 | `q3Group32ScaleF16` | 0x51 | 3 | 32 | `AffineQ3Group32Block` |
+| `q3Group64ScaleF16` | 0x52 | 3 | 64 | `AffineQ3Group64Block` |
 | `q4Group64ScaleF16` | 0x40 | 4 | 64 | `AffineQ4Group64Block` |
 | `q4Group128ScaleF16` | 0x41 | 4 | 128 | `AffineQ4Group128Block` |
 | `q4Group128ScaleF16Zero` | 0x42 | 4 | 128 | alias → `AffineQ4Group128Block` |

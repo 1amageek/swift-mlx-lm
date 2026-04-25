@@ -1,6 +1,6 @@
 import Testing
 import Metal
-import MetalCompiler
+@testable import MetalCompiler
 import LMArchitecture
 import ModelDeclarations
 
@@ -175,10 +175,13 @@ struct PrefillTests {
         _ graph: ModelGraph,
         _ device: MTLDevice
     ) throws -> MetalCompiledModel {
-        try MetalInferenceCompiler().compile(
+        let store = try makeSyntheticWeightStore(config: config, device: device)
+        return try MetalInferenceCompiler().compile(
             graph: graph, hiddenSize: config.hiddenSize,
             intermediateSize: config.intermediateSize,
-            vocabSize: config.vocabSize, device: device)
+            vocabSize: config.vocabSize,
+            stafWeightStore: store,
+            device: device)
     }
 
     private func compilePrefillPlan(
@@ -186,11 +189,67 @@ struct PrefillTests {
         _ graph: ModelGraph,
         _ device: MTLDevice
     ) throws -> MetalPrefillPlan {
-        try MetalInferenceCompiler().compilePrefill(
+        let store = try makeSyntheticWeightStore(config: config, device: device)
+        return try MetalInferenceCompiler().compilePrefill(
             graph: graph, hiddenSize: config.hiddenSize,
             intermediateSize: config.intermediateSize,
             vocabSize: config.vocabSize,
             inferencePolicy: InferencePolicy(maximumSequenceLength: 1024),
+            stafWeightStore: store,
             device: device)
+    }
+
+    private func makeSyntheticWeightStore(config: ModelConfig, device: MTLDevice) throws -> STAFWeightStore {
+        let maxElements = max(
+            config.vocabSize * config.hiddenSize,
+            config.hiddenSize * config.intermediateSize,
+            config.hiddenSize * config.hiddenSize
+        )
+        let payloadSize = max(1, maxElements * MemoryLayout<UInt16>.stride)
+        guard let buffer = device.makeBuffer(length: payloadSize, options: .storageModeShared) else {
+            throw MetalCompilerError.deviceSetupFailed("Cannot allocate synthetic weight buffer")
+        }
+
+        var tensorNames: Set<String> = [
+            "model.embed_tokens.weight",
+            "model.norm.weight",
+            "lm_head.weight"
+        ]
+        for layerIndex in 0..<config.layerCount {
+            let prefix = "model.layers.\(layerIndex)"
+            tensorNames.formUnion([
+                "\(prefix).input_layernorm.weight",
+                "\(prefix).self_attn.q_proj.weight",
+                "\(prefix).self_attn.k_proj.weight",
+                "\(prefix).self_attn.v_proj.weight",
+                "\(prefix).self_attn.o_proj.weight",
+                "\(prefix).post_attention_layernorm.weight",
+                "\(prefix).mlp.gate_proj.weight",
+                "\(prefix).mlp.up_proj.weight",
+                "\(prefix).mlp.down_proj.weight"
+            ])
+        }
+
+        var entries: [String: STAFTensorEntry] = [:]
+        for tensorName in tensorNames {
+            entries[tensorName] = STAFTensorEntry(
+                name: tensorName,
+                payloadOffset: 0,
+                payloadSize: payloadSize,
+                schemeIdentifier: .passthrough,
+                semanticRole: .unknown,
+                shape: [maxElements],
+                blockSize: 0,
+                groupSize: 0,
+                bufferOffset: 0
+            )
+        }
+
+        return STAFWeightStore(
+            buffer: buffer,
+            entries: entries,
+            metadata: .empty,
+            specializedBufferAccesses: [:]
+        )
     }
 }

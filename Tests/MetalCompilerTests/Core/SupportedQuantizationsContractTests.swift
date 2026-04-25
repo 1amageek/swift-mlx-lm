@@ -22,6 +22,7 @@ struct SupportedQuantizationsContractTests {
         .q2Group32ScaleF16,
         .q3Group16ScaleF16,
         .q3Group32ScaleF16,
+        .q3Group64ScaleF16,
         .q4Group64ScaleF16,
         .q4Group128ScaleF16,
         .q4Group128ScaleF16Zero,

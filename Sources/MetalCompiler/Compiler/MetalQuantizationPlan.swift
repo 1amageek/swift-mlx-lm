@@ -36,14 +36,35 @@ enum MetalQuantizationKernelFamily: Sendable, Equatable {
     case denseEmbeddingLookup
     case bf16EmbeddingLookup
     case fp32EmbeddingLookup
+    case q3G16EmbeddingLookup
+    case q3G32EmbeddingLookup
+    case q3G64EmbeddingLookup
     case q4G64EmbeddingLookup
     case q4G128EmbeddingLookup
+    case q5G32EmbeddingLookup
+    case q5G64EmbeddingLookup
+    case q6G16EmbeddingLookup
+    case q6G32EmbeddingLookup
     case q8G32EmbeddingLookup
     case q8G64EmbeddingLookup
+    case q3G16GEMM
+    case q3G32GEMM
+    case q3G64GEMM
     case q4G64GEMM
     case q4G128GEMM
+    case q5G32GEMM
+    case q5G64GEMM
+    case q6G16GEMM
+    case q6G32GEMM
+    case q3G16GEMV
+    case q3G32GEMV
+    case q3G64GEMV
     case q4G64GEMV
     case q4G128GEMV
+    case q5G32GEMV
+    case q5G64GEMV
+    case q6G16GEMV
+    case q6G32GEMV
     case q8G32GEMV
     case q8G64GEMV
     case other(String)
@@ -68,22 +89,64 @@ enum MetalQuantizationKernelFamily: Sendable, Equatable {
             return "bf16EmbeddingLookup"
         case .fp32EmbeddingLookup:
             return "fp32EmbeddingLookup"
+        case .q3G16EmbeddingLookup:
+            return "q3G16EmbeddingLookup"
+        case .q3G32EmbeddingLookup:
+            return "q3G32EmbeddingLookup"
+        case .q3G64EmbeddingLookup:
+            return "q3G64EmbeddingLookup"
         case .q4G64EmbeddingLookup:
             return "q4G64EmbeddingLookup"
         case .q4G128EmbeddingLookup:
             return "q4G128EmbeddingLookup"
+        case .q5G32EmbeddingLookup:
+            return "q5G32EmbeddingLookup"
+        case .q5G64EmbeddingLookup:
+            return "q5G64EmbeddingLookup"
+        case .q6G16EmbeddingLookup:
+            return "q6G16EmbeddingLookup"
+        case .q6G32EmbeddingLookup:
+            return "q6G32EmbeddingLookup"
         case .q8G32EmbeddingLookup:
             return "q8G32EmbeddingLookup"
         case .q8G64EmbeddingLookup:
             return "q8G64EmbeddingLookup"
+        case .q3G16GEMM:
+            return "q3G16GEMM"
+        case .q3G32GEMM:
+            return "q3G32GEMM"
+        case .q3G64GEMM:
+            return "q3G64GEMM"
         case .q4G64GEMM:
             return "q4G64GEMM"
         case .q4G128GEMM:
             return "q4G128GEMM"
+        case .q5G32GEMM:
+            return "q5G32GEMM"
+        case .q5G64GEMM:
+            return "q5G64GEMM"
+        case .q6G16GEMM:
+            return "q6G16GEMM"
+        case .q6G32GEMM:
+            return "q6G32GEMM"
+        case .q3G16GEMV:
+            return "q3G16GEMV"
+        case .q3G32GEMV:
+            return "q3G32GEMV"
+        case .q3G64GEMV:
+            return "q3G64GEMV"
         case .q4G64GEMV:
             return "q4G64GEMV"
         case .q4G128GEMV:
             return "q4G128GEMV"
+        case .q5G32GEMV:
+            return "q5G32GEMV"
+        case .q5G64GEMV:
+            return "q5G64GEMV"
+        case .q6G16GEMV:
+            return "q6G16GEMV"
+        case .q6G32GEMV:
+            return "q6G32GEMV"
         case .q8G32GEMV:
             return "q8G32GEMV"
         case .q8G64GEMV:
@@ -101,6 +164,21 @@ enum MetalQuantizationKernelFamily: Sendable, Equatable {
         if usesMPP {
             return .mppGEMM
         }
+        if normalizedName.hasPrefix("embedding_lookup_seq_q3_g16")
+            || normalizedName.hasPrefix("embedding_lookup_q3_g16")
+        {
+            return .q3G16EmbeddingLookup
+        }
+        if normalizedName.hasPrefix("embedding_lookup_seq_q3_g32")
+            || normalizedName.hasPrefix("embedding_lookup_q3_g32")
+        {
+            return .q3G32EmbeddingLookup
+        }
+        if normalizedName.hasPrefix("embedding_lookup_seq_q3_g64")
+            || normalizedName.hasPrefix("embedding_lookup_q3_g64")
+        {
+            return .q3G64EmbeddingLookup
+        }
         if normalizedName.hasPrefix("embedding_lookup_seq_q4_g64")
             || normalizedName.hasPrefix("embedding_lookup_q4_g64")
         {
@@ -110,6 +188,26 @@ enum MetalQuantizationKernelFamily: Sendable, Equatable {
             || normalizedName.hasPrefix("embedding_lookup_q4_g128")
         {
             return .q4G128EmbeddingLookup
+        }
+        if normalizedName.hasPrefix("embedding_lookup_seq_q5_g32")
+            || normalizedName.hasPrefix("embedding_lookup_q5_g32")
+        {
+            return .q5G32EmbeddingLookup
+        }
+        if normalizedName.hasPrefix("embedding_lookup_seq_q5_g64")
+            || normalizedName.hasPrefix("embedding_lookup_q5_g64")
+        {
+            return .q5G64EmbeddingLookup
+        }
+        if normalizedName.hasPrefix("embedding_lookup_seq_q6_g16")
+            || normalizedName.hasPrefix("embedding_lookup_q6_g16")
+        {
+            return .q6G16EmbeddingLookup
+        }
+        if normalizedName.hasPrefix("embedding_lookup_seq_q6_g32")
+            || normalizedName.hasPrefix("embedding_lookup_q6_g32")
+        {
+            return .q6G32EmbeddingLookup
         }
         if normalizedName.hasPrefix("embedding_lookup_seq_q8_g32")
             || normalizedName.hasPrefix("embedding_lookup_q8_g32")
@@ -137,14 +235,42 @@ enum MetalQuantizationKernelFamily: Sendable, Equatable {
             return .denseEmbeddingLookup
         }
         switch normalizedName {
+        case "gemm_q3_g16_f32s":
+            return .q3G16GEMM
+        case "gemm_q3_g32_f32s":
+            return .q3G32GEMM
+        case "gemm_q3_g64_f32s":
+            return .q3G64GEMM
         case "gemm_q4_g64_f32s":
             return .q4G64GEMM
         case "gemm_q4_g128_f32s":
             return .q4G128GEMM
+        case "gemm_q5_g32_f32s":
+            return .q5G32GEMM
+        case "gemm_q5_g64_f32s":
+            return .q5G64GEMM
+        case "gemm_q6_g16_f32s":
+            return .q6G16GEMM
+        case "gemm_q6_g32_f32s":
+            return .q6G32GEMM
+        case "gemv_q3_g16":
+            return .q3G16GEMV
+        case "gemv_q3_g32":
+            return .q3G32GEMV
+        case "gemv_q3_g64":
+            return .q3G64GEMV
         case "gemv_q4_g64":
             return .q4G64GEMV
         case "gemv_q4_g128":
             return .q4G128GEMV
+        case "gemv_q5_g32":
+            return .q5G32GEMV
+        case "gemv_q5_g64":
+            return .q5G64GEMV
+        case "gemv_q6_g16":
+            return .q6G16GEMV
+        case "gemv_q6_g32":
+            return .q6G32GEMV
         case "gemv_q8_g32":
             return .q8G32GEMV
         case "gemv_q8_g64":
@@ -235,7 +361,7 @@ extension QuantizationSchemeIdentifier {
              .q6Group16ScaleF16, .q6Group32ScaleF16,
              .q5Group32ScaleF16, .q5Group64ScaleF16,
              .q4Group64ScaleF16, .q4Group128ScaleF16, .q4Group128ScaleF16Zero,
-             .q3Group16ScaleF16, .q3Group32ScaleF16,
+             .q3Group16ScaleF16, .q3Group32ScaleF16, .q3Group64ScaleF16,
              .q2Group16ScaleF16, .q2Group32ScaleF16,
              .rotorQ8Group32ScaleF16, .rotorQ4Group64ScaleF16:
             return true

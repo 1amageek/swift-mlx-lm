@@ -24,6 +24,9 @@ struct MetalPreparedArgumentBufferAllocator: Sendable {
         guard case .planned = argumentTable.encodingState else {
             return table
         }
+        guard try canMaterialize(argumentTable) else {
+            return table
+        }
 
         let encoder = try makeArgumentEncoder(for: argumentTable.layout)
         guard let argumentBuffer = device.makeBuffer(
@@ -49,6 +52,33 @@ struct MetalPreparedArgumentBufferAllocator: Sendable {
         return MetalBindingTable(
             bufferBindings: .argumentTable(preparedBindings),
             constantBindings: table.constantBindings)
+    }
+
+    private func canMaterialize(
+        _ argumentTable: MetalArgumentTableBindings
+    ) throws -> Bool {
+        let layoutIndices = Set(argumentTable.layout.indices)
+        for binding in argumentTable.bindings {
+            guard layoutIndices.contains(binding.index) else {
+                throw MetalCompilerError.deviceSetupFailed(
+                    "Argument table layout \(argumentTable.layout.id) does not contain binding index \(binding.index)")
+            }
+            guard binding.offset >= 0 else {
+                throw MetalCompilerError.deviceSetupFailed(
+                    "Argument table layout \(argumentTable.layout.id) has negative offset \(binding.offset) for binding index \(binding.index)")
+            }
+            guard binding.offset < binding.buffer.length else {
+                throw MetalCompilerError.deviceSetupFailed(
+                    "Argument table layout \(argumentTable.layout.id) offset \(binding.offset) exceeds buffer length \(binding.buffer.length) for binding index \(binding.index)")
+            }
+            // MTLArgumentEncoder validates buffer offsets with abort() in debug
+            // builds. Non-zero slice offsets are safely handled by the MTL4
+            // direct-address path, so leave those tables unmaterialized.
+            guard binding.offset == 0 else {
+                return false
+            }
+        }
+        return true
     }
 
     private func makeArgumentEncoder(

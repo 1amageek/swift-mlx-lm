@@ -37,6 +37,27 @@ struct UnifiedDequantBitLevelTests {
         )
     }
 
+    @Test("Q3G64 dequant matches scale*q+zero across full block")
+    func q3Group64() throws {
+        try runSingleBlockDequantTest(
+            format: AffineQ3Group64Format(),
+            weights: (0..<64).map { UInt32($0 % 8) },
+            scale: 0.03125,
+            zero: -0.125
+        )
+    }
+
+    @Test("Q3G64 dequant preserves row stride for multiple rows")
+    func q3Group64MultiRow() throws {
+        try runMultiRowSingleBlockDequantTest(
+            format: AffineQ3Group64Format(),
+            rows: [
+                (weights: (0..<64).map { UInt32($0 % 8) }, scale: 0.03125, zero: -0.125),
+                (weights: (0..<64).map { UInt32(7 - ($0 % 8)) }, scale: 0.0625, zero: 0.25),
+            ]
+        )
+    }
+
     // MARK: - Q5 (non-aligned: 8 weights per 5 bytes)
 
     @Test("Q5G32 dequant matches scale*q+zero for all q ∈ [0,31]")
@@ -247,6 +268,69 @@ struct UnifiedDequantBitLevelTests {
             tail expected=\(expected.suffix(8).map { String(format: "%.6f", $0) }.joined(separator: ", "))
             """
         )
+    }
+
+    private func runMultiRowSingleBlockDequantTest(
+        format: any QuantizationFormat,
+        rows: [(weights: [UInt32], scale: Float, zero: Float)]
+    ) throws {
+        let gpuLock = try GPUTestExclusion.acquire()
+        defer { gpuLock.release() }
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+
+        var blockBytes: [UInt8] = []
+        var expected: [Float] = []
+        for row in rows {
+            #expect(row.weights.count == format.weightsPerBlock)
+            blockBytes.append(contentsOf: packSingleBlock(
+                format: format,
+                weights: row.weights,
+                scale: row.scale,
+                zero: row.zero
+            ))
+            expected.append(contentsOf: row.weights.map { row.scale * Float($0) + row.zero })
+        }
+
+        let kernelName = MetalSourceGenerator.unifiedDequantKernelName(for: format)
+        let source = MetalSourceGenerator.generateUnifiedDequantToBFloat(
+            name: kernelName,
+            format: format
+        )
+        let pipeline = try makePipeline(device: device, source: source, functionName: kernelName)
+
+        let inputBuffer = try #require(device.makeBuffer(
+            bytes: blockBytes,
+            length: blockBytes.count,
+            options: .storageModeShared
+        ))
+        let outputByteCount = expected.count * MemoryLayout<UInt16>.stride
+        let outputBuffer = try #require(device.makeBuffer(
+            length: outputByteCount,
+            options: .storageModeShared
+        ))
+
+        let queue = try #require(device.makeCommandQueue())
+        let commandBuffer = try #require(queue.makeCommandBuffer())
+        let encoder = try #require(commandBuffer.makeComputeCommandEncoder())
+        encoder.setComputePipelineState(pipeline)
+        encoder.setBuffer(inputBuffer, offset: 0, index: 0)
+        encoder.setBuffer(outputBuffer, offset: 0, index: 1)
+        var inputDimension = UInt32(format.weightsPerBlock)
+        var outputDimension = UInt32(rows.count)
+        encoder.setBytes(&inputDimension, length: MemoryLayout<UInt32>.stride, index: 2)
+        encoder.setBytes(&outputDimension, length: MemoryLayout<UInt32>.stride, index: 3)
+        encoder.dispatchThreadgroups(
+            MTLSize(width: rows.count, height: 1, depth: 1),
+            threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1)
+        )
+        encoder.endEncoding()
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+
+        let pointer = outputBuffer.contents().bindMemory(to: UInt16.self, capacity: expected.count)
+        let decoded = (0..<expected.count).map { bf16BitsToFloat(pointer[$0]) }
+        let maxAbsDiff = zip(decoded, expected).map { abs($0 - $1) }.max() ?? 0
+        #expect(maxAbsDiff < 0.005)
     }
 
     // MARK: - Block packing helpers

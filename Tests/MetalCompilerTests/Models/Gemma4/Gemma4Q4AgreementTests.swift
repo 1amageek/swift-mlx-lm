@@ -3,6 +3,7 @@ import Metal
 import Testing
 @testable import MetalCompiler
 
+#if ENABLE_METAL_PROBES
 /// Gemma 4 E2B Q4-weight vs BF16-weight token quality.
 ///
 /// Purpose: Verify the Q4 decode path produces healthy output, not a collapsed
@@ -953,3 +954,4 @@ struct Gemma4Q4AgreementTests {
         print()
     }
 }
+#endif

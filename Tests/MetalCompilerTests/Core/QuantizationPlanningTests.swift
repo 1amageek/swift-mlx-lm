@@ -19,9 +19,10 @@ struct QuantizationPlanningTests {
         let graph = try resolvedGraph(config: config)
         let target = try firstPrefillProjection(in: graph, device: device)
         let store = try makeWeightStore(
+            for: graph,
             device: device,
-            tensorName: target.tensorName,
-            shape: [target.outputDimension, target.inputDimension],
+            overriding: target.tensorName,
+            withShape: [target.outputDimension, target.inputDimension],
             schemeIdentifier: .q4Group64ScaleF16
         )
 
@@ -55,9 +56,10 @@ struct QuantizationPlanningTests {
         let graph = try resolvedGraph(config: config)
         let target = try firstPrefillProjection(in: graph, device: device)
         let store = try makeWeightStore(
+            for: graph,
             device: device,
-            tensorName: target.tensorName,
-            shape: [target.outputDimension, target.inputDimension],
+            overriding: target.tensorName,
+            withShape: [target.outputDimension, target.inputDimension],
             schemeIdentifier: .fp16RowMajor
         )
 
@@ -92,12 +94,14 @@ struct QuantizationPlanningTests {
 
         let config = makeConfig()
         let graph = try resolvedGraph(config: config)
+        let store = try makeWeightStore(for: graph, device: device)
         let diagnostics = try MetalInferenceCompiler().dumpCompiledPrefillPlan(
             graph: graph,
             hiddenSize: config.hiddenSize,
             intermediateSize: config.intermediateSize,
             vocabSize: config.vocabSize,
             inferencePolicy: InferencePolicy(maximumSequenceLength: 16),
+            stafWeightStore: store,
             device: device
         )
 
@@ -117,9 +121,10 @@ struct QuantizationPlanningTests {
         let embeddingBinding = try firstEmbeddingBinding(in: graph, device: device, phase: .prefill)
         let resolvedEmbeddingBinding = try #require(embeddingBinding)
         let store = try makeWeightStore(
+            for: graph,
             device: device,
-            tensorName: resolvedEmbeddingBinding.tensorName,
-            shape: [config.vocabSize, config.hiddenSize],
+            overriding: resolvedEmbeddingBinding.tensorName,
+            withShape: [config.vocabSize, config.hiddenSize],
             schemeIdentifier: .q4Group64ScaleF16
         )
 
@@ -143,6 +148,44 @@ struct QuantizationPlanningTests {
         #expect(!embeddingEntry.usedFallback)
     }
 
+    @Test("q3 prefill projection records kernel family and requires sequential ingestion")
+    func q3PrefillProjectionRequiresSequentialPromptIngestion() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else {
+            Issue.record("No Metal device")
+            return
+        }
+
+        let config = makeConfig()
+        let graph = try resolvedGraph(config: config)
+        let target = try firstPrefillProjection(in: graph, device: device)
+        let store = try makeWeightStore(
+            for: graph,
+            device: device,
+            overriding: target.tensorName,
+            withShape: [target.outputDimension, target.inputDimension],
+            schemeIdentifier: .q3Group64ScaleF16
+        )
+
+        let plan = try MetalInferenceCompiler().compilePrefill(
+            graph: graph,
+            hiddenSize: config.hiddenSize,
+            intermediateSize: config.intermediateSize,
+            vocabSize: config.vocabSize,
+            inferencePolicy: InferencePolicy(maximumSequenceLength: 16),
+            stafWeightStore: store,
+            device: device
+        )
+
+        let quantizedEntry = try #require(
+            plan.quantizationPlan.entries.first(where: { $0.tensorName == target.tensorName })
+        )
+        #expect(quantizedEntry.path == .prefillProjection)
+        #expect(quantizedEntry.schemeIdentifier == .q3Group64ScaleF16)
+        #expect(quantizedEntry.kernelFamily == .mppGEMM)
+        #expect(!quantizedEntry.usedFallback)
+        #expect(plan.requiresSequentialPromptIngestion)
+    }
+
     @Test("q8 decode embedding lookup records quantized embedding kernel family")
     func q8DecodeEmbeddingLookupUsesQuantizedKernelFamily() throws {
         guard let device = MTLCreateSystemDefaultDevice() else {
@@ -155,9 +198,10 @@ struct QuantizationPlanningTests {
         let embeddingBinding = try firstEmbeddingBinding(in: graph, device: device, phase: .decode)
         let resolvedEmbeddingBinding = try #require(embeddingBinding)
         let store = try makeWeightStore(
+            for: graph,
             device: device,
-            tensorName: resolvedEmbeddingBinding.tensorName,
-            shape: [config.vocabSize, config.hiddenSize],
+            overriding: resolvedEmbeddingBinding.tensorName,
+            withShape: [config.vocabSize, config.hiddenSize],
             schemeIdentifier: .q8Group32ScaleF16
         )
 
@@ -189,15 +233,45 @@ struct QuantizationPlanningTests {
 
         let config = makeConfig()
         let graph = try resolvedGraph(config: config)
+        let store = try makeWeightStore(for: graph, device: device)
         let diagnostics = try MetalInferenceCompiler().dumpCompiledDecodePlan(
             graph: graph,
             hiddenSize: config.hiddenSize,
             intermediateSize: config.intermediateSize,
             vocabSize: config.vocabSize,
+            stafWeightStore: store,
             device: device
         )
 
         #expect(diagnostics.contains("quantization: entries="))
+    }
+
+    @Test("non-aligned quantized kernels are classified by concrete family")
+    func nonAlignedQuantizedKernelFamiliesAreClassified() {
+        #expect(MetalQuantizationKernelFamily.classify(
+            kernelName: "embedding_lookup_seq_q3_g64",
+            usesMPP: false
+        ) == .q3G64EmbeddingLookup)
+        #expect(MetalQuantizationKernelFamily.classify(
+            kernelName: "gemv_q3_g64",
+            usesMPP: false
+        ) == .q3G64GEMV)
+        #expect(MetalQuantizationKernelFamily.classify(
+            kernelName: "gemm_q3_g64_f32s",
+            usesMPP: false
+        ) == .q3G64GEMM)
+        #expect(MetalQuantizationKernelFamily.classify(
+            kernelName: "embedding_lookup_seq_q5_g32",
+            usesMPP: false
+        ) == .q5G32EmbeddingLookup)
+        #expect(MetalQuantizationKernelFamily.classify(
+            kernelName: "gemv_q5_g64",
+            usesMPP: false
+        ) == .q5G64GEMV)
+        #expect(MetalQuantizationKernelFamily.classify(
+            kernelName: "gemm_q6_g16_f32s",
+            usesMPP: false
+        ) == .q6G16GEMM)
     }
 
     private func makeConfig() -> ModelConfig {
@@ -318,30 +392,61 @@ struct QuantizationPlanningTests {
     }
 
     private func makeWeightStore(
+        for graph: ModelGraph,
         device: MTLDevice,
-        tensorName: String,
-        shape: [Int],
-        schemeIdentifier: QuantizationSchemeIdentifier
+        overriding tensorName: String? = nil,
+        withShape shape: [Int] = [1],
+        schemeIdentifier: QuantizationSchemeIdentifier = .passthrough
     ) throws -> STAFWeightStore {
-        let buffer = try #require(device.makeBuffer(length: 1, options: .storageModeShared))
+        let overridePayloadSize = max(1, shape.reduce(1, *) * MemoryLayout<UInt16>.size)
+        let buffer = try #require(device.makeBuffer(length: overridePayloadSize, options: .storageModeShared))
+        var entries: [String: STAFTensorEntry] = [:]
+        for name in tensorNames(in: graph.rootRegion) {
+            let isOverride = name == tensorName
+            let entryShape = isOverride ? shape : [1]
+            entries[name] = STAFTensorEntry(
+                name: name,
+                payloadOffset: 0,
+                payloadSize: isOverride ? overridePayloadSize : buffer.length,
+                schemeIdentifier: isOverride ? schemeIdentifier : .passthrough,
+                semanticRole: .other,
+                shape: entryShape,
+                blockSize: 64,
+                groupSize: 64,
+                bufferOffset: 0
+            )
+        }
+
         return STAFWeightStore(
             buffer: buffer,
-            entries: [
-                tensorName: STAFTensorEntry(
-                    name: tensorName,
-                    payloadOffset: 0,
-                    payloadSize: 0,
-                    schemeIdentifier: schemeIdentifier,
-                    semanticRole: .other,
-                    shape: shape,
-                    blockSize: 64,
-                    groupSize: 64,
-                    bufferOffset: 0
-                )
-            ],
+            entries: entries,
             metadata: .empty,
             specializedBufferAccesses: [:]
         )
+    }
+
+    private func tensorNames(in region: Region) -> Set<String> {
+        var names = Set(region.operations.flatMap { operation in
+            operation.parameterBindings.map(\.tensorName)
+        })
+        for operation in region.operations {
+            switch operation.kind {
+            case .primitive:
+                break
+            case .residual(_, let body):
+                names.formUnion(tensorNames(in: body))
+            case .parallel(_, let branches):
+                for branch in branches {
+                    names.formUnion(tensorNames(in: branch))
+                }
+            case .repeating(_, let body):
+                names.formUnion(tensorNames(in: body))
+            case .conditional(_, let thenRegion, let elseRegion):
+                names.formUnion(tensorNames(in: thenRegion))
+                names.formUnion(tensorNames(in: elseRegion))
+            }
+        }
+        return names
     }
 }
 

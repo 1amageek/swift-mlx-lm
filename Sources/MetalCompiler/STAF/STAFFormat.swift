@@ -185,6 +185,7 @@ public enum QuantizationSchemeIdentifier: UInt8, Sendable, CaseIterable {
     // INT3
     case q3Group16ScaleF16  = 0x50
     case q3Group32ScaleF16  = 0x51
+    case q3Group64ScaleF16  = 0x52
 
     // INT2
     case q2Group16ScaleF16  = 0x60
@@ -245,7 +246,7 @@ extension QuantizationSchemeIdentifier {
         case .rotorQ4Group64ScaleF16, .rotorQ8Group32ScaleF16:
             return true
         case .q2Group16ScaleF16, .q2Group32ScaleF16,
-             .q3Group16ScaleF16, .q3Group32ScaleF16,
+             .q3Group16ScaleF16, .q3Group32ScaleF16, .q3Group64ScaleF16,
              .q5Group32ScaleF16, .q5Group64ScaleF16,
              .q6Group16ScaleF16, .q6Group32ScaleF16,
              .passthrough:

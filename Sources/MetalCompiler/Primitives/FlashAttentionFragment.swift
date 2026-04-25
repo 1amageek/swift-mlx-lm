@@ -142,11 +142,11 @@ public struct FlashAttentionFragment: PrimitiveMetalKernelFragment {
             uint32Binding(16, UInt32(vHeadSlotBytes)),
             uint32Binding(20, UInt32(cache.numRotorGroups)),
             uint32Binding(21, UInt32(cache.qjlDimension)),
+            uint32Binding(22, windowLeft.map(UInt32.init) ?? UInt32.max),
             uint32Binding(
                 29,
                 UInt32((sharedKVSourceLayerIndex == nil ? 0 : 1) | (usesProportionalRoPE ? 0b10 : 0))
             ),
-            uint32Binding(30, windowLeft.map(UInt32.init) ?? UInt32.max),
         ]
 
         if hasInlineRoPE {

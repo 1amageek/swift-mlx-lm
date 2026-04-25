@@ -202,6 +202,7 @@ struct BarrierOptimizationTests {
 
     // MARK: - Compile Plan Barrier Statistics
 
+    #if ENABLE_METAL_PROBES
     @Test("Compiled decode plan has fewer barriers than steps")
     func compiledPlanBarrierReduction() throws {
         guard let device = MTLCreateSystemDefaultDevice() else {
@@ -221,9 +222,10 @@ struct BarrierOptimizationTests {
         )
         let graph = try ModelGraph(Transformer(config: config))
         let resolved = ParameterResolver().resolve(graph: graph, convention: .llamaFamily)
+        let store = try makeWeightStore(for: resolved, device: device)
         let compiled = try MetalInferenceCompiler().compile(
             graph: resolved, hiddenSize: 128, intermediateSize: 512,
-            vocabSize: 1000, device: device)
+            vocabSize: 1000, stafWeightStore: store, device: device)
 
         let totalSteps = compiled.steps.count
         let barrierSteps = compiled.steps.filter { $0.barrierPolicy.isBarrier }.count
@@ -255,12 +257,71 @@ struct BarrierOptimizationTests {
         )
         let graph = try ModelGraph(Transformer(config: config))
         let resolved = ParameterResolver().resolve(graph: graph, convention: .llamaFamily)
+        let store = try makeWeightStore(for: resolved, device: device)
         let compiled = try MetalInferenceCompiler().compile(
             graph: resolved, hiddenSize: 128, intermediateSize: 512,
-            vocabSize: 1000, device: device)
+            vocabSize: 1000, stafWeightStore: store, device: device)
 
         let firstStep = try #require(compiled.steps.first)
         #expect(firstStep.barrierPolicy == .none,
                 "First step should have no barrier (no prior writes to fence)")
+    }
+    #endif
+
+    private func makeWeightStore(
+        for graph: ModelGraph,
+        device: MTLDevice
+    ) throws -> STAFWeightStore {
+        guard let buffer = device.makeBuffer(length: MemoryLayout<Float16>.size, options: .storageModeShared) else {
+            throw MetalCompilerError.deviceSetupFailed("Cannot allocate dummy STAF weight buffer")
+        }
+
+        var entries: [String: STAFTensorEntry] = [:]
+        for tensorName in tensorNames(in: graph.rootRegion) {
+            entries[tensorName] = STAFTensorEntry(
+                name: tensorName,
+                payloadOffset: 0,
+                payloadSize: buffer.length,
+                schemeIdentifier: .passthrough,
+                semanticRole: .unknown,
+                shape: [1],
+                blockSize: 0,
+                groupSize: 0,
+                bufferOffset: 0
+            )
+        }
+
+        return STAFWeightStore(
+            buffer: buffer,
+            entries: entries,
+            metadata: .empty,
+            specializedBufferAccesses: [:]
+        )
+    }
+
+    private func tensorNames(in region: Region) -> Set<String> {
+        var names = Set(region.operations.flatMap { operation in
+            operation.parameterBindings.map(\.tensorName)
+        })
+
+        for operation in region.operations {
+            switch operation.kind {
+            case .primitive:
+                break
+            case .residual(_, let body):
+                names.formUnion(tensorNames(in: body))
+            case .parallel(_, let branches):
+                for branch in branches {
+                    names.formUnion(tensorNames(in: branch))
+                }
+            case .repeating(_, let body):
+                names.formUnion(tensorNames(in: body))
+            case .conditional(_, let thenRegion, let elseRegion):
+                names.formUnion(tensorNames(in: thenRegion))
+                names.formUnion(tensorNames(in: elseRegion))
+            }
+        }
+
+        return names
     }
 }

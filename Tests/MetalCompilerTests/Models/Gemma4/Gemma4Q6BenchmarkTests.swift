@@ -3,6 +3,7 @@ import Metal
 import Testing
 @testable import MetalCompiler
 
+#if ENABLE_METAL_PROBES
 /// Gemma 4 E2B Q6-weight benchmarks.
 ///
 /// Source bundle: locally converted gemma-4-E2B-it Q6 (affine, group_size=32).
@@ -254,3 +255,4 @@ struct Gemma4Q6BenchmarkTests {
         var relStddev: Double { mean == 0 ? 0 : stddev / mean }
     }
 }
+#endif

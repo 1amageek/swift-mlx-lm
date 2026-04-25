@@ -164,10 +164,13 @@ struct HiddenConversionTests {
         let config = makeTestConfig()
         let graph = try ModelGraph(Transformer(config: config))
         let resolved = ParameterResolver().resolve(graph: graph, convention: .llamaFamily)
+        let store = try makeSyntheticWeightStore(config: config, device: device)
         let compiled = try MetalInferenceCompiler().compile(
             graph: resolved, hiddenSize: config.hiddenSize,
             intermediateSize: config.intermediateSize,
-            vocabSize: config.vocabSize, device: device)
+            vocabSize: config.vocabSize,
+            stafWeightStore: store,
+            device: device)
 
         // Decode precision is F16, so hidden_copy_from_float should be present
         if compiled.decodePlan.buffers.bufferPrecision == .float16 {
@@ -352,6 +355,60 @@ struct HiddenConversionTests {
             fullAttentionInterval: nil, ssmNumHeads: nil, ssmKeyHeadDim: nil,
             ssmValueHeadDim: nil, convKernelSize: nil,
             partialRotaryFactor: nil, slidingWindow: nil
+        )
+    }
+
+    private func makeSyntheticWeightStore(config: ModelConfig, device: MTLDevice) throws -> STAFWeightStore {
+        let maxElements = max(
+            config.vocabSize * config.hiddenSize,
+            config.hiddenSize * config.intermediateSize,
+            config.hiddenSize * config.hiddenSize
+        )
+        let payloadSize = max(1, maxElements * MemoryLayout<UInt16>.stride)
+        guard let buffer = device.makeBuffer(length: payloadSize, options: .storageModeShared) else {
+            throw MetalCompilerError.deviceSetupFailed("Cannot allocate synthetic weight buffer")
+        }
+
+        var tensorNames: Set<String> = [
+            "model.embed_tokens.weight",
+            "model.norm.weight",
+            "lm_head.weight"
+        ]
+        for layerIndex in 0..<config.layerCount {
+            let prefix = "model.layers.\(layerIndex)"
+            tensorNames.formUnion([
+                "\(prefix).input_layernorm.weight",
+                "\(prefix).self_attn.q_proj.weight",
+                "\(prefix).self_attn.k_proj.weight",
+                "\(prefix).self_attn.v_proj.weight",
+                "\(prefix).self_attn.o_proj.weight",
+                "\(prefix).post_attention_layernorm.weight",
+                "\(prefix).mlp.gate_proj.weight",
+                "\(prefix).mlp.up_proj.weight",
+                "\(prefix).mlp.down_proj.weight"
+            ])
+        }
+
+        var entries: [String: STAFTensorEntry] = [:]
+        for tensorName in tensorNames {
+            entries[tensorName] = STAFTensorEntry(
+                name: tensorName,
+                payloadOffset: 0,
+                payloadSize: payloadSize,
+                schemeIdentifier: .passthrough,
+                semanticRole: .unknown,
+                shape: [maxElements],
+                blockSize: 0,
+                groupSize: 0,
+                bufferOffset: 0
+            )
+        }
+
+        return STAFWeightStore(
+            buffer: buffer,
+            entries: entries,
+            metadata: .empty,
+            specializedBufferAccesses: [:]
         )
     }
 }

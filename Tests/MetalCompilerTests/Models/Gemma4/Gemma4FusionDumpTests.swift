@@ -5,6 +5,7 @@ import Testing
 @testable import ModelDeclarations
 @testable import LMIR
 
+#if ENABLE_METAL_PROBES
 @Suite("Gemma4 Kernel Dump", .serialized)
 struct Gemma4KernelDumpTests {
 
@@ -90,3 +91,4 @@ private func makeRealGemma4Config() -> ModelConfig {
         fullAttentionRoPEScaling: RoPEScaling(kind: .custom("proportional"), factor: 1.0)
     )
 }
+#endif

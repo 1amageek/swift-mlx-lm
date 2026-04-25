@@ -50,6 +50,18 @@ struct STAFQuantizedRoundtripTests {
         )
     }
 
+    @Test("Q3G64 MLX→STAF repack preserves bit-stream and scale/zero")
+    func q3Group64() throws {
+        try runRoundtripTest(
+            scheme: .q3Group64ScaleF16,
+            bits: 3,
+            groupSize: 64,
+            weights: (0..<64).map { UInt32($0 % 8) },
+            scale: 0.03125,
+            zero: 0.25
+        )
+    }
+
     // MARK: - Q5
 
     @Test("Q5G32 MLX→STAF repack preserves bit-stream and scale/zero")

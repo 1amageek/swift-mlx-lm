@@ -751,6 +751,35 @@ public struct AffineQ3Group32Format: QuantizationFormat {
     public init() {}
 }
 
+/// 3-bit affine quantization with group size 64.
+public struct AffineQ3Group64Format: QuantizationFormat {
+    public var schemeIdentifier: QuantizationSchemeIdentifier { .q3Group64ScaleF16 }
+    public var blockStructName: String { "BlockQ3Affine64" }
+    public var gemvKernelName: String { "gemv_q3_g64" }
+    public func gemmKernelName(bufferPrecision: BufferPrecision) -> String {
+        bufferPrecision == .float32 ? "gemm_q3_g64_f32s" : "gemm_q3_g64"
+    }
+    public var weightsPerBlock: Int { 64 }
+    public var bytesPerBlock: Int { 4 + 24 }
+    public var bits: Int { 3 }
+    public var groupSize: Int { 64 }
+
+    public var isQuantized: Bool { true }
+    public var bufferElementType: String { "uchar" }
+    public var mslDeclarations: String {
+        Q3AffineMSL.blockStruct(name: blockStructName, weightsPerBlock: weightsPerBlock)
+    }
+
+    public func perWeightReadExpression(
+        blocksVar: String,
+        weightIndexVar: String
+    ) -> String? {
+        Q3AffineMSL.perWeightExpression(blocksVar: blocksVar, weightIndexVar: weightIndexVar)
+    }
+
+    public init() {}
+}
+
 // MARK: - 5-bit Affine Formats (non-aligned)
 
 /// 5-bit affine quantization with group size 32.
@@ -1263,6 +1292,7 @@ public enum QuantizationFormatRegistry {
         case .q2Group32ScaleF16: return AffineQ2Group32Format()
         case .q3Group16ScaleF16: return AffineQ3Group16Format()
         case .q3Group32ScaleF16: return AffineQ3Group32Format()
+        case .q3Group64ScaleF16: return AffineQ3Group64Format()
         case .q4Group64ScaleF16: return AffineQ4Group64Format()
         case .q4Group128ScaleF16: return AffineQ4Group128Format()
         // Q4G128Zero (0x42) uses the same 68-byte block layout as Q4G128. Alias
@@ -1290,6 +1320,7 @@ public enum QuantizationFormatRegistry {
         case (2, 32): return AffineQ2Group32Format()
         case (3, 16): return AffineQ3Group16Format()
         case (3, 32): return AffineQ3Group32Format()
+        case (3, 64): return AffineQ3Group64Format()
         case (4, 64): return AffineQ4Group64Format()
         case (4, 128): return AffineQ4Group128Format()
         case (5, 32): return AffineQ5Group32Format()

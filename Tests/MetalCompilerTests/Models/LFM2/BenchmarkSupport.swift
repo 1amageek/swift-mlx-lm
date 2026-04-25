@@ -59,9 +59,23 @@ enum BenchmarkSupport {
         }
     }
 
-    static let lfmBundlePath = "/Users/1amageek/Desktop/swift-lm/TestData/LFM2.5-1.2B-Thinking"
-    static let stafPath = "/Users/1amageek/Desktop/swift-lm/TestData/LFM2.5-1.2B-Thinking/model.staf"
-    static let outputPath = "/Users/1amageek/Desktop/swift-lm/TestData/benchmark.txt"
+    private static let repositoryRoot = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+
+    static let testDataPath = repositoryRoot.appendingPathComponent("TestData").path
+    static let lfmBundlePath = repositoryRoot
+        .appendingPathComponent("TestData/LFM2.5-1.2B-Thinking")
+        .path
+    static let stafPath = repositoryRoot
+        .appendingPathComponent("TestData/LFM2.5-1.2B-Thinking/model.staf")
+        .path
+    static let outputPath = repositoryRoot
+        .appendingPathComponent("TestData/benchmark.txt")
+        .path
     static let squareQProjBlockedSafePrefixTensorNames: Set<String> = [
         "model.layers.10.self_attn.q_proj.weight",
         "model.layers.12.self_attn.q_proj.weight",

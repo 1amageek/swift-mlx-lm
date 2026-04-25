@@ -3,6 +3,7 @@ import Metal
 import Testing
 @testable import MetalCompiler
 
+#if ENABLE_METAL_PROBES
 /// Throughput acceptance benchmarks.
 ///
 /// This suite intentionally excludes heavy profiling/diagnostic tests so the
@@ -134,3 +135,4 @@ struct BenchmarkTests {
         try report.write(toFile: BenchmarkSupport.outputPath, atomically: true, encoding: .utf8)
     }
 }
+#endif

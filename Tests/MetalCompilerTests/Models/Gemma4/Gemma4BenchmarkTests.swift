@@ -3,6 +3,7 @@ import Metal
 import Testing
 @testable import MetalCompiler
 
+#if ENABLE_METAL_PROBES
 /// Gemma 4 E2B throughput benchmarks.
 ///
 /// Mirrors the LFM2.5 benchmark suite structure so results are directly comparable.
@@ -401,3 +402,4 @@ struct Gemma4BenchmarkTests {
         #expect(m.position == promptTokens.count + 2, "Position should advance after decode")
     }
 }
+#endif

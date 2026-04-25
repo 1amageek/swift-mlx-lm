@@ -434,6 +434,19 @@ struct MetalPrefillExecutor: @unchecked Sendable {
             return buffer
         }
 
+        // Declare staging buffers resident so MTL4 blits of ≥ page-size (16KB) transfers
+        // from private source buffers land correctly on the CPU-visible destination.
+        // Without explicit residency, large blits silently produce zeros.
+        let stagingResidency = try MetalResidencyLease.required(
+            device: submission.device,
+            label: "swift-lm.debug.scratchStaging",
+            buffers: stagingBuffers
+        )
+        let combinedResidency = MetalResidencyLease.combined(
+            label: "swift-lm.debug.scratchCombined",
+            leases: [ephemeralResidency, stagingResidency]
+        )
+
         let hiddenOverrideReplayStart = prefillHiddenOverrideReplayStartStepIndex(in: prefillPlan.steps)
         let allTokensOverridden = hiddenOverridesByTokenIndex.count >= sequenceLength
         let sourceOffset = lastTokenScratchOffset(
@@ -481,7 +494,7 @@ struct MetalPrefillExecutor: @unchecked Sendable {
                     destinationOffset: 0,
                     size: stagingLength
                 )
-            ], ephemeralResidency: ephemeralResidency)
+            ], ephemeralResidency: combinedResidency)
             lowerBound = stepIndex + 1
         }
 
@@ -854,8 +867,16 @@ struct MetalPrefillExecutor: @unchecked Sendable {
         tokens: [Int32],
         ephemeralResidency: MetalResidencyLease = .empty
     ) -> Int32 {
-        guard !tokens.isEmpty else { return -1 }
-        guard tokens.count <= prefillPlan.maximumSequenceLength else { return -1 }
+        guard !tokens.isEmpty else {
+            InternalLog.error("[MetalInference] Prefill received an empty token sequence")
+            return -1
+        }
+        guard tokens.count <= prefillPlan.maximumSequenceLength else {
+            InternalLog.error(
+                "[MetalInference] Prefill token count \(tokens.count) exceeds maximum sequence length \(prefillPlan.maximumSequenceLength)"
+            )
+            return -1
+        }
 
         let sequenceLength = tokens.count
         populatePrefillInputs(
@@ -913,7 +934,13 @@ struct MetalPrefillExecutor: @unchecked Sendable {
         }
 
         position += sequenceLength
-        return decodePlan.buffers.tokenOut.contents().bindMemory(to: Int32.self, capacity: 1).pointee
+        let tokenOut = decodePlan.buffers.tokenOut.contents().bindMemory(to: Int32.self, capacity: 1).pointee
+        if tokenOut < 0 {
+            InternalLog.error(
+                "[MetalInference] Prefill produced invalid token \(tokenOut) for sequence length \(sequenceLength) at base position \(position - sequenceLength)"
+            )
+        }
+        return tokenOut
     }
 
     func prefill(

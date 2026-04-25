@@ -75,6 +75,11 @@ struct MetalBufferAllocator {
             convStateBuffer = nil
         }
 
+        // Private storage buffers cannot be zeroed from CPU — use GPU blit fill.
+        // Without this, SSM recurrence accumulates uninitialized memory and produces
+        // non-deterministic per-head output.
+        try zeroPrivateBuffers([convStateBuffer].compactMap { $0 }, device: context.device)
+
         let perLayerInputBuffer: MTLBuffer?
         if perLayerInput.layerCount > 0, perLayerInput.dimension > 0 {
             perLayerInputBuffer = context.device.makeBuffer(
@@ -98,6 +103,8 @@ struct MetalBufferAllocator {
         } else {
             recurrentStateBuffer = nil
         }
+
+        try zeroPrivateBuffers([recurrentStateBuffer].compactMap { $0 }, device: context.device)
 
         let weightBuffers = context.stafWeightStore?.residencyCandidateBuffers ?? []
         return DecodeBufferAllocation(
@@ -398,6 +405,31 @@ struct MetalBufferAllocator {
             return scheme
         }
     }
+
+    /// Zero-fill the given private-storage buffers via a synchronous blit.
+    ///
+    /// Private buffers are GPU-only and cannot be memset from CPU. Stateful recurrence
+    /// buffers (SSM recurrent state, conv state) must start at zero; uninitialized
+    /// GPU memory accumulates garbage into the state and produces non-deterministic
+    /// per-head output.
+    private func zeroPrivateBuffers(_ buffers: [MTLBuffer], device: MTLDevice) throws {
+        guard !buffers.isEmpty else { return }
+        guard let queue = device.makeCommandQueue(),
+              let commandBuffer = queue.makeCommandBuffer(),
+              let blit = commandBuffer.makeBlitCommandEncoder() else {
+            throw MetalBufferAllocatorError.commandEncoderCreationFailed
+        }
+        for buffer in buffers {
+            blit.fill(buffer: buffer, range: 0..<buffer.length, value: 0)
+        }
+        blit.endEncoding()
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+    }
+}
+
+enum MetalBufferAllocatorError: Error {
+    case commandEncoderCreationFailed
 }
 
 private struct PerLayerInputRequirements {

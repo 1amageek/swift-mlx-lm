@@ -267,6 +267,24 @@ public struct MetalPrefillPlan: @unchecked Sendable {
             }
             .map { $0.kernelFamily.description }
     }
+
+    package var requiresSequentialPromptIngestion: Bool {
+        if buffers.recurrentState != nil {
+            return true
+        }
+
+        return quantizationPlan.entries.contains { entry in
+            guard entry.path == .prefillProjection || entry.path == .embeddingLookup else {
+                return false
+            }
+            switch entry.schemeIdentifier.baseScheme {
+            case .q3Group16ScaleF16, .q3Group32ScaleF16, .q3Group64ScaleF16:
+                return true
+            default:
+                return false
+            }
+        }
+    }
 }
 
 /// Prefill buffer set ([maxSeqLen × dim] layout).

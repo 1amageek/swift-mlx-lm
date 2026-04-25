@@ -15,7 +15,7 @@ import OrderedCollections
 @Suite("Live Model Diagnostic")
 struct LiveModelDiagnosticTests {
 
-    static let stafPath = "/Users/1amageek/Desktop/swift-lm/TestData/LFM2.5-1.2B-Thinking/model.staf"
+    static let stafPath = BenchmarkSupport.stafPath
 
     @Test("Single command buffer prefill with real STAF (matches app behavior)",
           .disabled("Pre-migration diagnostic: uses Metal 3 encoder on private untracked buffers"))
@@ -285,9 +285,12 @@ struct LiveModelDiagnosticTests {
         }
     }
 
-    static let modelDir = "/Users/1amageek/Desktop/swift-lm/TestData/LFM2.5-1.2B-Thinking"
+    static let modelDir = BenchmarkSupport.lfmBundlePath
 
-    @Test("Run prefill via MetalInferenceModel with REAL tokens from tokenizer")
+    @Test(
+        "Run prefill via MetalInferenceModel with REAL tokens from tokenizer",
+        .disabled("Diagnostic: broad GPU suites can leave the command queue in a failed state")
+    )
     func prefillViaInferenceModel() async throws {
         guard let resources = try RealModelTestSupport.loadOrSkip(skipMessage: "STAF not found") else {
             return

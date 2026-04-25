@@ -6,6 +6,7 @@ import LMIR
 import ModelDeclarations
 @testable import MetalCompiler
 
+#if ENABLE_METAL_PROBES
 /// GPU-heavy diagnostic benchmarks kept separate from throughput acceptance.
 @Suite("Benchmark Diagnostics", .serialized)
 struct BenchmarkDiagnosticsTests {
@@ -723,3 +724,4 @@ struct BenchmarkDiagnosticsTests {
         return ProfileVariantResult(sequence: sequence, profiles: profiles)
     }
 }
+#endif

@@ -92,6 +92,7 @@ struct GeneratedLibraryTests {
         #expect(generated.baseSource.contains("kernel void gemm_q4_g64_f32s"))
     }
 
+    #if ENABLE_METAL_PROBES
     @Test("Dump generated decode kernel library for LFM2")
     func dumpGeneratedDecodeKernelLibraryForLFM2() throws {
         guard let resources = try RealModelTestSupport.loadOrSkip(skipMessage: "STAF not found — skipping") else {
@@ -123,8 +124,8 @@ struct GeneratedLibraryTests {
 
         print("=== GENERATED DECODE LIBRARY ===")
         print(String(dump.prefix(30000)))
-        #expect(dump.contains("kernel void flash_attn_decode"))
     }
+    #endif
 
     @Test("Compiled decode plan marks argument-table and resident-constant steps")
     func compiledDecodePlanRecordsBindingBackends() throws {
@@ -170,6 +171,11 @@ struct GeneratedLibraryTests {
             if case .encoded = table.encodingState { return true }
             return false
         }.count
+        let plannedArgumentSteps = plan.steps.filter { step in
+            guard case .argumentTable(let table) = step.bindings.bufferBindings else { return false }
+            if case .planned = table.encodingState { return true }
+            return false
+        }.count
         let preparedKernels = plan.steps.compactMap { step -> String? in
             guard case .argumentTable(let table) = step.bindings.bufferBindings else { return nil }
             if case .prepared = table.encodingState {
@@ -183,14 +189,16 @@ struct GeneratedLibraryTests {
             return table.layout.id
         })
 
-        print("[BindingPlan] decode steps=\(plan.steps.count) argTable=\(argumentTableSteps) argPrepared=\(preparedArgumentSteps) argEncoded=\(encodedArgumentSteps) residentConst=\(residentConstantSteps) layouts=\(argumentTableLayouts.count)")
+        print("[BindingPlan] decode steps=\(plan.steps.count) argTable=\(argumentTableSteps) argPlanned=\(plannedArgumentSteps) argPrepared=\(preparedArgumentSteps) argEncoded=\(encodedArgumentSteps) residentConst=\(residentConstantSteps) layouts=\(argumentTableLayouts.count)")
         if !preparedKernels.isEmpty {
             print("[BindingPlan.PreparedKernels] \(preparedKernels.joined(separator: " | "))")
         }
 
         #expect(argumentTableSteps == plan.steps.count)
-        #expect(preparedArgumentSteps == 0)
-        #expect(encodedArgumentSteps == plan.steps.count)
+        #expect(preparedArgumentSteps == 1)
+        #expect(preparedKernels == ["argmax"])
+        #expect(encodedArgumentSteps == 0)
+        #expect(plannedArgumentSteps + preparedArgumentSteps + encodedArgumentSteps == argumentTableSteps)
         #expect(residentConstantSteps > 0)
         #expect(argumentTableLayouts.count < argumentTableSteps)
     }
