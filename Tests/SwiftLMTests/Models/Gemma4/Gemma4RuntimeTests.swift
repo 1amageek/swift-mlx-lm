@@ -137,6 +137,102 @@ struct Gemma4RuntimeTests {
         #expect(try #require(result.completion).tokenCount > 0)
     }
 
+    @Test("Real Gemma4 thinking-enabled prompt renders thinking trigger header", .timeLimit(.minutes(2)))
+    func realGemma4ThinkingPromptRendersTrigger() async throws {
+        guard let container = try await Gemma4TestSupport.realGemma4Container() else {
+            print("[Skip] No local Gemma4 bundle found")
+            return
+        }
+
+        let preparedThinking = try await container.prepare(
+            ModelInput(
+                chat: [
+                    .user([.text("Hello")])
+                ],
+                promptOptions: PromptPreparationOptions(isThinkingEnabled: true)
+            )
+        )
+        let preparedPlain = try await container.prepare(
+            ModelInput(
+                chat: [
+                    .user([.text("Hello")])
+                ],
+                promptOptions: PromptPreparationOptions(isThinkingEnabled: false)
+            )
+        )
+
+        print("[Gemma4 thinking=true rendered text]")
+        print(preparedThinking.renderedText)
+        print("[Gemma4 thinking=true token ids]")
+        print(preparedThinking.tokenIDs)
+        print("[Gemma4 thinking=false rendered text]")
+        print(preparedPlain.renderedText)
+        print("[Gemma4 thinking=false token ids]")
+        print(preparedPlain.tokenIDs)
+
+        let containsThinkHeaderThinking = preparedThinking.renderedText.contains("<|think|>")
+        let containsThinkHeaderPlain = preparedPlain.renderedText.contains("<|think|>")
+        print("[Gemma4 thinking=true contains <|think|>] \(containsThinkHeaderThinking)")
+        print("[Gemma4 thinking=false contains <|think|>] \(containsThinkHeaderPlain)")
+
+        #expect(preparedThinking.renderedText != preparedPlain.renderedText)
+        #expect(containsThinkHeaderThinking, "thinking-enabled prompt must contain <|think|> system header")
+        #expect(!containsThinkHeaderPlain)
+    }
+
+    @Test("Real Gemma4 hidden reasoning suppresses thought channel from visible answer", .timeLimit(.minutes(10)))
+    func realGemma4PublicGenerateThinkingHiddenE2E() async throws {
+        guard let container = try await Gemma4TestSupport.realGemma4Container() else {
+            print("[Skip] No local Gemma4 bundle found")
+            return
+        }
+
+        let stream = try await container.generate(
+            ModelInput(
+                chat: [
+                    .user([.text("Hello")])
+                ],
+                promptOptions: PromptPreparationOptions(isThinkingEnabled: true)
+            ),
+            parameters: GenerationParameters(
+                maxTokens: 32,
+                streamChunkTokenCount: 1,
+                temperature: 0,
+                reasoning: .hidden
+            )
+        )
+
+        var answer = ""
+        var reasoningChunks = 0
+        var eventKinds: [String] = []
+        for await generation in stream {
+            switch generation {
+            case .text(let chunk):
+                answer += chunk
+                eventKinds.append("text")
+            case .reasoning:
+                reasoningChunks += 1
+                eventKinds.append("reasoning")
+            case .completed:
+                break
+            }
+        }
+
+        print("[Gemma4 hidden event kinds]")
+        print(eventKinds.joined(separator: ","))
+        print("[Gemma4 hidden answer prefix]")
+        print(String(answer.prefix(400)))
+        print("[Gemma4 hidden reasoning chunk count] \(reasoningChunks)")
+
+        #expect(reasoningChunks == 0, "hidden mode must not emit reasoning chunks")
+        #expect(!answer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        #expect(!answer.contains("<|channel>thought"))
+        #expect(!answer.contains("<channel|>"))
+        #expect(!answer.contains("<|think|>"))
+        #expect(!answer.contains("<turn|>"))
+        #expect(!answer.contains("Thinking Process"))
+    }
+
     @Test("Real Gemma4 public generate E2E emits final answer without leaking thought channel", .timeLimit(.minutes(10)))
     func realGemma4PublicGenerateThinkingSeparateE2E() async throws {
         guard let container = try await Gemma4TestSupport.realGemma4Container() else {
@@ -182,7 +278,12 @@ struct Gemma4RuntimeTests {
         print("[Gemma4 E2E separate reasoning prefix]")
         print(String(reasoning.prefix(400)))
 
+        #expect(eventKinds.contains("reasoning"))
         #expect(eventKinds.contains("text"))
+        #expect(
+            !reasoning.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+            "Thinking model must emit reasoning content; an empty reasoning channel means thinking did not run."
+        )
         #expect(!answer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
         #expect(!answer.contains("<|channel>thought"))
         #expect(!answer.contains("<channel|>"))

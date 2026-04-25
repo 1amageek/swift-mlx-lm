@@ -202,14 +202,6 @@ public final class LanguageModelContext: @unchecked Sendable {
             )
         }
 
-        if gemma4Runtime != nil {
-            return try await applyGemma4ChatTemplate(
-                messages: renderedMessages,
-                tools: tools,
-                originalMessages: messages
-            )
-        }
-
         if let template = chatTemplate {
             var context: [String: Value] = [
                 "messages": .array(try renderedMessages.map(makeJinjaMessageValue)),
@@ -251,22 +243,21 @@ public final class LanguageModelContext: @unchecked Sendable {
             )
         }
 
-        // Fallback: simple role-prefixed format
+        // Fallback: simple role-prefixed format for tokenizers without a chat template.
+        // Multimodal input requires a chat template — there is no neutral way to render
+        // image/video markers without model-specific tokens.
+        if containsImages || containsVideos {
+            throw LanguageModelContextError.unsupportedInputForModel(
+                "This model bundle has no chat template; multimodal input cannot be rendered."
+            )
+        }
         let rendered = messages.map { message in
-            let content = message.content.map { item in
+            let content = message.content.compactMap { item -> String? in
                 switch item {
                 case .text(let text):
                     return text
-                case .image:
-                    if gemma4Runtime != nil {
-                        return "<|image|>"
-                    }
-                    return "<|vision_start|><|image_pad|><|vision_end|>"
-                case .video:
-                    if gemma4Runtime != nil {
-                        return "<|video|>"
-                    }
-                    return "<|vision_start|><|video_pad|><|vision_end|>"
+                case .image, .video:
+                    return nil
                 }
             }
             .joined()
@@ -300,43 +291,6 @@ public final class LanguageModelContext: @unchecked Sendable {
             tokenIDs: preparedTokenIDs,
             multimodal: prepared.multimodal
         )
-    }
-
-    private func applyGemma4ChatTemplate(
-        messages: [InputMessage],
-        tools: [ToolDefinition]?,
-        originalMessages: [InputMessage]
-    ) async throws -> RenderedPrompt {
-        if let tools, !tools.isEmpty {
-            throw LanguageModelContextError.unsupportedInputForModel(
-                "Gemma4 tool-use prompt rendering is not implemented."
-            )
-        }
-
-        var rendered = modelTokenizer.bosToken ?? "<bos>"
-        for message in messages {
-            let role = message.role == .assistant ? "model" : message.role.rawValue
-            rendered += "<|turn>\(role)\n"
-            rendered += try renderGemma4MessageContent(message)
-            rendered += "<turn|>\n"
-        }
-        rendered += "<|turn>model\n"
-        return try await prepareRenderedPrompt(rendered, messages: originalMessages)
-    }
-
-    private func renderGemma4MessageContent(_ message: InputMessage) throws -> String {
-        var rendered = ""
-        for item in message.content {
-            switch item {
-            case .text(let text):
-                rendered += text.trimmingCharacters(in: .whitespacesAndNewlines)
-            case .image:
-                rendered += "<|image|>"
-            case .video:
-                rendered += "<|video|>"
-            }
-        }
-        return rendered
     }
 
     private func renderedMessagesWithThinkingControl(

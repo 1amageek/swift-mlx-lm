@@ -482,10 +482,14 @@ private actor Gemma4SyntheticContainerCache {
         compiledModel = compiledModel.withPrefillPlan(prefillPlan)
         let inferenceModel = try MetalInferenceModel(plan: compiledModel, device: device)
         let hiddenSize = config.hiddenSize
+        let chatTemplateSource = Gemma4DefaultChatTemplate.synthesizedSource()
+        let chatTemplate = try Gemma4DefaultChatTemplate.template()
         let container = LanguageModelContext(
             inferenceModel: inferenceModel,
             tokenizer: Gemma4TestTokenizer(),
             configuration: Gemma4TestSupport.modelConfiguration(hiddenSize: hiddenSize),
+            chatTemplate: chatTemplate,
+            chatTemplateSource: chatTemplateSource,
             vocabularySize: config.vocabSize,
             gemma4Runtime: try Gemma4TestSupport.syntheticRuntime(hiddenSize: hiddenSize)
         )
