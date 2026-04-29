@@ -426,6 +426,113 @@ public static func generateBatchedGEMV4ArgumentTableVariant(
     """
 }
 
+/// Generate a sequence-wide batched GEMV kernel for projections sharing the same input.
+///
+/// This mirrors the decode `batched_gemv{N}` reduction order for every sequence
+/// position while preserving a single sequence dispatch. Hybrid prefill uses it
+/// for state-sensitive dense projections so SSM/conv state and KV cache are
+/// seeded from decode-equivalent projection values.
+public static func generateBatchedSequenceGEMV(
+    name: String,
+    count: Int,
+    bufferPrecision: BufferPrecision,
+    weightFormat: WeightFormat,
+    tileElements: Int = 256
+) -> String {
+    precondition((2...4).contains(count), "batched sequence GEMV supports 2...4 projections")
+    let bt = bufferPrecision.metalType
+    let wt = weightFormat.bufferType
+    let readWeight = { (expr: String) in weightFormat.readExpression(expr) }
+    let storeValue: (String) -> String = { expr in
+        bufferPrecision.isPrefillSequencePrecision
+            ? MetalSourceGenerator.sequenceStorageValue(expr, weightFormat: weightFormat)
+            : expr
+    }
+
+    let weightBindings = (0..<count).map { i in
+        "device const \(wt)* weight\(i)        [[buffer(\(1 + i))]],"
+    }.joined(separator: "\n        ")
+    let outputBindings = (0..<count).map { i in
+        "device \(bt)* output\(i)              [[buffer(\(1 + count + i))]],"
+    }.joined(separator: "\n        ")
+    let outputDimBindings = (0..<count).map { i in
+        "constant uint& outputDim\(i)          [[buffer(\(2 + 2 * count + i))]],"
+    }.joined(separator: "\n        ")
+
+    let totalRows = (0..<count).map { "outputDim\($0)" }.joined(separator: " + ")
+    let branchBlocks = (0..<count).map { i -> String in
+        let condition: String
+        if i == 0 {
+            condition = "if (globalRow < outputDim0)"
+        } else if i == count - 1 {
+            condition = "else"
+        } else {
+            let cumulative = (0...i).map { "outputDim\($0)" }.joined(separator: " + ")
+            condition = "else if (globalRow < \(cumulative))"
+        }
+        let prior = i == 0 ? "0u" : (0..<i).map { "outputDim\($0)" }.joined(separator: " + ")
+        return """
+                \(condition) {
+                    weight = weight\(i); output = output\(i); outputDimension = outputDim\(i);
+                    localRow = globalRow - (\(prior));
+                }
+        """
+    }.joined(separator: "\n        ")
+
+    return """
+    kernel void \(name)(
+        device const \(bt)* input              [[buffer(0)]],
+        \(weightBindings)
+        \(outputBindings)
+        constant uint& inputDimension          [[buffer(\(1 + 2 * count))]],
+        \(outputDimBindings)
+        constant uint& sequenceLength          [[buffer(\(2 + 3 * count))]],
+        constant uint& inputRowStride          [[buffer(\(3 + 3 * count))]],
+        constant uint& outputRowStride         [[buffer(\(4 + 3 * count))]],
+        uint2 gid                              [[threadgroup_position_in_grid]],
+        uint tid                               [[thread_index_in_threadgroup]],
+        uint tiisg                             [[thread_index_in_simdgroup]],
+        uint sgitg                             [[simdgroup_index_in_threadgroup]],
+        uint2 threadsPerThreadgroup            [[threads_per_threadgroup]]
+    ) {
+        const uint tileElements = \(tileElements);
+        const uint rowsPerThreadgroup = max(1u, threadsPerThreadgroup.x / SIMD_WIDTH);
+        const uint globalRow = gid.x * rowsPerThreadgroup + sgitg;
+        const uint seqPos = gid.y;
+        const uint totalRows = \(totalRows);
+        if (globalRow >= totalRows || seqPos >= sequenceLength) return;
+
+        device const \(wt)* weight;
+        device \(bt)* output;
+        uint outputDimension;
+        uint localRow;
+        \(branchBlocks)
+
+        threadgroup \(bt) inputTile[tileElements];
+        float sum = 0.0f;
+        device const \(bt)* inputRow = input + seqPos * inputRowStride;
+        device const \(wt)* weightRow = weight + localRow * inputDimension;
+        for (uint base = 0; base < inputDimension; base += tileElements) {
+            for (uint j = tid; j < tileElements; j += threadsPerThreadgroup.x) {
+                const uint inputIndex = base + j;
+                inputTile[j] = inputIndex < inputDimension ? inputRow[inputIndex] : \(bt)(0.0f);
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+
+            const uint tileCount = min(tileElements, inputDimension - base);
+            for (uint j = tiisg; j < tileCount; j += SIMD_WIDTH) {
+                sum += \(readWeight("weightRow[base + j]")) * float(inputTile[j]);
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+        }
+        sum = simd_sum(sum);
+        if (tiisg == 0) {
+            output[seqPos * outputRowStride + localRow] = \(bt)(\(storeValue("sum")));
+        }
+    }
+    """
+}
+
 // MARK: - Batched Per-Head Fragment
 
 /// Generate batched per-head kernel for 2 independent in-place operations.
@@ -579,6 +686,11 @@ public static func generateBatchedQKNormSequence(
     let bt = bufferPrecision.metalType
     let wt = weightFormat.bufferType
     let readWeight = { (expr: String) in weightFormat.readExpression(expr) }
+    let storeValue: (String) -> String = { expr in
+        bufferPrecision.isPrefillSequencePrecision
+            ? MetalSourceGenerator.sequenceStorageValue(expr, weightFormat: weightFormat)
+            : expr
+    }
 
     return """
     kernel void \(name)(
@@ -595,7 +707,8 @@ public static func generateBatchedQKNormSequence(
         constant uint& qTotalDimension   [[buffer(10)]],
         constant uint& kTotalDimension   [[buffer(11)]],
         uint2 gid                        [[threadgroup_position_in_grid]],
-        uint tid                         [[thread_index_in_threadgroup]]
+        uint tid                         [[thread_index_in_threadgroup]],
+        uint2 threadgroupSize            [[threads_per_threadgroup]]
     ) {
         uint head = gid.x;
         uint seqPos = gid.y;
@@ -617,22 +730,30 @@ public static func generateBatchedQKNormSequence(
         uint offset = seqPos * totalDim + localHead * headDimension;
 
         float sumSq = 0.0f;
-        for (uint i = tid; i < headDimension; i += SIMD_WIDTH) {
+        uint threads = threadgroupSize.x;
+        for (uint i = tid; i < headDimension; i += threads) {
             float v = float(data[offset + i]);
             sumSq += v * v;
         }
         sumSq = simd_sum(sumSq);
 
-        threadgroup float sharedRMS[1];
+        threadgroup float shared[32];
+        if (tid % SIMD_WIDTH == 0) shared[tid / SIMD_WIDTH] = sumSq;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
         if (tid == 0) {
-            sharedRMS[0] = rsqrt(sumSq / float(headDimension) + epsilon);
+            float total = 0.0f;
+            uint sgCount = (threads + SIMD_WIDTH - 1) / SIMD_WIDTH;
+            for (uint i = 0; i < sgCount; i++) total += shared[i];
+            shared[0] = rsqrt(total / float(headDimension) + epsilon);
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
 
-        float rms = sharedRMS[0];
-        for (uint i = tid; i < headDimension; i += SIMD_WIDTH) {
+        float rms = shared[0];
+        for (uint i = tid; i < headDimension; i += threads) {
             float affine = \(readWeight("weight[i]")) + weightBias;
-            data[offset + i] = \(bt)(float(data[offset + i]) * rms * affine);
+            float normalized = float(data[offset + i]) * rms * affine;
+            data[offset + i] = \(bt)(\(storeValue("normalized")));
         }
     }
     """
@@ -655,6 +776,11 @@ public static func generateBatchedQKNormRoPESequence(
     let bt = bufferPrecision.metalType
     let wt = weightFormat.bufferType
     let readWeight = { (expr: String) in weightFormat.readExpression(expr) }
+    let normStoreValue: (String) -> String = { expr in
+        bufferPrecision.isPrefillSequencePrecision
+            ? MetalSourceGenerator.sequenceStorageValue(expr, weightFormat: weightFormat)
+            : expr
+    }
 
     return """
     inline uint2 \(name)_mrope_mapping(
@@ -704,8 +830,11 @@ public static func generateBatchedQKNormRoPESequence(
         constant uint& qTotalDimension         [[buffer(17)]],
         constant uint& kTotalDimension         [[buffer(18)]],
         constant uint& proportionalRoPE        [[buffer(19)]],
+        constant uint& qRowStride              [[buffer(20)]],
+        constant uint& kRowStride              [[buffer(21)]],
         uint2 gid                              [[threadgroup_position_in_grid]],
-        uint tid                               [[thread_index_in_threadgroup]]
+        uint tid                               [[thread_index_in_threadgroup]],
+        uint2 threadgroupSize                  [[threads_per_threadgroup]]
     ) {
         uint head = gid.x;
         uint seqPos = gid.y;
@@ -714,36 +843,44 @@ public static func generateBatchedQKNormRoPESequence(
         device \(bt)* data;
         device const \(wt)* weight;
         uint localHead;
-        uint totalDim;
+        uint rowStride;
 
         if (head < qHeadCount) {
-            data = qData; weight = qWeight; localHead = head; totalDim = qTotalDimension;
+            data = qData; weight = qWeight; localHead = head; rowStride = qRowStride;
         } else {
             localHead = head - qHeadCount;
             if (localHead >= kHeadCount) return;
-            data = kData; weight = kWeight; totalDim = kTotalDimension;
+            data = kData; weight = kWeight; rowStride = kRowStride;
         }
 
-        uint offset = seqPos * totalDim + localHead * headDimension;
+        uint offset = seqPos * rowStride + localHead * headDimension;
 
         // Phase 1: per-head RMS norm (in-place).
         float sumSq = 0.0f;
-        for (uint i = tid; i < headDimension; i += SIMD_WIDTH) {
+        uint threads = threadgroupSize.x;
+        for (uint i = tid; i < headDimension; i += threads) {
             float v = float(data[offset + i]);
             sumSq += v * v;
         }
         sumSq = simd_sum(sumSq);
 
-        threadgroup float sharedRMS[1];
+        threadgroup float shared[32];
+        if (tid % SIMD_WIDTH == 0) shared[tid / SIMD_WIDTH] = sumSq;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
         if (tid == 0) {
-            sharedRMS[0] = rsqrt(sumSq / float(headDimension) + epsilon);
+            float total = 0.0f;
+            uint sgCount = (threads + SIMD_WIDTH - 1) / SIMD_WIDTH;
+            for (uint i = 0; i < sgCount; i++) total += shared[i];
+            shared[0] = rsqrt(total / float(headDimension) + epsilon);
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
 
-        float rms = sharedRMS[0];
-        for (uint i = tid; i < headDimension; i += SIMD_WIDTH) {
+        float rms = shared[0];
+        for (uint i = tid; i < headDimension; i += threads) {
             float affine = \(readWeight("weight[i]")) + weightBias;
-            data[offset + i] = \(bt)(float(data[offset + i]) * rms * affine);
+            float normalized = float(data[offset + i]) * rms * affine;
+            data[offset + i] = \(bt)(\(normStoreValue("normalized")));
         }
 
         // Ensure norm writes are visible before RoPE reads. Same-thread order is
@@ -755,7 +892,7 @@ public static func generateBatchedQKNormRoPESequence(
         const bool useProportional = proportionalRoPE != 0;
         const uint pairCount = useProportional ? (headDimension / 2) : (ropeDimension / 2);
         const uint rotatedPairs = ropeDimension / 2;
-        for (uint i = tid; i < pairCount; i += SIMD_WIDTH) {
+        for (uint i = tid; i < pairCount; i += threads) {
             const uint2 ropeMapping = \(name)_mrope_mapping(
                 i,
                 temporalSections,
@@ -769,14 +906,16 @@ public static func generateBatchedQKNormRoPESequence(
             float sinTheta = 0.0f;
             if (!useProportional || i < rotatedPairs) {
                 const float thetaDenominator = useProportional ? float(headDimension) : float(ropeDimension);
-                const float theta = float(position) / pow(ropeBase, float(2 * ropeMapping.y) / thetaDenominator);
+                const float theta = float(position) * pow(ropeBase, -2.0f * float(ropeMapping.y) / thetaDenominator);
                 cosTheta = cos(theta);
                 sinTheta = sin(theta);
             }
             float x0 = float(data[offset + i]);
             float x1 = float(data[offset + i + pairCount]);
-            data[offset + i] = \(bt)(x0 * cosTheta - x1 * sinTheta);
-            data[offset + i + pairCount] = \(bt)(x1 * cosTheta + x0 * sinTheta);
+            float rotated0 = x0 * cosTheta - x1 * sinTheta;
+            float rotated1 = x0 * sinTheta + x1 * cosTheta;
+            data[offset + i] = \(bt)(rotated0);
+            data[offset + i + pairCount] = \(bt)(rotated1);
         }
     }
     """

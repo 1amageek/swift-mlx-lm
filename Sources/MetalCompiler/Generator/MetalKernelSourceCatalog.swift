@@ -88,9 +88,23 @@ struct MetalKernelSourceCatalog {
                        ) {
                         sources.append(source)
                     }
-                } else if let batchedMPPName = batchedMPPGEMMKernelName(for: weightFormat, count: batchedCount) {
-                    if generatedNames.insert(batchedMPPName).inserted {
-                        batchedMPPGEMMRequests.append((name: batchedMPPName, count: batchedCount, weightFormat: weightFormat))
+                } else {
+                    if let batchedSequenceName = batchedSequenceGEMVKernelName(
+                    for: weightFormat, count: batchedCount
+                    ) {
+                        if generatedNames.insert(batchedSequenceName).inserted {
+                            sources.append(MetalSourceGenerator.generateBatchedSequenceGEMV(
+                                name: batchedSequenceName,
+                                count: batchedCount,
+                                bufferPrecision: bufferPrecision,
+                                weightFormat: weightFormat
+                            ))
+                        }
+                    }
+                    if let batchedMPPName = batchedMPPGEMMKernelName(for: weightFormat, count: batchedCount) {
+                        if generatedNames.insert(batchedMPPName).inserted {
+                            batchedMPPGEMMRequests.append((name: batchedMPPName, count: batchedCount, weightFormat: weightFormat))
+                        }
                     }
                 }
             }
@@ -467,17 +481,17 @@ struct MetalKernelSourceCatalog {
                                 bufferPrecision: bufferPrecision))
                         }
                     } else {
-                        for helperName in ["kv_cache_fill_seq_f32", "flash_attn_batch_f32"] {
+                        if generatedNames.insert("kv_cache_fill_seq_f32").inserted {
+                            sources.append(MetalSourceGenerator.generateKVCacheFillSeq(
+                                name: "kv_cache_fill_seq_f32",
+                                bufferPrecision: bufferPrecision))
+                        }
+                        for helperName in ["flash_attn_batch_f32", "flash_attn_batch_bf16_f32"] {
                             if generatedNames.insert(helperName).inserted {
-                                if helperName.contains("kv_cache_fill") {
-                                    sources.append(MetalSourceGenerator.generateKVCacheFillSeq(
-                                        name: helperName,
-                                        bufferPrecision: bufferPrecision))
-                                } else {
-                                    sources.append(MetalSourceGenerator.generateBatchFlashAttention(
-                                        name: helperName,
-                                        bufferPrecision: bufferPrecision))
-                                }
+                                sources.append(MetalSourceGenerator.generateBatchFlashAttention(
+                                    name: helperName,
+                                    bufferPrecision: bufferPrecision,
+                                    sequenceStorageFormat: helperName.contains("bf16") ? .bfloat16 : .float16))
                             }
                         }
                     }
@@ -525,6 +539,35 @@ struct MetalKernelSourceCatalog {
                 name: hiddenAddName,
                 bufferPrecision: bufferPrecision
             ))
+        }
+
+        if bufferPrecision.isPrefillSequencePrecision {
+            if generatedNames.insert("round_f16_seq_f32").inserted {
+                sources.append(MetalSourceGenerator.generateRoundFloatToFloat16(
+                    name: "round_f16_seq_f32"
+                ))
+            }
+            if generatedNames.insert("round_bf16_seq_f32").inserted {
+                sources.append(MetalSourceGenerator.generateRoundFloatToBFloat16(
+                    name: "round_bf16_seq_f32"
+                ))
+            }
+            if generatedNames.insert("gemv_seq_f32s").inserted {
+                sources.append(MetalSourceGenerator.generateSequenceGEMV(
+                    name: "gemv_seq_f32s",
+                    bufferPrecision: bufferPrecision,
+                    weightFormat: .float16,
+                    tileElements: 256
+                ))
+            }
+            if generatedNames.insert("gemv_seq_bf16_f32s").inserted {
+                sources.append(MetalSourceGenerator.generateSequenceGEMV(
+                    name: "gemv_seq_bf16_f32s",
+                    bufferPrecision: bufferPrecision,
+                    weightFormat: .bfloat16,
+                    tileElements: 256
+                ))
+            }
         }
 
         // Emit tile-size variants (_mtile16 / _mtile32 / _mtile64) per GEMM
@@ -714,6 +757,17 @@ struct MetalKernelSourceCatalog {
     }
 
     // MARK: - Batched MPP GEMM (Prefill BF16 / FP16 / FP32)
+
+    func batchedSequenceGEMVKernelName(
+        for weightFormat: MetalSourceGenerator.WeightFormat,
+        count: Int
+    ) -> String? {
+        guard count >= 2 && count <= 4 else { return nil }
+        if weightFormat.isBFloat16 { return "batched_gemv\(count)_seq_bf16_f32s" }
+        if weightFormat.isFloat16 { return "batched_gemv\(count)_seq_f32s" }
+        if weightFormat.isFloat32 { return "batched_gemv\(count)_seq_fp32_f32s" }
+        return nil
+    }
 
     /// Kernel name for the batched MPP GEMM kernel that handles multiple dense-weight
     /// projections sharing one input. Returns nil for weight formats where a dense

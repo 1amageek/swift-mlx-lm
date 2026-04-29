@@ -28,9 +28,13 @@ public struct ScalarMultiplyFragment: PrimitiveMetalKernelFragment {
     public func kernelBody(bufferPrecision: BufferPrecision, weightFormat: WeightFormat) -> String? {
         let readWeight = weightFormat.readExpression("weight[0]")
         let bt = bufferPrecision.metalType
+        let value = "float(data[idx]) * scale"
+        let stored = bufferPrecision.isPrefillSequencePrecision
+            ? MetalSourceGenerator.sequenceStorageValue(value, weightFormat: weightFormat)
+            : value
         return """
         float scale = \(readWeight);
-        output[idx] = \(bt)(float(data[idx]) * scale);
+        output[idx] = \(bt)(\(stored));
         """
     }
 

@@ -11,6 +11,16 @@ private static func convStateWrite(_ expression: String, weightFormat: WeightFor
     weightFormat.isBFloat16 ? "float_to_bf16(\(expression))" : "half(\(expression))"
 }
 
+private static func decodeActivationStorageValue(_ expression: String, weightFormat: WeightFormat) -> String {
+    if weightFormat.isBFloat16 {
+        return "float(bfloat(\(expression)))"
+    }
+    if weightFormat.isFloat32 {
+        return expression
+    }
+    return "float(half(\(expression)))"
+}
+
 // MARK: - Conv1d
 
 /// Generate conv_state_update kernel (decode: single token with persistent state).
@@ -119,6 +129,11 @@ public static func generateConv1dCausalSeq(
     let bt = bufferPrecision.metalType
     let wt = weightFormat.bufferType
     let readWeight = { (expr: String) in weightFormat.readExpression(expr) }
+    let quantizedStateValue = if weightFormat.isBFloat16 {
+        { (expr: String) in "bf16_to_float(float_to_bf16(\(expr)))" }
+    } else {
+        { (expr: String) in "float(half(\(expr)))" }
+    }
 
     return """
     kernel void \(name)(
@@ -141,7 +156,11 @@ public static func generateConv1dCausalSeq(
             if (srcPos >= 0) {
                 float B = float(input[uint(srcPos) * inProjDim + ch]);
                 float x = float(input[uint(srcPos) * inProjDim + 2 * convDim + ch]);
-                convOut += B * x * \(readWeight("weight[ch * kernelSize + k]"));
+                float Bx = B * x;
+                if (uint(srcPos) != pos) {
+                    Bx = \(quantizedStateValue("Bx"));
+                }
+                convOut += Bx * \(readWeight("weight[ch * kernelSize + k]"));
             }
         }
 
@@ -264,6 +283,16 @@ public static func generateSSMRecurrence(
     let readWeight = { (expr: String) in weightFormat.readExpression(expr) }
     let readConvState = { (expr: String) in convStateRead(expr, weightFormat: weightFormat) }
     let writeConvState = { (expr: String) in convStateWrite(expr, weightFormat: weightFormat) }
+    let activationStorageValue: (String) -> String = { expr in
+        switch bufferPrecision {
+        case .bfloat16:
+            return "float(bfloat(\(expr)))"
+        case .float16:
+            return "float(half(\(expr)))"
+        case .float32, .float32Decode:
+            return expr
+        }
+    }
 
     // Per-threadgroup (per key-group) local channel cache: Q (dk) + K (dk) + V (headsPerGroup*dv).
     // Sized at compile time using the fragment's known dimensions.
@@ -322,6 +351,7 @@ public static func generateSSMRecurrence(
         const uint localDim = 2u * dk + headsPerGroup * dv;
 
         threadgroup float convSiluCache[\(localDim)];
+        threadgroup float dotCache[\(headsPerGroup * valueHeadDimension)];
         threadgroup float normPartials[\(maxThreadgroupSize)];
 
         // Phase 1: fused conv-shift + SiLU for this threadgroup's owned channels.
@@ -417,7 +447,9 @@ public static func generateSSMRecurrence(
                         state[j * dv + d] = state[j * dv + d] * decay + convSiluCache[kBase + j] * kInvDelta;
                     }
 
-                    output[headIndex * dv + d] = \(bt)(dot);
+                    float storedDot = \(activationStorageValue("dot"));
+                    dotCache[localHead * dv + d] = storedDot;
+                    output[headIndex * dv + d] = \(bt)(storedDot);
                     localNormSq += dot * dot;
                 }
 
@@ -444,7 +476,7 @@ public static func generateSSMRecurrence(
                 }
                 float rmsScale = rsqrt(totalNormSq / float(dv) + 1e-6f);
                 for (uint d = dStart; d < dEnd; ++d) {
-                    float normed = float(output[headIndex * dv + d]) * rmsScale * normWeight[d];
+                    float normed = dotCache[localHead * dv + d] * rmsScale * normWeight[d];
                     float z = float(projectedZ[headIndex * dv + d]);
                     output[headIndex * dv + d] = \(bt)(normed * z * stable_sigmoid(z));
                 }
@@ -471,7 +503,9 @@ public static func generateSSMRecurrenceSequence(
     let readWeight = { (expr: String) in weightFormat.readExpression(expr) }
     let readConvState = { (expr: String) in convStateRead(expr, weightFormat: weightFormat) }
     let writeConvState = { (expr: String) in convStateWrite(expr, weightFormat: weightFormat) }
-
+    let activationStorageValue: (String) -> String = { expr in
+        decodeActivationStorageValue(expr, weightFormat: weightFormat)
+    }
     // Per-threadgroup (per key-group) local channel cache: Q (dk) + K (dk) + V (headsPerGroup*dv).
     // Sized at compile time using fragment's known dimensions.
     let safeGroupCount = max(groupCount, 1)
@@ -497,6 +531,7 @@ public static func generateSSMRecurrenceSequence(
         constant uint& valueDimension [[buffer(14)]],
         constant uint& convKernelSize [[buffer(15)]],
         constant uint& sequenceLength [[buffer(16)]],
+        constant uint& activationRowStride [[buffer(17)]],
         uint tid [[thread_index_in_threadgroup]],
         uint tgSize [[threads_per_threadgroup]],
         uint tgid [[threadgroup_position_in_grid]]
@@ -529,14 +564,15 @@ public static func generateSSMRecurrenceSequence(
         const uint localDim = 2u * dk + headsPerGroup * dv;
 
         threadgroup float convSiluCache[\(localDim)];
+        threadgroup float dotCache[\(headsPerGroup * valueHeadDimension)];
         threadgroup float normPartials[\(maxThreadgroupSize)];
 
         for (uint pos = 0; pos < sequenceLength; ++pos) {
-            device const \(bt)* projectedQKVPos = projectedQKV + pos * convDim;
-            device const \(bt)* projectedZPos = projectedZ + pos * outputDim;
-            device const \(bt)* projectedBetaPos = projectedBeta + pos * numHeads;
-            device const \(bt)* projectedAlphaPos = projectedAlpha + pos * numHeads;
-            device \(bt)* outputPos = output + pos * outputDim;
+            device const \(bt)* projectedQKVPos = projectedQKV + pos * activationRowStride;
+            device const \(bt)* projectedZPos = projectedZ + pos * activationRowStride;
+            device const \(bt)* projectedBetaPos = projectedBeta + pos * activationRowStride;
+            device const \(bt)* projectedAlphaPos = projectedAlpha + pos * activationRowStride;
+            device \(bt)* outputPos = output + pos * activationRowStride;
 
             // Phase 1: fused conv-shift + SiLU for this threadgroup's owned channels.
             // Each threadgroup touches only its own Q/K/V channels in convState and convWeight.
@@ -557,7 +593,7 @@ public static func generateSSMRecurrenceSequence(
                     convState[k * convDim + globalCh] = \(writeConvState("val"));
                     sum += val * \(readWeight("convWeight[globalCh * convKernelSize + k]"));
                 }
-                float newVal = float(projectedQKVPos[globalCh]);
+                float newVal = \(activationStorageValue("float(projectedQKVPos[globalCh])"));
                 convState[(convKernelSize - 1) * convDim + globalCh] = \(writeConvState("newVal"));
                 sum += newVal * \(readWeight("convWeight[globalCh * convKernelSize + convKernelSize - 1]"));
                 convSiluCache[localCh] = sum * stable_sigmoid(sum);
@@ -577,8 +613,10 @@ public static func generateSSMRecurrenceSequence(
                     const uint dStart = localTid * dChunk;
                     const uint dEnd = (localTid + 1 == threadsPerHead) ? dv : dStart + dChunk;
 
-                    float decay = exp(-exp(aLog[headIndex]) * stable_softplus(float(projectedAlphaPos[headIndex]) + \(readWeight("dtBias[headIndex]"))));
-                    float beta = stable_sigmoid(float(projectedBetaPos[headIndex]));
+                    float alpha = \(activationStorageValue("float(projectedAlphaPos[headIndex])"));
+                    float betaInput = \(activationStorageValue("float(projectedBetaPos[headIndex])"));
+                    float decay = exp(-exp(aLog[headIndex]) * stable_softplus(alpha + \(readWeight("dtBias[headIndex]"))));
+                    float beta = stable_sigmoid(betaInput);
                     device float* state = recurrentState + headIndex * dk * dv;
 
                     // Local cache indices for this threadgroup:
@@ -631,7 +669,9 @@ public static func generateSSMRecurrenceSequence(
                             state[j * dv + d] = state[j * dv + d] * decay + convSiluCache[kBase + j] * kInvDelta;
                         }
 
-                        outputPos[headIndex * dv + d] = \(bt)(dot);
+                        float storedDot = \(activationStorageValue("dot"));
+                        dotCache[localHead * dv + d] = storedDot;
+                        outputPos[headIndex * dv + d] = \(bt)(storedDot);
                         localNormSq += dot * dot;
                     }
 
@@ -658,16 +698,17 @@ public static func generateSSMRecurrenceSequence(
                     }
                     float rmsScale = rsqrt(totalNormSq / float(dv) + 1e-6f);
                     for (uint d = dStart; d < dEnd; ++d) {
-                        float normed = float(outputPos[headIndex * dv + d]) * rmsScale * normWeight[d];
-                        float z = float(projectedZPos[headIndex * dv + d]);
-                        outputPos[headIndex * dv + d] = \(bt)(normed * z * stable_sigmoid(z));
+                        float normed = dotCache[localHead * dv + d] * rmsScale * normWeight[d];
+                        float z = \(activationStorageValue("float(projectedZPos[headIndex * dv + d])"));
+                        float gated = normed * z * stable_sigmoid(z);
+                        outputPos[headIndex * dv + d] = \(bt)(\(activationStorageValue("gated")));
                     }
                 }
             }
             // Skip barrier after final position — no subsequent iteration reads this state,
             // and the command encoder's implicit barrier handles cross-dispatch visibility.
             if (pos + 1 < sequenceLength) {
-                threadgroup_barrier(mem_flags::mem_device);
+                threadgroup_barrier(mem_flags::mem_threadgroup | mem_flags::mem_device);
             }
         }
     }

@@ -31,6 +31,14 @@ Required expectations:
 - Gemma4 FP16 real bundle first non-empty chunk starts with `Tokyo` (`RotorQuantRealBundleBaselineTests`)
 - Qwen3.5 real bundle first non-empty chunk starts with `Tokyo`
 - RotorQuant Gemma4 full K+V paths (RotorQ8, RotorQ4) preserve the same short factual answer shape (`RotorQuantRealBundleFullTests`)
+- Hybrid stateful sequence prefill is model-family gated by real-bundle trace
+  equivalence. BF16 LFM short-convolution sequence prefill is enabled only while
+  its focused short-trace test matches decode-equivalent ingestion. Qwen
+  DeltaNet/SSM prefill is not considered enabled until BF16 sequence prefill
+  produces the same first token and short decode trace as decode-equivalent
+  sequential ingestion. Until then,
+  `sequencePrefillFallbackReason == .stateSpaceSequenceKernelNotDecodeEquivalent`
+  is the expected behavior for plans containing `ssm_recurrence_seq_*`.
 
 ## Performance Gates
 

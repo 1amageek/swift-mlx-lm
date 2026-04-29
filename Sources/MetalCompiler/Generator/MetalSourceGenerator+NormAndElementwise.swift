@@ -417,6 +417,38 @@ extension MetalSourceGenerator {
         """
     }
 
+    /// Generate MSL source for Float32 sequence activation rounding to Float16 storage semantics.
+    public static func generateRoundFloatToFloat16(
+        name: String
+    ) -> String {
+        """
+        kernel void \(name)(
+            device float* buffer              [[buffer(0)]],
+            constant uint& elementCount       [[buffer(1)]],
+            uint gid                          [[thread_position_in_grid]]
+        ) {
+            if (gid >= elementCount) return;
+            buffer[gid] = float(half(buffer[gid]));
+        }
+        """
+    }
+
+    /// Generate MSL source for Float32 sequence activation rounding to BFloat16 storage semantics.
+    public static func generateRoundFloatToBFloat16(
+        name: String
+    ) -> String {
+        """
+        kernel void \(name)(
+            device float* buffer              [[buffer(0)]],
+            constant uint& elementCount       [[buffer(1)]],
+            uint gid                          [[thread_position_in_grid]]
+        ) {
+            if (gid >= elementCount) return;
+            buffer[gid] = bf16_to_float(float_to_bf16(buffer[gid]));
+        }
+        """
+    }
+
     /// Generate MSL source for residual add.
     public static func generateResidualAdd(
         name: String,

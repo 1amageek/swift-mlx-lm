@@ -140,6 +140,13 @@ public struct FusionPort: Sendable {
         /// STAF weight tensor. Compiler resolves format from parameterBindings.
         /// `field` matches the weight role in parameterBindings for STAF resolution.
         case weight(field: String)
+
+        var isBuffer: Bool {
+            if case .buffer = self {
+                return true
+            }
+            return false
+        }
     }
 
     // MARK: Access Pattern

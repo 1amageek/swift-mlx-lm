@@ -7,6 +7,27 @@
 
 ---
 
+## Archive status update (2026-04-29)
+
+This report is historical. The SSM sequence-kernel work described below is
+still useful implementation context, but the reported 0.321s VLM prefill
+number must not be read as the current correctness-approved prompt-ingestion
+baseline.
+
+The current runtime explicitly falls back to decode-equivalent sequential
+prompt ingestion when a prefill plan contains Qwen-style SSM sequence kernels
+(`ssm_recurrence_seq_*`). That fallback exists because Qwen's SSM sequence path
+has not yet matched the token trace produced by token-by-token decode ingestion.
+In other words, the broad "state buffer exists" gate has been narrowed:
+BF16 `conv1d_causal_seq` is covered by an LFM short-trace equivalence test, but
+Qwen SSM sequence prefill is still disabled until kernel equivalence is fixed
+and covered by reference tests.
+
+For current Qwen3.5 text-path throughput, prefer
+`docs/benchmarks/qwen3_5-0.8b-mlx-vs-swiftlm.md`. The next valid speed milestone
+is not another benchmark number; it is first-token and short-trace equivalence
+between Qwen SSM sequence prefill and decode-equivalent ingestion.
+
 ## Background
 
 Qwen3.5-0.8B VLM の E2E prefill が 79 tokens で 28.9s (0.37s/token) だった。LFM2.5 の同等トークン数が ~0.25s であることから、約 117x 遅い。

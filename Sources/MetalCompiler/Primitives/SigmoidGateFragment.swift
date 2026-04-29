@@ -32,9 +32,13 @@ public struct SigmoidGateFragment: PrimitiveMetalKernelFragment {
 
     public func kernelBody(bufferPrecision: BufferPrecision, weightFormat: WeightFormat) -> String? {
         let bt = bufferPrecision.metalType
+        let value = "float(input[idx]) * (1.0f / (1.0f + exp(-g)))"
+        let stored = bufferPrecision.isPrefillSequencePrecision
+            ? MetalSourceGenerator.sequenceStorageValue(value, weightFormat: weightFormat)
+            : value
         return """
         float g = float(gate[idx]);
-        output[idx] = \(bt)(float(input[idx]) * (1.0f / (1.0f + exp(-g))));
+        output[idx] = \(bt)(\(stored));
         """
     }
 

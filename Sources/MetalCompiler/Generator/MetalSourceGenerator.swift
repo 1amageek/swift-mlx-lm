@@ -69,4 +69,14 @@ public struct MetalSourceGenerator: Sendable {
     }
 
     """
+
+    public static func sequenceStorageValue(_ expression: String, weightFormat: WeightFormat) -> String {
+        if weightFormat.isBFloat16 {
+            return "float(bfloat(\(expression)))"
+        }
+        if weightFormat.isFloat32 {
+            return expression
+        }
+        return "float(half(\(expression)))"
+    }
 }

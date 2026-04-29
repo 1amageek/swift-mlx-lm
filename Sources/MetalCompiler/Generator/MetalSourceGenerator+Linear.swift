@@ -217,6 +217,11 @@ extension MetalSourceGenerator {
         let bt = bufferPrecision.metalType
         let wt = weightFormat.bufferType
         let readWeight = { (expr: String) in weightFormat.readExpression(expr) }
+        let storeValue: (String) -> String = { expr in
+            bufferPrecision.isPrefillSequencePrecision
+                ? MetalSourceGenerator.sequenceStorageValue(expr, weightFormat: weightFormat)
+                : expr
+        }
 
         return """
         kernel void \(name)(
@@ -244,7 +249,7 @@ extension MetalSourceGenerator {
             }
             sum = simd_sum(sum);
             if (tiisg == 0) {
-                output[seqPos * outputDimension + row] = \(bt)(sum);
+                output[seqPos * outputDimension + row] = \(bt)(\(storeValue("sum")));
             }
         }
         """
@@ -302,6 +307,74 @@ extension MetalSourceGenerator {
             sum = simd_sum(sum);
             if (tiisg == 0) {
                 output[row] = \(bt)(sum);
+            }
+        }
+        """
+    }
+
+    /// Generate a sequence GEMV kernel for decode-equivalent prefill projections.
+    ///
+    /// This preserves the decode GEMV reduction order for every token while still
+    /// encoding one sequence-wide dispatch. Hybrid prefill uses this for
+    /// state/cache-sensitive projections where GEMM/MPP accumulation differences
+    /// can otherwise perturb subsequent decode state.
+    public static func generateSequenceGEMV(
+        name: String,
+        bufferPrecision: BufferPrecision,
+        weightFormat: WeightFormat,
+        tileElements: Int = 256
+    ) -> String {
+        let bt = bufferPrecision.metalType
+        let wt = weightFormat.bufferType
+        let readWeight = { (expr: String) in weightFormat.readExpression(expr) }
+        let storeValue: (String) -> String = { expr in
+            bufferPrecision.isPrefillSequencePrecision
+                ? MetalSourceGenerator.sequenceStorageValue(expr, weightFormat: weightFormat)
+                : expr
+        }
+
+        return """
+        kernel void \(name)(
+            device const \(bt)* input              [[buffer(0)]],
+            device const \(wt)* weight             [[buffer(1)]],
+            device \(bt)* output                   [[buffer(2)]],
+            constant uint& inputDimension          [[buffer(3)]],
+            constant uint& outputDimension         [[buffer(4)]],
+            constant uint& sequenceLength          [[buffer(5)]],
+            constant uint& inputRowStride          [[buffer(6)]],
+            constant uint& outputRowStride         [[buffer(7)]],
+            uint2 gid                              [[threadgroup_position_in_grid]],
+            uint tid                               [[thread_index_in_threadgroup]],
+            uint tiisg                             [[thread_index_in_simdgroup]],
+            uint sgitg                             [[simdgroup_index_in_threadgroup]],
+            uint2 threadsPerThreadgroup            [[threads_per_threadgroup]]
+        ) {
+            const uint tileElements = \(tileElements);
+            const uint rowsPerThreadgroup = max(1u, threadsPerThreadgroup.x / SIMD_WIDTH);
+            const uint row = gid.x * rowsPerThreadgroup + sgitg;
+            const uint seqPos = gid.y;
+            if (row >= outputDimension || seqPos >= sequenceLength) return;
+
+            threadgroup \(bt) inputTile[tileElements];
+            float sum = 0.0f;
+            device const \(bt)* inputRow = input + seqPos * inputRowStride;
+            device const \(wt)* weightRow = weight + row * inputDimension;
+            for (uint base = 0; base < inputDimension; base += tileElements) {
+                for (uint j = tid; j < tileElements; j += threadsPerThreadgroup.x) {
+                    const uint inputIndex = base + j;
+                    inputTile[j] = inputIndex < inputDimension ? inputRow[inputIndex] : \(bt)(0.0f);
+                }
+                threadgroup_barrier(mem_flags::mem_threadgroup);
+
+                const uint tileCount = min(tileElements, inputDimension - base);
+                for (uint j = tiisg; j < tileCount; j += SIMD_WIDTH) {
+                    sum += \(readWeight("weightRow[base + j]")) * float(inputTile[j]);
+                }
+                threadgroup_barrier(mem_flags::mem_threadgroup);
+            }
+            sum = simd_sum(sum);
+            if (tiisg == 0) {
+                output[seqPos * outputRowStride + row] = \(bt)(\(storeValue("sum")));
             }
         }
         """

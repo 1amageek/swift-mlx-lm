@@ -4,6 +4,72 @@ import Testing
 
 @Suite("Metal Prefill Executor")
 struct MetalPrefillExecutorTests {
+    @Test("State buffers alone do not force sequential prompt ingestion")
+    func stateBuffersAloneDoNotForceSequentialPromptIngestion() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else {
+            Issue.record("No Metal device")
+            return
+        }
+
+        let hiddenSize = 4
+        let maximumSequenceLength = 4
+        let hiddenByteCount = maximumSequenceLength * hiddenSize * MemoryLayout<Float>.stride
+
+        let hidden = try requiredSharedBuffer(device, length: hiddenByteCount)
+        let buffers = PrefillBufferSet(
+            bufferPrecision: .float32,
+            hidden: hidden,
+            residual: try requiredSharedBuffer(device, length: hiddenByteCount),
+            scratch: try requiredSharedBuffer(device, length: hiddenByteCount),
+            weights: [],
+            kvCache: nil,
+            convState: try requiredSharedBuffer(device, length: 64),
+            recurrentState: try requiredSharedBuffer(device, length: 64),
+            convStateDimension: hiddenSize,
+            convStateKernelSize: 4,
+            recurrentStateBytesPerLayer: 64,
+            perLayerInputs: nil,
+            perLayerInputDimension: 0,
+            perLayerInputLayerCount: 0,
+            logits: try requiredSharedBuffer(device, length: hiddenByteCount),
+            tokenIDs: try requiredSharedBuffer(
+                device,
+                length: maximumSequenceLength * MemoryLayout<Int32>.stride
+            ),
+            positions: try requiredSharedBuffer(
+                device,
+                length: maximumSequenceLength * MemoryLayout<UInt32>.stride
+            ),
+            ropePositionAxes: try requiredSharedBuffer(
+                device,
+                length: maximumSequenceLength * 3 * MemoryLayout<UInt32>.stride
+            ),
+            tokenOut: try requiredSharedBuffer(device, length: MemoryLayout<Int32>.stride),
+            dequantScratch: nil,
+            runtimeConstantBuffer: try requiredSharedBuffer(
+                device,
+                length: PrefillBufferSet.runtimeConstantBufferSize(
+                    maximumSequenceLength: maximumSequenceLength
+                )
+            )
+        )
+        let plan = MetalPrefillPlan(
+            steps: [],
+            buffers: buffers,
+            slotDimension: hiddenSize,
+            maximumSequenceLength: maximumSequenceLength,
+            stepCount: 0,
+            usesMPP: false,
+            finalHiddenBuffer: hidden,
+            finalHiddenBaseOffset: 0,
+            finalHiddenRowStride: hiddenSize * MemoryLayout<Float>.stride,
+            supplementalResidencyBuffers: []
+        )
+
+        #expect(!plan.requiresSequentialPromptIngestion)
+        #expect(plan.sequencePrefillFallbackReason == nil)
+    }
+
     @Test("Shared final hidden rows preserve per-token outputs")
     func sharedFinalHiddenRowsPreservePerTokenOutputs() throws {
         guard let device = MTLCreateSystemDefaultDevice() else {

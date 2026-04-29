@@ -612,8 +612,9 @@ public struct MetalInferenceModel: @unchecked Sendable {
         let schemes = Set(
             prefillPlan.quantizationKernelFamilies(path: nil)
         ).sorted().joined(separator: ", ")
+        let reason = prefillPlan.sequencePrefillFallbackReason?.description ?? "unknown"
         InternalLog.info(
-            "[MetalInference] Sequence prefill is disabled for this plan; using decode-equivalent sequential prompt ingestion. Kernels: \(schemes)"
+            "[MetalInference] Sequence prefill is disabled for this plan; using decode-equivalent sequential prompt ingestion. Reason: \(reason). Kernels: \(schemes)"
         )
     }
 
@@ -1745,7 +1746,6 @@ public struct MetalInferenceModel: @unchecked Sendable {
         probes: [DebugDecodeBindingProbe],
         visibilityOptions: MTL4VisibilityOptions = []
     ) throws -> [String: [Float]] {
-        guard !promptTokens.isEmpty else { return [:] }
         guard !probes.isEmpty else { return [:] }
         guard let maximumStepIndex = probes.map(\.stepIndex).max() else {
             return [:]
@@ -1768,7 +1768,9 @@ public struct MetalInferenceModel: @unchecked Sendable {
         }
 
         resetState()
-        _ = prefill(tokens: promptTokens)
+        if !promptTokens.isEmpty {
+            _ = prefill(tokens: promptTokens)
+        }
 
         let buffers = decodePlan.buffers
         buffers.position.contents().bindMemory(to: UInt32.self, capacity: 1).pointee = UInt32(position)

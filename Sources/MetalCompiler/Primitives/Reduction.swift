@@ -73,13 +73,18 @@ public struct Reduction: PrimitiveMetalKernelFragment {
 
     public func kernelBody(bufferPrecision: BufferPrecision, weightFormat: WeightFormat) -> String? {
         let bt = bufferPrecision.metalType
+        let storeValue: (String) -> String = { expression in
+            bufferPrecision.isPrefillSequencePrecision
+                ? MetalSourceGenerator.sequenceStorageValue(expression, weightFormat: weightFormat)
+                : expression
+        }
 
         let outputExpression: String
         if withScale {
             let readWeight = weightFormat.readExpression("weight[i]")
-            outputExpression = "\(bt)(float(data[i]) * _rms_scale * (\(readWeight) + weightBias))"
+            outputExpression = "\(bt)(\(storeValue("float(data[i]) * _rms_scale * (\(readWeight) + weightBias)")))"
         } else {
-            outputExpression = "\(bt)(float(data[i]) * _rms_scale)"
+            outputExpression = "\(bt)(\(storeValue("float(data[i]) * _rms_scale")))"
         }
 
         return """

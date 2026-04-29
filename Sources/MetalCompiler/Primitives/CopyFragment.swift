@@ -39,9 +39,12 @@ public struct CopyFragment: PrimitiveMetalKernelFragment {
 
     public func kernelBody(bufferPrecision: BufferPrecision, weightFormat: WeightFormat) -> String? {
         let bt = bufferPrecision.metalType
+        let stored = bufferPrecision.isPrefillSequencePrecision
+            ? MetalSourceGenerator.sequenceStorageValue("float(data[idx])", weightFormat: weightFormat)
+            : "float(data[idx])"
         return """
-        residual[idx] = \(bt)(data[idx]);
-        output[idx] = \(bt)(data[idx]);
+        residual[idx] = \(bt)(\(stored));
+        output[idx] = \(bt)(\(stored));
         """
     }
 

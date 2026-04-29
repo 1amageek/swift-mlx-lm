@@ -268,12 +268,19 @@ public struct MetalPrefillPlan: @unchecked Sendable {
             .map { $0.kernelFamily.description }
     }
 
-    package var requiresSequentialPromptIngestion: Bool {
-        if buffers.convState != nil || buffers.recurrentState != nil {
-            return true
-        }
+    package enum SequencePrefillFallbackReason: Sendable, Equatable, CustomStringConvertible {
+        case unsupportedQ3Quantization
 
-        return quantizationPlan.entries.contains { entry in
+        package var description: String {
+            switch self {
+            case .unsupportedQ3Quantization:
+                return "Q3 prefill projection or embedding lookup is not supported by sequence prefill"
+            }
+        }
+    }
+
+    package var sequencePrefillFallbackReason: SequencePrefillFallbackReason? {
+        if quantizationPlan.entries.contains(where: { entry in
             guard entry.path == .prefillProjection || entry.path == .embeddingLookup else {
                 return false
             }
@@ -283,7 +290,15 @@ public struct MetalPrefillPlan: @unchecked Sendable {
             default:
                 return false
             }
+        }) {
+            return .unsupportedQ3Quantization
         }
+
+        return nil
+    }
+
+    package var requiresSequentialPromptIngestion: Bool {
+        sequencePrefillFallbackReason != nil
     }
 }
 

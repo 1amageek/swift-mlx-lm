@@ -40,16 +40,21 @@ public struct ElementwiseFragment: PrimitiveMetalKernelFragment {
 
     public func kernelBody(bufferPrecision: BufferPrecision, weightFormat: WeightFormat) -> String? {
         let bt = bufferPrecision.metalType
+        let storeValue: (String) -> String = { expression in
+            bufferPrecision.isPrefillSequencePrecision
+                ? MetalSourceGenerator.sequenceStorageValue(expression, weightFormat: weightFormat)
+                : expression
+        }
         switch kind {
         case .swiglu:
             return """
             float g = float(gate[idx]);
-            output[idx] = \(bt)(g * (1.0f / (1.0f + exp(-g))) * float(up[idx]));
+            output[idx] = \(bt)(\(storeValue("g * (1.0f / (1.0f + exp(-g))) * float(up[idx])")));
             """
         case .geluGated:
             return """
             float g = float(gate[idx]);
-            output[idx] = \(bt)(0.5f * g * (1.0f + precise::tanh(0.7978845608f * (g + 0.044715f * g * g * g))) * float(up[idx]));
+            output[idx] = \(bt)(\(storeValue("0.5f * g * (1.0f + precise::tanh(0.7978845608f * (g + 0.044715f * g * g * g))) * float(up[idx])")));
             """
         }
     }
@@ -124,7 +129,11 @@ public struct ElementwiseFragment: PrimitiveMetalKernelFragment {
                 mode: .batch,
                 sequenceLengthPolicy: .bindAndAdjustGridHeight(index: 4),
                 positionBufferIndex: nil,
-                perPositionStrides: [:]
+                perPositionStrides: [:],
+                metadata: .init(
+                    kernelName: kernelName,
+                    bufferAccessPattern: .init(reads: [0, 1], writes: [2])
+                )
             )],
             outputIsHidden: false,
             resetsProjectionIndex: true

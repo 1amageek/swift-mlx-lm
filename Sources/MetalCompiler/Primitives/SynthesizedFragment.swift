@@ -285,6 +285,23 @@ public struct SynthesizedFragment: PrimitiveMetalKernelFragment {
         let seqLenIndex = dimensionIndex + 1 + mergedContract.scalarConstants.count
         bytesBindings.append(uint32Binding(seqLenIndex, UInt32(context.maximumSequenceLength)))
 
+        var rowStrideIndex = seqLenIndex + 1
+        for (portIndex, port) in ports.enumerated() where port.role.isBuffer {
+            guard let binding = bufferBindings.first(where: { $0.0 == portIndex }) else {
+                fatalError("[SynthesizedFragment] Missing buffer binding for port '\(port.name)'")
+            }
+            let rowStride: Int
+            if binding.1 === context.buffers.scratch {
+                rowStride = context.slotDimension
+            } else if binding.1 === context.buffers.hidden || binding.1 === context.buffers.residual {
+                rowStride = context.buffers.hidden.length / max(context.maximumSequenceLength, 1) / context.scratchElementSize
+            } else {
+                rowStride = mergedContract.parallelism.dimension
+            }
+            bytesBindings.append(uint32Binding(rowStrideIndex, UInt32(rowStride)))
+            rowStrideIndex += 1
+        }
+
         // Grid/threadgroup sizing based on parallelism
         let gridSize: MTLSize
         let threadgroupSize: MTLSize
@@ -319,6 +336,12 @@ public struct SynthesizedFragment: PrimitiveMetalKernelFragment {
         let hasDataFlowOutput = ports.contains { port in
             port.direction == .output && port.bufferIntent == .dataFlow
         }
+        let readIndices = Set(ports.enumerated().compactMap { index, port in
+            port.direction == .input ? index : nil
+        })
+        let writeIndices = Set(ports.enumerated().compactMap { index, port in
+            port.direction == .output ? index : nil
+        })
 
         let sequenceLengthPolicy: PrefillSequenceLengthPolicy
         switch mergedContract.parallelism {
@@ -342,7 +365,11 @@ public struct SynthesizedFragment: PrimitiveMetalKernelFragment {
                 mode: .batch,
                 sequenceLengthPolicy: sequenceLengthPolicy,
                 positionBufferIndex: nil,
-                perPositionStrides: [:]
+                perPositionStrides: [:],
+                metadata: .init(
+                    kernelName: kernelName,
+                    bufferAccessPattern: .init(reads: readIndices, writes: writeIndices)
+                )
             )],
             outputIsHidden: hasDataFlowOutput,
             resetsProjectionIndex: hasDataFlowOutput

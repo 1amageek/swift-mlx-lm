@@ -124,6 +124,11 @@ public static func generateQKNormSeq(
     let bt = bufferPrecision.metalType
     let wt = weightFormat.bufferType
     let readWeight = { (expr: String) in weightFormat.readExpression(expr) }
+    let storeValue: (String) -> String = { expr in
+        bufferPrecision.isPrefillSequencePrecision
+            ? MetalSourceGenerator.sequenceStorageValue(expr, weightFormat: weightFormat)
+            : expr
+    }
 
     return """
     kernel void \(name)(
@@ -160,7 +165,8 @@ public static func generateQKNormSeq(
         float rms = sharedRMS[0];
         for (uint i = tid; i < headDimension; i += SIMD_WIDTH) {
             float affine = \(readWeight("weight[i]")) + weightBias;
-            data[offset + i] = \(bt)(float(data[offset + i]) * rms * affine);
+            float normalized = float(data[offset + i]) * rms * affine;
+            data[offset + i] = \(bt)(\(storeValue("normalized")));
         }
     }
     """
@@ -523,14 +529,14 @@ public static func generateRoPESeq(
             float sinTheta = 0.0f;
             if (!useProportional || i < rotatedPairs) {
                 const float thetaDenominator = useProportional ? float(headDimension) : float(ropeDimension);
-                const float theta = float(position) / pow(base, float(2 * ropeMapping.y) / thetaDenominator);
+                const float theta = float(position) * pow(base, -2.0f * float(ropeMapping.y) / thetaDenominator);
                 cosTheta = cos(theta);
                 sinTheta = sin(theta);
             }
             float x0 = float(data[offset + i]);
             float x1 = float(data[offset + i + pairCount]);
             data[offset + i] = \(bt)(x0 * cosTheta - x1 * sinTheta);
-            data[offset + i + pairCount] = \(bt)(x1 * cosTheta + x0 * sinTheta);
+            data[offset + i + pairCount] = \(bt)(x0 * sinTheta + x1 * cosTheta);
         }
     }
     """
@@ -1211,6 +1217,7 @@ public static func generateKVCacheFillSeq(
         device half* qjlResidualK              [[buffer(15)]],
         constant uint& numRotorGroups          [[buffer(16)]],
         constant uint& qjlDimension            [[buffer(17)]],
+        constant uint& inputRowStride          [[buffer(18)]],
         uint groupId                            [[threadgroup_position_in_grid]],
         uint tid                               [[thread_index_in_threadgroup]],
         uint tiisg                             [[thread_index_in_simdgroup]],
@@ -1226,7 +1233,7 @@ public static func generateKVCacheFillSeq(
         if (!kRotor && !vRotor) {
             for (uint kvHead = 0; kvHead < kvHeadCount; kvHead++) {
                 for (uint d = tid; d < headDim; d += threadgroupSize) {
-                    uint inputIdx = pos * kvHeadCount * headDim + kvHead * headDim + d;
+                    uint inputIdx = pos * inputRowStride + kvHead * headDim + d;
                     float kVal = float(newKeys[inputIdx]);
                     float vVal = float(newValues[inputIdx]);
                     uint kByteOffset, vByteOffset;
@@ -1250,7 +1257,7 @@ public static func generateKVCacheFillSeq(
         threadgroup float quantSMin[32], quantSMax[32];
 
         for (uint kvHead = 0; kvHead < kvHeadCount; kvHead++) {
-            uint baseIdx = pos * kvHeadCount * headDim + kvHead * headDim;
+            uint baseIdx = pos * inputRowStride + kvHead * headDim;
             device const half* headRotors = rotorParams + kvHead * numRotorGroups * 4;
 
             // Fused load + rotate for K and V
@@ -1334,11 +1341,14 @@ public static func generateKVCacheFillSeq(
 /// Generate batch causal flash attention kernel for prefill with Clifford rotor + QJL.
 public static func generateBatchFlashAttention(
     name: String,
-    bufferPrecision: BufferPrecision
+    bufferPrecision: BufferPrecision,
+    sequenceStorageFormat: WeightFormat = .float16
 ) -> String {
     let bt = bufferPrecision.metalType
     let castOut: (String) -> String = { expr in
-        bufferPrecision == .float32 ? "(\(expr))" : "\(bt)(\(expr))"
+        bufferPrecision.isPrefillSequencePrecision
+            ? MetalSourceGenerator.sequenceStorageValue(expr, weightFormat: sequenceStorageFormat)
+            : "\(bt)(\(expr))"
     }
 
     return """
@@ -1366,6 +1376,9 @@ public static func generateBatchFlashAttention(
         constant uint& causal                 [[buffer(20)]],
         constant uint& windowLeft             [[buffer(21)]],
         constant uint& windowRight            [[buffer(22)]],
+        device const \(bt)* newKeys           [[buffer(23)]],
+        device const \(bt)* newValues         [[buffer(24)]],
+        constant uint& activationRowStride    [[buffer(25)]],
         uint flatGroupId                      [[threadgroup_position_in_grid]],
         uint tid                              [[thread_index_in_threadgroup]],
         uint tiisg                            [[thread_index_in_simdgroup]],
@@ -1378,7 +1391,7 @@ public static func generateBatchFlashAttention(
 
         const uint headDim = headDimension;
         const uint kvHeadIndex = headIndex * kvHeadCount / headCount;
-        const uint queryOffset = posId * headCount * headDim + headIndex * headDim;
+        const uint queryOffset = posId * activationRowStride + headIndex * headDim;
         const bool kRotor = is_rotor_scheme(kQuantScheme);
         const bool vRotor = is_rotor_scheme(vQuantScheme);
 
@@ -1439,7 +1452,9 @@ public static func generateBatchFlashAttention(
             float score = 0.0f;
             for (uint d = tid; d < headDim; d += threadgroupSize) {
                 float q = kRotor ? rotQuery[d] : float(query[queryOffset + d]);
-                float k = read_kv_element(keyCache + kByteOffset, d, kQuantScheme, kHeadSlotBytes, headDim);
+                float k = (!kRotor && t == posId)
+                    ? float(newKeys[posId * activationRowStride + kvHeadIndex * headDim + d])
+                    : read_kv_element(keyCache + kByteOffset, d, kQuantScheme, kHeadSlotBytes, headDim);
                 score += q * k;
             }
 
@@ -1475,7 +1490,9 @@ public static func generateBatchFlashAttention(
 
             float weight = exp(score - maxScore);
             for (uint d = tid; d < headDim; d += threadgroupSize) {
-                float v = read_kv_element(valueCache + vByteOffset, d, vQuantScheme, vHeadSlotBytes, headDim);
+                float v = (!vRotor && t == posId)
+                    ? float(newValues[posId * activationRowStride + kvHeadIndex * headDim + d])
+                    : read_kv_element(valueCache + vByteOffset, d, vQuantScheme, vHeadSlotBytes, headDim);
                 sharedOutput[d] = sharedOutput[d] * correction + weight * v;
             }
             threadgroup_barrier(mem_flags::mem_threadgroup);

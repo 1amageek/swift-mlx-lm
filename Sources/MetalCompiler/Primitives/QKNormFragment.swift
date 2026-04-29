@@ -61,6 +61,10 @@ public struct QKNormFragment: PrimitiveMetalKernelFragment {
     public func kernelBody(bufferPrecision: BufferPrecision, weightFormat: WeightFormat) -> String? {
         let readWeight = weightFormat.readExpression("weight[i]")
         let bt = bufferPrecision.metalType
+        let value = "float(data[i]) * _rms_scale * (\(readWeight) + weightBias)"
+        let stored = bufferPrecision.isPrefillSequencePrecision
+            ? MetalSourceGenerator.sequenceStorageValue(value, weightFormat: weightFormat)
+            : value
         return """
         float sumSq = 0.0f;
         for (uint i = tid; i < dimension; i += threadgroupSize) {
@@ -83,7 +87,7 @@ public struct QKNormFragment: PrimitiveMetalKernelFragment {
 
         float _rms_scale = shared[0];
         for (uint i = tid; i < dimension; i += threadgroupSize) {
-            output[i] = \(bt)(float(data[i]) * _rms_scale * (\(readWeight) + weightBias));
+            output[i] = \(bt)(\(stored));
         }
         """
     }

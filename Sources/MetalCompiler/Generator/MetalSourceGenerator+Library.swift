@@ -116,10 +116,23 @@ extension MetalSourceGenerator {
         sources.append(generateSwiGLU(name: "swiglu_seq_f32", bufferPrecision: prefill))
         sources.append(generateCopy(name: "copy_buffer_seq_f32", bufferPrecision: prefill))
         sources.append(generateResidualAdd(name: "residual_add_seq_f32", bufferPrecision: prefill))
+        sources.append(generateRoundFloatToFloat16(name: "round_f16_seq_f32"))
+        sources.append(generateRoundFloatToBFloat16(name: "round_bf16_seq_f32"))
         sources.append(generateGEMM(name: "gemm_f32s", bufferPrecision: prefill, weightFormat: .float16))
         sources.append(generateGEMM(name: "gemm_bf16_f32s", bufferPrecision: prefill, weightFormat: .bfloat16))
         sources.append(generateGEMV(name: "gemv_f32s", bufferPrecision: prefill, weightFormat: .float16, tileElements: 256))
         sources.append(generateGEMV(name: "gemv_bf16_f32s", bufferPrecision: prefill, weightFormat: .bfloat16, tileElements: 256))
+        sources.append(generateSequenceGEMV(name: "gemv_seq_f32s", bufferPrecision: prefill, weightFormat: .float16, tileElements: 256))
+        sources.append(generateSequenceGEMV(name: "gemv_seq_bf16_f32s", bufferPrecision: prefill, weightFormat: .bfloat16, tileElements: 256))
+        sources.append(generateBatchedSequenceGEMV(name: "batched_gemv2_seq_f32s", count: 2, bufferPrecision: prefill, weightFormat: .float16))
+        sources.append(generateBatchedSequenceGEMV(name: "batched_gemv2_seq_bf16_f32s", count: 2, bufferPrecision: prefill, weightFormat: .bfloat16))
+        sources.append(generateBatchedSequenceGEMV(name: "batched_gemv2_seq_fp32_f32s", count: 2, bufferPrecision: prefill, weightFormat: .float32))
+        sources.append(generateBatchedSequenceGEMV(name: "batched_gemv3_seq_f32s", count: 3, bufferPrecision: prefill, weightFormat: .float16))
+        sources.append(generateBatchedSequenceGEMV(name: "batched_gemv3_seq_bf16_f32s", count: 3, bufferPrecision: prefill, weightFormat: .bfloat16))
+        sources.append(generateBatchedSequenceGEMV(name: "batched_gemv3_seq_fp32_f32s", count: 3, bufferPrecision: prefill, weightFormat: .float32))
+        sources.append(generateBatchedSequenceGEMV(name: "batched_gemv4_seq_f32s", count: 4, bufferPrecision: prefill, weightFormat: .float16))
+        sources.append(generateBatchedSequenceGEMV(name: "batched_gemv4_seq_bf16_f32s", count: 4, bufferPrecision: prefill, weightFormat: .bfloat16))
+        sources.append(generateBatchedSequenceGEMV(name: "batched_gemv4_seq_fp32_f32s", count: 4, bufferPrecision: prefill, weightFormat: .float32))
         sources.append(generateEmbeddingLookup(name: "embedding_lookup_seq_f32", bufferPrecision: prefill, weightFormat: .float16))
         sources.append(generateEmbeddingLookup(name: "embedding_lookup_seq_bf16_f32", bufferPrecision: prefill, weightFormat: .bfloat16))
         sources.append(generateEmbeddingLookup(name: "embedding_lookup_seq_fp32_f32", bufferPrecision: prefill, weightFormat: .float32))
@@ -158,7 +171,16 @@ extension MetalSourceGenerator {
         sources.append(generateFlashAttentionKernel(name: "flash_attn_decode", bufferPrecision: decode))
         sources.append(generateFlashAttentionArgumentTableVariant(name: "flash_attn_decode_argbuf", argumentBufferIndex: 30, bufferPrecision: decode))
         sources.append(generateFlashAttentionKernel(name: "flash_attn_decode_f32", bufferPrecision: prefill))
-        sources.append(generateBatchFlashAttention(name: "flash_attn_batch_f32", bufferPrecision: prefill))
+        sources.append(generateBatchFlashAttention(
+            name: "flash_attn_batch_f32",
+            bufferPrecision: prefill,
+            sequenceStorageFormat: .float16
+        ))
+        sources.append(generateBatchFlashAttention(
+            name: "flash_attn_batch_bf16_f32",
+            bufferPrecision: prefill,
+            sequenceStorageFormat: .bfloat16
+        ))
         sources.append(generateDirectScratchBatchFlashAttention(name: "flash_attn_batch_scratch_f32", bufferPrecision: prefill))
         sources.append(generateKVCacheFillSeq(name: "kv_cache_fill_seq_f32", bufferPrecision: prefill))
 

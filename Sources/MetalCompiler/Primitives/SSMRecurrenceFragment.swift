@@ -198,7 +198,6 @@ public struct SSMRecurrenceFragment: PrimitiveMetalKernelFragment {
             min(Self.maxThreadgroupSize, desiredThreads),
             pipeline.maxTotalThreadsPerThreadgroup
         )
-
         let step = MetalPrefillStep(
             pipeline: pipeline,
             gridSize: MTLSize(width: safeGroupCount, height: 1, depth: 1),
@@ -222,14 +221,22 @@ public struct SSMRecurrenceFragment: PrimitiveMetalKernelFragment {
                 uint32Binding(13, UInt32(keyHeadDimension)),
                 uint32Binding(14, UInt32(valueHeadDimension)),
                 uint32Binding(15, UInt32(convKernelSize)),
-                uint32Binding(16, UInt32(context.maximumSequenceLength)),
+                uint32Binding(16, 1),
+                uint32Binding(17, UInt32(context.slotDimension)),
             ],
             threadgroupMemoryLength: 0,
             sync: .bufferBarrier,
             mode: .batch,
             sequenceLengthPolicy: .bind(index: 16),
             positionBufferIndex: nil,
-            perPositionStrides: [:]
+            perPositionStrides: [:],
+            metadata: .init(
+                kernelName: kernelName,
+                bufferAccessPattern: .init(
+                    reads: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
+                    writes: [8, 9, 10]
+                )
+            )
         )
 
         return FragmentPrefillSteps(

@@ -184,6 +184,7 @@ struct QuantizationPlanningTests {
         #expect(quantizedEntry.kernelFamily == .mppGEMM)
         #expect(!quantizedEntry.usedFallback)
         #expect(plan.requiresSequentialPromptIngestion)
+        #expect(plan.sequencePrefillFallbackReason == .unsupportedQ3Quantization)
     }
 
     @Test("q8 decode embedding lookup records quantized embedding kernel family")

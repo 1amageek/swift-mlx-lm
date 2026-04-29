@@ -87,7 +87,11 @@ public struct GatherFragment: PrimitiveMetalKernelFragment {
                 mode: .batch,
                 sequenceLengthPolicy: .bindAndAdjustGridHeight(index: 4),
                 positionBufferIndex: nil,
-                perPositionStrides: [:]
+                perPositionStrides: [:],
+                metadata: .init(
+                    kernelName: kernelName,
+                    bufferAccessPattern: .init(reads: [0, 1], writes: [2])
+                )
             )],
             outputIsHidden: true
         )

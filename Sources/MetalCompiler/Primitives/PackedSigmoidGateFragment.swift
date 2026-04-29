@@ -91,7 +91,11 @@ public struct PackedSigmoidGateFragment: PrimitiveMetalKernelFragment {
                 mode: .batch,
                 sequenceLengthPolicy: .bindAndAdjustGridHeight(index: 9),
                 positionBufferIndex: nil,
-                perPositionStrides: [:]
+                perPositionStrides: [:],
+                metadata: .init(
+                    kernelName: kernelName(context: context.kernelContext),
+                    bufferAccessPattern: .init(reads: [0, 1], writes: [2])
+                )
             )],
             outputIsHidden: false
         )

@@ -41,6 +41,11 @@ struct MetalDispatchStepBuilder {
             routingPlanner.lastFragmentWriteBufferIndices = nil
             let bindings = routingPlanner.bindings(for: entry)
             let writeIndices = routingPlanner.lastFragmentWriteBufferIndices
+            let bufferAccessPattern = Self.decodeBufferAccessPattern(
+                for: entry,
+                buffers: bindings.buffers,
+                writeBufferIndices: writeIndices
+            )
             let weightTensorName = Self.primaryWeightTensorName(for: entry)
             Self.recordQuantizationEntries(
                 for: entry,
@@ -66,7 +71,8 @@ struct MetalDispatchStepBuilder {
                     kernelName: resolved.name,
                     entryIndex: entry.index,
                     layerIndex: entry.layerIndex,
-                    weightTensorName: weightTensorName
+                    weightTensorName: weightTensorName,
+                    bufferAccessPattern: bufferAccessPattern
                 )
             ))
         }
@@ -210,7 +216,8 @@ struct MetalDispatchStepBuilder {
                     kernelName: variantKernelName,
                     entryIndex: step.metadata.entryIndex,
                     layerIndex: step.metadata.layerIndex,
-                    weightTensorName: step.metadata.weightTensorName
+                    weightTensorName: step.metadata.weightTensorName,
+                    bufferAccessPattern: step.metadata.bufferAccessPattern
                 )
             )
         }
@@ -281,6 +288,21 @@ struct MetalDispatchStepBuilder {
             return MetalBufferAccesses(reads: allRegions, writes: writeRegions)
         }
         return MetalBufferAccesses.conservative(mapped)
+    }
+
+    private static func decodeBufferAccessPattern(
+        for entry: DispatchEntry,
+        buffers: [(index: Int, buffer: MTLBuffer, offset: Int)],
+        writeBufferIndices: Set<Int>? = nil
+    ) -> MetalDispatchStepMetadata.BufferAccessPattern? {
+        if entry.fragment is LinearFragment {
+            return .init(reads: [0, 1], writes: [2])
+        }
+        let bindingIndices = Set(buffers.map(\.index))
+        guard let writeBufferIndices else {
+            return nil
+        }
+        return .init(reads: bindingIndices, writes: writeBufferIndices)
     }
 
     private static func optimizeDecodeBarrierPolicies(

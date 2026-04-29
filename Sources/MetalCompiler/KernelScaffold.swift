@@ -85,13 +85,14 @@ public struct KernelScaffold {
             var bufferDecls: [String] = []
             var bufferIndex = 0
             var rowPointerLines: [String] = []
+            var rowStrideDecls: [String] = []
 
             for port in contract.ports {
                 switch port.role {
                 case .buffer:
                     let constQualifier = port.direction == .input ? "const " : ""
                     bufferDecls.append("    device \(constQualifier)\(bt)* \(port.name)_base [[buffer(\(bufferIndex))]]")
-                    rowPointerLines.append("        device \(constQualifier)\(bt)* \(port.name) = \(port.name)_base + seqPos * dimension;")
+                    rowPointerLines.append("        device \(constQualifier)\(bt)* \(port.name) = \(port.name)_base + seqPos * \(port.name)RowStride;")
                     bufferIndex += 1
                 case .weight(let field):
                     let wf = weightFormats[port.name] ?? weightFormats[field] ?? WeightFormats.float16
@@ -108,12 +109,17 @@ public struct KernelScaffold {
                 nextIndex += 1
             }
             let seqLenIndex = nextIndex
+            nextIndex += 1
+            for port in contract.ports where port.role.isBuffer {
+                rowStrideDecls.append("    constant uint& \(port.name)RowStride [[buffer(\(nextIndex))]]")
+                nextIndex += 1
+            }
 
             let allDecls = bufferDecls + [
                 "    constant uint& dimension        [[buffer(\(dimensionIndex))]]"
             ] + scalarDecls + [
                 "    constant uint& sequenceLength   [[buffer(\(seqLenIndex))]]"
-            ]
+            ] + rowStrideDecls
 
             return """
             kernel void \(name)(
@@ -199,23 +205,45 @@ public struct KernelScaffold {
         let scalarDecls = scalarConstantDeclarations(contract: contract, startIndex: params.count + 1)
 
         if isSequence {
-            var paramIndex = params.count
+            var bufferDecls: [String] = []
+            var rowPointerLines: [String] = []
+            var bufferPortNames: [String] = []
+            for (index, port) in contract.ports.enumerated() {
+                switch port.role {
+                case .buffer:
+                    let constQualifier = port.direction == .input ? "const " : ""
+                    bufferDecls.append("    device \(constQualifier)\(bt)* \(port.name)_base [[buffer(\(index))]]")
+                    rowPointerLines.append("        device \(constQualifier)\(bt)* \(port.name) = \(port.name)_base + seqPos * \(port.name)RowStride;")
+                    bufferPortNames.append(port.name)
+                case .weight(let field):
+                    let wf = weightFormats[port.name] ?? weightFormats[field] ?? WeightFormats.float16
+                    bufferDecls.append("    device const \(wf.bufferType)* \(port.name) [[buffer(\(index))]]")
+                }
+            }
+
+            var paramIndex = contract.ports.count
             let countIndex = paramIndex; paramIndex += 1
             paramIndex += contract.scalarConstants.count  // skip scalar constants
             let seqLenIndex = paramIndex
+            paramIndex += 1
+            let rowStrideDecls = bufferPortNames.enumerated().map { offset, name in
+                "    constant uint& \(name)RowStride [[buffer(\(paramIndex + offset))]]"
+            }
 
             return """
             kernel void \(name)(
-            \(params.enumerated().map { "    \($0.element.declaration) [[buffer(\($0.offset))]]" }.joined(separator: ",\n")),
+            \(bufferDecls.joined(separator: ",\n")),
                 constant uint& dimension         [[buffer(\(countIndex))]],
             \(scalarDecls)\(scalarDecls.isEmpty ? "" : "\n")    constant uint& sequenceLength    [[buffer(\(seqLenIndex))]],
+            \(rowStrideDecls.joined(separator: ",\n")),
                 uint2 gid                        [[thread_position_in_grid]]
             ) {
                 uint i = gid.x;
                 uint seqPos = gid.y;
                 if (i >= dimension || seqPos >= sequenceLength) return;
 
-                uint idx = seqPos * dimension + i;
+            \(rowPointerLines.joined(separator: "\n"))
+                uint idx = i;
 
             \(indentedBody)
 
@@ -267,13 +295,14 @@ public struct KernelScaffold {
             var bufferDecls: [String] = []
             var bufferIndex = 0
             var pointerLines: [String] = []
+            var rowStrideDecls: [String] = []
 
             for port in contract.ports {
                 switch port.role {
                 case .buffer:
                     let constQualifier = port.direction == .input ? "const " : ""
                     bufferDecls.append("    device \(constQualifier)\(bt)* \(port.name)_base [[buffer(\(bufferIndex))]]")
-                    pointerLines.append("        device \(constQualifier)\(bt)* \(port.name) = \(port.name)_base + seqPos * \(headCount) * dimension + headIndex * dimension;")
+                    pointerLines.append("        device \(constQualifier)\(bt)* \(port.name) = \(port.name)_base + seqPos * \(port.name)RowStride + headIndex * dimension;")
                     bufferIndex += 1
                 case .weight(let field):
                     let wf = weightFormats[port.name] ?? weightFormats[field] ?? WeightFormats.float16
@@ -290,12 +319,17 @@ public struct KernelScaffold {
                 nextIndex += 1
             }
             let seqLenIndex = nextIndex
+            nextIndex += 1
+            for port in contract.ports where port.role.isBuffer {
+                rowStrideDecls.append("    constant uint& \(port.name)RowStride [[buffer(\(nextIndex))]]")
+                nextIndex += 1
+            }
 
             let allDecls = bufferDecls + [
                 "    constant uint& dimension        [[buffer(\(dimensionIndex))]]"
             ] + scalarDecls + [
                 "    constant uint& sequenceLength   [[buffer(\(seqLenIndex))]]"
-            ]
+            ] + rowStrideDecls
 
             return """
             kernel void \(name)(
@@ -424,4 +458,3 @@ public struct KernelScaffold {
     }
 
 }
-

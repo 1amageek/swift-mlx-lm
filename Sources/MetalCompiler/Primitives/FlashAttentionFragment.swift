@@ -264,20 +264,31 @@ public struct FlashAttentionFragment: PrimitiveMetalKernelFragment {
                     uint32Binding(12, UInt32(vHeadSlotBytes)),
                     uint32Binding(16, UInt32(cache.numRotorGroups)),
                     uint32Binding(17, UInt32(cache.qjlDimension)),
+                    uint32Binding(18, UInt32(context.slotDimension)),
                 ],
                 threadgroupMemoryLength: 0,
                 sync: .bufferBarrier,
                 mode: .batch,
                 sequenceLengthPolicy: .bind(index: 7),
                 positionBufferIndex: nil,
-                perPositionStrides: [:]
+                perPositionStrides: [:],
+                metadata: .init(
+                    kernelName: "kv_cache_fill_seq_f32",
+                    bufferAccessPattern: .init(
+                        reads: [0, 1, 13, 14],
+                        writes: [2, 3, 15]
+                    )
+                )
             ))
         }
 
         // Step 2: Batch causal attention — one threadgroup per (head, position) pair.
         // 1D grid: flatGroupId = posId * headCount + headIndex.
         // Causal masking: each position attends to positions [0..posId].
-        let attnPipeline = try context.getPipeline("flash_attn_batch_f32")
+        let attnKernelName = cache.specification.valueQuantizationScheme == .bf16RowMajor
+            ? "flash_attn_batch_bf16_f32"
+            : "flash_attn_batch_f32"
+        let attnPipeline = try context.getPipeline(attnKernelName)
         let simdWidth = 32
         let minimumThreads = max(headDimension, simdWidth)
         let roundedThreads = ((minimumThreads + simdWidth - 1) / simdWidth) * simdWidth
@@ -295,6 +306,8 @@ public struct FlashAttentionFragment: PrimitiveMetalKernelFragment {
                 (15, rotorParamsBuffer, rotorParamsOffset),
                 (16, qjlMatrixBuffer, 0),
                 (17, qjlResidualBuffer, qjlResidualOffset),
+                (23, context.buffers.scratch, 2 * scratchSlotSize),
+                (24, context.buffers.scratch, 3 * scratchSlotSize),
             ],
             bytesBindings: [
                 uint32Binding(4, UInt32(headCount)),
@@ -313,13 +326,18 @@ public struct FlashAttentionFragment: PrimitiveMetalKernelFragment {
                 uint32Binding(20, causal ? 1 : 0),
                 uint32Binding(21, windowLeft.map(UInt32.init) ?? UInt32.max),
                 uint32Binding(22, windowRight.map(UInt32.init) ?? UInt32.max),
+                uint32Binding(25, UInt32(context.slotDimension)),
             ],
             threadgroupMemoryLength: 0,
             sync: .bufferBarrier,
             mode: .batch,
             sequenceLengthPolicy: .bind(index: 10),
             positionBufferIndex: nil,
-            perPositionStrides: [:]
+            perPositionStrides: [:],
+            metadata: .init(
+                kernelName: attnKernelName,
+                bufferAccessPattern: .init(reads: [0, 1, 2, 23, 24], writes: [3])
+            )
         ))
 
         return FragmentPrefillSteps(
@@ -387,7 +405,11 @@ public struct FlashAttentionFragment: PrimitiveMetalKernelFragment {
             mode: .batch,
             sequenceLengthPolicy: .bindAndAdjustGridHeight(index: 8),
             positionBufferIndex: nil,
-            perPositionStrides: [:]
+            perPositionStrides: [:],
+            metadata: .init(
+                kernelName: "flash_attn_batch_scratch_f32",
+                bufferAccessPattern: .init(reads: [0, 1, 2], writes: [3])
+            )
         ))
 
         return FragmentPrefillSteps(
@@ -438,7 +460,11 @@ public struct FlashAttentionFragment: PrimitiveMetalKernelFragment {
             mode: .batch,
             sequenceLengthPolicy: .bindAndAdjustGridHeight(index: 12),
             positionBufferIndex: nil,
-            perPositionStrides: [:]
+            perPositionStrides: [:],
+            metadata: .init(
+                kernelName: ropeKernelName,
+                bufferAccessPattern: .init(reads: [0, 1, 2], writes: [0, 1])
+            )
         )
     }
 

@@ -35,7 +35,15 @@ struct MetalPrefillStepBuilder {
             steps.append(contentsOf: prefillSteps)
         }
 
-        let residentSteps = try makeResidentConstantSteps(steps, allocator: constantAllocator)
+        let correctedSteps = try Self.insertDecodeEquivalentSequenceStorageRoundingIfNeeded(
+            steps,
+            buffers: buffers,
+            slotDimension: slotDimension,
+            hiddenSize: hiddenSize,
+            maximumSequenceLength: maximumSequenceLength,
+            planBuildContext: planBuildContext
+        )
+        let residentSteps = try makeResidentConstantSteps(correctedSteps, allocator: constantAllocator)
         let optimizedSteps = Self.optimizePrefillBarrierPolicies(residentSteps)
         let supplementalResidencyBuffers = Self.supplementalResidencyBuffers(in: optimizedSteps)
         let finalHiddenSource = planner.finalHiddenSource()
@@ -52,6 +60,148 @@ struct MetalPrefillStepBuilder {
             finalHiddenRowStride: finalHiddenSource.rowStride,
             supplementalResidencyBuffers: supplementalResidencyBuffers
         )
+    }
+
+    private static func insertDecodeEquivalentSequenceStorageRoundingIfNeeded(
+        _ steps: [MetalPrefillStep],
+        buffers: PrefillBufferSet,
+        slotDimension: Int,
+        hiddenSize: Int,
+        maximumSequenceLength: Int,
+        planBuildContext: PlanBuildContext
+    ) throws -> [MetalPrefillStep] {
+        guard buffers.bufferPrecision.isPrefillSequencePrecision else {
+            return steps
+        }
+        let kernelName: String
+        switch planBuildContext.compileContext.decodeBufferPrecision {
+        case .float16:
+            kernelName = "round_f16_seq_f32"
+        case .bfloat16:
+            kernelName = "round_bf16_seq_f32"
+        case .float32, .float32Decode:
+            return steps
+        }
+        guard let pipeline = planBuildContext.pipelineCache[kernelName] else {
+            throw MetalCompilerError.kernelNotFound(kernelName)
+        }
+
+        var corrected: [MetalPrefillStep] = []
+        corrected.reserveCapacity(steps.count * 2)
+        for step in steps {
+            corrected.append(step)
+            corrected.append(contentsOf: try makeSequenceStorageRoundingSteps(
+                after: step,
+                kernelName: kernelName,
+                pipeline: pipeline,
+                buffers: buffers,
+                slotDimension: slotDimension,
+                hiddenSize: hiddenSize,
+                maximumSequenceLength: maximumSequenceLength
+            ))
+        }
+        return corrected
+    }
+
+    private static func makeSequenceStorageRoundingSteps(
+        after step: MetalPrefillStep,
+        kernelName: String,
+        pipeline: MTLComputePipelineState,
+        buffers: PrefillBufferSet,
+        slotDimension: Int,
+        hiddenSize: Int,
+        maximumSequenceLength: Int
+    ) throws -> [MetalPrefillStep] {
+        if shouldPreserveFloat32SequenceStorage(after: step) {
+            return []
+        }
+        guard let bufferAccessPattern = step.metadata.bufferAccessPattern else {
+            if step.bufferBindings.contains(where: {
+                isSequenceActivationBuffer($0.buffer, buffers: buffers)
+            }) {
+                let producer = step.metadata.kernelName ?? step.pipeline.label ?? "<unknown>"
+                throw MetalCompilerError.deviceSetupFailed(
+                    "Sequence storage rounding requires buffer access metadata for \(producer)"
+                )
+            }
+            return []
+        }
+        let writeIndices = bufferAccessPattern.writeIndices
+        guard !writeIndices.isEmpty else {
+            return []
+        }
+
+        var roundedRegions = Set<BufferRegion>()
+        var roundSteps: [MetalPrefillStep] = []
+        for binding in step.bufferBindings where writeIndices.contains(binding.index) {
+            guard let elementCount = float16RoundElementCount(
+                buffer: binding.buffer,
+                offset: binding.offset,
+                buffers: buffers,
+                slotDimension: slotDimension,
+                hiddenSize: hiddenSize,
+                maximumSequenceLength: maximumSequenceLength
+            ), elementCount > 0 else {
+                continue
+            }
+            let region = BufferRegion(buffer: binding.buffer, offset: binding.offset)
+            guard roundedRegions.insert(region).inserted else { continue }
+
+            let threads = min(
+                max(pipeline.threadExecutionWidth, 1) * 4,
+                pipeline.maxTotalThreadsPerThreadgroup
+            )
+            let groups = (elementCount + threads - 1) / threads
+            roundSteps.append(MetalPrefillStep(
+                pipeline: pipeline,
+                gridSize: MTLSize(width: max(groups, 1), height: 1, depth: 1),
+                threadgroupSize: MTLSize(width: max(threads, 1), height: 1, depth: 1),
+                bufferBindings: [(0, binding.buffer, binding.offset)],
+                bytesBindings: [uint32Binding(1, UInt32(elementCount))],
+                threadgroupMemoryLength: 0,
+                sync: .bufferBarrier,
+                mode: .batch,
+                sequenceLengthPolicy: .none,
+                positionBufferIndex: nil,
+                perPositionStrides: [:],
+                metadata: .init(
+                    kernelName: kernelName,
+                    entryIndex: step.metadata.entryIndex,
+                    layerIndex: step.metadata.layerIndex,
+                    bufferAccessPattern: .init(reads: [0], writes: [0])
+                )
+            ))
+        }
+        return roundSteps
+    }
+
+    private static func shouldPreserveFloat32SequenceStorage(after step: MetalPrefillStep) -> Bool {
+        false
+    }
+
+    private static func float16RoundElementCount(
+        buffer: MTLBuffer,
+        offset: Int,
+        buffers: PrefillBufferSet,
+        slotDimension: Int,
+        hiddenSize: Int,
+        maximumSequenceLength: Int
+    ) -> Int? {
+        let availableElements = max(0, (buffer.length - offset) / MemoryLayout<Float>.stride)
+        if buffer === buffers.scratch {
+            return min(slotDimension * maximumSequenceLength, availableElements)
+        }
+        if buffer === buffers.hidden || buffer === buffers.residual {
+            return min(hiddenSize * maximumSequenceLength, availableElements)
+        }
+        return nil
+    }
+
+    private static func isSequenceActivationBuffer(
+        _ buffer: MTLBuffer,
+        buffers: PrefillBufferSet
+    ) -> Bool {
+        buffer === buffers.scratch || buffer === buffers.hidden || buffer === buffers.residual
     }
 
     /// Offset-aware buffer region for precise hazard detection.
@@ -263,6 +413,43 @@ private struct PrefillStepPlanner {
         )
     }
 
+    private var needsDecodeEquivalentSequenceProjectionMath: Bool {
+        buffers.bufferPrecision.isPrefillSequencePrecision
+            && (buffers.convState != nil || buffers.recurrentState != nil)
+    }
+
+    private func decodeEquivalentSequenceGEMVKernelName(
+        for descriptor: ProjectionWeightDescriptor
+    ) -> String? {
+        guard needsDecodeEquivalentSequenceProjectionMath else { return nil }
+        switch descriptor.schemeIdentifier {
+        case .bf16RowMajor:
+            return "gemv_seq_bf16_f32s"
+        case .fp16RowMajor:
+            return "gemv_seq_f32s"
+        default:
+            return nil
+        }
+    }
+
+    private func decodeEquivalentBatchedSequenceGEMVKernelName(
+        for descriptor: ProjectionWeightDescriptor,
+        count: Int
+    ) -> String? {
+        guard needsDecodeEquivalentSequenceProjectionMath else { return nil }
+        guard count >= 2 && count <= 4 else { return nil }
+        switch descriptor.schemeIdentifier {
+        case .bf16RowMajor:
+            return "batched_gemv\(count)_seq_bf16_f32s"
+        case .fp16RowMajor:
+            return "batched_gemv\(count)_seq_f32s"
+        case .fp32RowMajor:
+            return "batched_gemv\(count)_seq_fp32_f32s"
+        default:
+            return nil
+        }
+    }
+
     mutating func buildSteps(for entry: DispatchEntry) throws -> [MetalPrefillStep] {
         updateCompositeInputSource(for: entry)
 
@@ -301,12 +488,12 @@ private struct PrefillStepPlanner {
             let scratchSlotSize = slotDimension * scratchElementSize * maximumSequenceLength
             let inputRowStride = inputBuffer === buffers.hidden
                 ? (buffers.hidden.length / max(maximumSequenceLength, 1)) / scratchElementSize
-                : projection.inputDimension
+                : slotDimension
 
             if isOutput && projection.outputDimension > hiddenSize {
                 let inputRowStride = inputBuffer === buffers.hidden
                     ? buffers.hidden.length / max(maximumSequenceLength, 1)
-                    : projection.inputDimension * scratchElementSize
+                    : slotDimension * scratchElementSize
                 outputHeadInputSource = (
                     buffer: inputBuffer,
                     offset: inputOffset,
@@ -340,7 +527,7 @@ private struct PrefillStepPlanner {
             if mode == .lastToken {
                 let inputRowStride = inputBuffer === buffers.hidden
                     ? buffers.hidden.length / max(maximumSequenceLength, 1)
-                    : projection.inputDimension * scratchElementSize
+                    : slotDimension * scratchElementSize
                 perPositionStrides[0] = inputRowStride
             }
             // Prefer direct quantized GEMM (dequant in registers) when available.
@@ -349,11 +536,16 @@ private struct PrefillStepPlanner {
             let useDirectQuantizedGEMM = directGEMM.flatMap {
                 planBuildContext.pipelineCache[$0.kernelName]
             } != nil
+            let sequenceGEMVKernelName = mode == .batch
+                ? decodeEquivalentSequenceGEMVKernelName(for: quantizationDescriptor)
+                : nil
+            let usesSequenceGEMVForStep = sequenceGEMVKernelName != nil
 
             let canDequantForAMX = quantizationDescriptor.schemeIdentifier.isWeightQuantized
                 && buffers.dequantScratch != nil
                 && dequantKernelName(for: quantizationDescriptor.schemeIdentifier) != nil
             let usesMPPForStep = usesMPP
+                && !usesSequenceGEMVForStep
                 && mode == .batch
                 && inputRowStride == projection.inputDimension
                 && (!quantizationDescriptor.schemeIdentifier.isWeightQuantized || canDequantForAMX)
@@ -396,7 +588,13 @@ private struct PrefillStepPlanner {
             // Resolve GEMM pipeline
             let selectedPipeline: MTLComputePipelineState
             let selectedKernelName: String
-            if useDirectQuantizedGEMM,
+            if let sequenceGEMVKernelName {
+                guard let sequencePipeline = planBuildContext.pipelineCache[sequenceGEMVKernelName] else {
+                    throw MetalCompilerError.kernelNotFound(sequenceGEMVKernelName)
+                }
+                selectedPipeline = sequencePipeline
+                selectedKernelName = sequenceGEMVKernelName
+            } else if useDirectQuantizedGEMM,
                let resolvedGEMM = directGEMM,
                let directPipeline = planBuildContext.pipelineCache[resolvedGEMM.kernelName] {
                 selectedPipeline = directPipeline
@@ -430,7 +628,14 @@ private struct PrefillStepPlanner {
 
             let gridSize: MTLSize
             let threadgroupSize: MTLSize
-            if usesMPPForStep && !useDirectQuantizedGEMM {
+            if usesSequenceGEMVForStep {
+                gridSize = MTLSize(
+                    width: resolved.config.grid.width,
+                    height: maximumSequenceLength,
+                    depth: 1
+                )
+                threadgroupSize = resolved.config.threadgroup
+            } else if usesMPPForStep && !useDirectQuantizedGEMM {
                 let simdWidth = selectedPipeline.threadExecutionWidth
                 gridSize = MTLSize(
                     width: (projection.outputDimension + 31) / 32,
@@ -503,7 +708,7 @@ private struct PrefillStepPlanner {
                 ],
                 threadgroupMemoryLength: useDirectQuantizedGEMM
                     ? (directGEMM?.threadgroupMemoryLength ?? 0)
-                    : (usesMPPForStep ? 0 : resolved.config.sharedMemoryBytes),
+                    : ((usesMPPForStep || usesSequenceGEMVForStep) ? 0 : resolved.config.sharedMemoryBytes),
                 sync: .bufferBarrier,
                 mode: mode,
                 sequenceLengthPolicy: mode == .batch
@@ -657,12 +862,30 @@ private struct PrefillStepPlanner {
         let scratchSlotSize = slotDimension * scratchElementSize * maximumSequenceLength
         let inputRowStride = inputBuffer === buffers.hidden
             ? (buffers.hidden.length / max(maximumSequenceLength, 1)) / scratchElementSize
-            : batched.inputDimension
+            : slotDimension
+        let firstOutputSlot = firstNonAliasingScratchOutputSlot(
+            inputBuffer: inputBuffer,
+            inputOffset: inputOffset,
+            scratchSlotSize: scratchSlotSize
+        )
 
         // Try direct quantized GEMM: single dispatch for all projections
         let firstDescriptor = resolveProjectionWeightDescriptor(
             role: batched.projections[0].field, entry: entry
         )
+
+        if let sequenceStep = try buildDecodeEquivalentBatchedSequenceGEMVStep(
+            batched: batched,
+            entry: entry,
+            weightResolver: weightResolver,
+            firstDescriptor: firstDescriptor,
+            inputBuffer: inputBuffer,
+            inputOffset: inputOffset,
+            inputRowStride: inputRowStride,
+            scratchSlotSize: scratchSlotSize
+        ) {
+            return annotate([sequenceStep], entryIndex: entry.index, layerIndex: entry.layerIndex)
+        }
 
         // BF16 / FP16 / FP32 dense weights → batched MPP GEMM (matmul2d-based).
         // This path runs a single MPP kernel that processes all N projections
@@ -697,13 +920,13 @@ private struct PrefillStepPlanner {
                 let (weightBuffer, weightOffset) = weightResolver.resolve(role: projection.field)
                 bufferBindings.append((1 + i, weightBuffer, weightOffset))
 
-                let outputOffset = (routingState.projectionIndex + 1) * scratchSlotSize
+                let outputOffset = (firstOutputSlot + i) * scratchSlotSize
                 lastOutputOffset = outputOffset
-                routingState.projectionIndex += 1
                 bufferBindings.append((1 + count + i, buffers.scratch, outputOffset))
 
                 totalOutputDim += projection.outputDimension
             }
+            routingState.projectionIndex = firstOutputSlot + count - 1
 
             // Bytes layout: inputDim(2N+1), outDim0..N-1(2N+2..3N+1), seqLen(3N+2), rowStride(3N+3)
             let dimBase = 1 + 2 * count
@@ -767,10 +990,10 @@ private struct PrefillStepPlanner {
         var steps: [MetalPrefillStep] = []
         steps.reserveCapacity(batched.projections.count)
         var lastOutputOffset = routingState.currentInputOffset
-        for projection in batched.projections {
+        for (projectionIndex, projection) in batched.projections.enumerated() {
             let projInputRowStride = inputBuffer === buffers.hidden
                 ? (buffers.hidden.length / max(maximumSequenceLength, 1)) / scratchElementSize
-                : projection.inputDimension
+                : slotDimension
             let resolved = try resolveDispatch(
                 DispatchEntry(
                     index: entry.index,
@@ -786,9 +1009,9 @@ private struct PrefillStepPlanner {
             let (weightBuffer, weightOffset) = weightResolver.resolve(role: projection.field)
             let weightTensorName = entry.parameterBindings.first(where: { $0.role == projection.field })?.tensorName
             let quantizationDescriptor = resolveProjectionWeightDescriptor(role: projection.field, entry: entry)
-            let outputOffset = (routingState.projectionIndex + 1) * scratchSlotSize
+            let outputOffset = (firstOutputSlot + projectionIndex) * scratchSlotSize
             lastOutputOffset = outputOffset
-            routingState.projectionIndex += 1
+            routingState.projectionIndex = firstOutputSlot + projectionIndex
 
             // Prefer direct quantized GEMM (dequant in registers) when available.
             // Falls back to dequant→AMX when no direct kernel exists.
@@ -796,11 +1019,16 @@ private struct PrefillStepPlanner {
             let useDirectQuantizedGEMM = directGEMM.flatMap {
                 planBuildContext.pipelineCache[$0.kernelName]
             } != nil
+            let sequenceGEMVKernelName = decodeEquivalentSequenceGEMVKernelName(
+                for: quantizationDescriptor
+            )
+            let usesSequenceGEMVForStep = sequenceGEMVKernelName != nil
 
             let canDequantForAMX = quantizationDescriptor.schemeIdentifier.isWeightQuantized
                 && buffers.dequantScratch != nil
                 && dequantKernelName(for: quantizationDescriptor.schemeIdentifier) != nil
             let usesMPPForStep = usesMPP
+                && !usesSequenceGEMVForStep
                 && projInputRowStride == projection.inputDimension
                 && (!quantizationDescriptor.schemeIdentifier.isWeightQuantized || canDequantForAMX)
 
@@ -839,7 +1067,13 @@ private struct PrefillStepPlanner {
 
             let selectedPipeline: MTLComputePipelineState
             let selectedKernelName: String
-            if useDirectQuantizedGEMM,
+            if let sequenceGEMVKernelName {
+                guard let sequencePipeline = planBuildContext.pipelineCache[sequenceGEMVKernelName] else {
+                    throw MetalCompilerError.kernelNotFound(sequenceGEMVKernelName)
+                }
+                selectedPipeline = sequencePipeline
+                selectedKernelName = sequenceGEMVKernelName
+            } else if useDirectQuantizedGEMM,
                let resolved = directGEMM,
                let directPipeline = planBuildContext.pipelineCache[resolved.kernelName] {
                 selectedPipeline = directPipeline
@@ -872,7 +1106,14 @@ private struct PrefillStepPlanner {
 
             let gridSize: MTLSize
             let threadgroupSize: MTLSize
-            if usesMPPForStep && !useDirectQuantizedGEMM {
+            if usesSequenceGEMVForStep {
+                gridSize = MTLSize(
+                    width: resolved.config.grid.width,
+                    height: maximumSequenceLength,
+                    depth: 1
+                )
+                threadgroupSize = resolved.config.threadgroup
+            } else if usesMPPForStep && !useDirectQuantizedGEMM {
                 let simdWidth = selectedPipeline.threadExecutionWidth
                 gridSize = MTLSize(
                     width: (projection.outputDimension + 31) / 32,
@@ -927,15 +1168,21 @@ private struct PrefillStepPlanner {
                         (1, gemmWeightBuffer, gemmWeightOffset),
                         (2, buffers.scratch, outputOffset),
                     ],
-                    bytesBindings: [
-                        uint32Binding(3, UInt32(projection.inputDimension)),
-                        uint32Binding(4, UInt32(projection.outputDimension)),
-                        uint32Binding(5, UInt32(maximumSequenceLength)),
-                        uint32Binding(6, UInt32(projInputRowStride)),
-                    ],
+                    bytesBindings: {
+                        var bindings = [
+                            uint32Binding(3, UInt32(projection.inputDimension)),
+                            uint32Binding(4, UInt32(projection.outputDimension)),
+                            uint32Binding(5, UInt32(maximumSequenceLength)),
+                            uint32Binding(6, UInt32(projInputRowStride)),
+                        ]
+                        if usesSequenceGEMVForStep {
+                            bindings.append(uint32Binding(7, UInt32(slotDimension)))
+                        }
+                        return bindings
+                    }(),
                     threadgroupMemoryLength: useDirectQuantizedGEMM
                         ? (directGEMM?.threadgroupMemoryLength ?? 0)
-                        : (usesMPPForStep ? 0 : resolved.config.sharedMemoryBytes),
+                        : ((usesMPPForStep || usesSequenceGEMVForStep) ? 0 : resolved.config.sharedMemoryBytes),
                     sync: .bufferBarrier,
                     mode: .batch,
                     sequenceLengthPolicy: usesMPPForStep && !useDirectQuantizedGEMM
@@ -957,6 +1204,121 @@ private struct PrefillStepPlanner {
         routingState.lastOutputIsHidden = false
         routingState.currentInputOffset = lastOutputOffset
         return annotate(steps, entryIndex: entry.index, layerIndex: entry.layerIndex)
+    }
+
+    private func firstNonAliasingScratchOutputSlot(
+        inputBuffer: MTLBuffer,
+        inputOffset: Int,
+        scratchSlotSize: Int
+    ) -> Int {
+        let nextOutputSlot = routingState.projectionIndex + 1
+        guard inputBuffer === buffers.scratch, scratchSlotSize > 0 else {
+            return nextOutputSlot
+        }
+        return max(nextOutputSlot, inputOffset / scratchSlotSize + 1)
+    }
+
+    private mutating func buildDecodeEquivalentBatchedSequenceGEMVStep(
+        batched: BatchedProjection,
+        entry: DispatchEntry,
+        weightResolver: WeightResolver,
+        firstDescriptor: ProjectionWeightDescriptor,
+        inputBuffer: MTLBuffer,
+        inputOffset: Int,
+        inputRowStride: Int,
+        scratchSlotSize: Int
+    ) throws -> MetalPrefillStep? {
+        let count = batched.projections.count
+        guard let kernelName = decodeEquivalentBatchedSequenceGEMVKernelName(
+            for: firstDescriptor,
+            count: count
+        ) else {
+            return nil
+        }
+        guard let pipeline = planBuildContext.pipelineCache[kernelName] else {
+            throw MetalCompilerError.kernelNotFound(kernelName)
+        }
+
+        var bufferBindings: [(Int, MTLBuffer, Int)] = [(0, inputBuffer, inputOffset)]
+        var totalOutputDim = 0
+        var lastOutputOffset = routingState.currentInputOffset
+        let firstOutputSlot = firstNonAliasingScratchOutputSlot(
+            inputBuffer: inputBuffer,
+            inputOffset: inputOffset,
+            scratchSlotSize: scratchSlotSize
+        )
+
+        for (i, projection) in batched.projections.enumerated() {
+            let (weightBuffer, weightOffset) = weightResolver.resolve(role: projection.field)
+            bufferBindings.append((1 + i, weightBuffer, weightOffset))
+        }
+
+        for (i, projection) in batched.projections.enumerated() {
+            let outputOffset = (firstOutputSlot + i) * scratchSlotSize
+            lastOutputOffset = outputOffset
+            bufferBindings.append((1 + count + i, buffers.scratch, outputOffset))
+            totalOutputDim += projection.outputDimension
+        }
+        routingState.projectionIndex = firstOutputSlot + count - 1
+
+        let dimBase = 1 + 2 * count
+        var bytesBindings: [(index: Int, value: [UInt8])] = [
+            uint32Binding(dimBase, UInt32(batched.inputDimension)),
+        ]
+        for (i, projection) in batched.projections.enumerated() {
+            bytesBindings.append(uint32Binding(dimBase + 1 + i, UInt32(projection.outputDimension)))
+        }
+        let seqLenIndex = dimBase + 1 + count
+        bytesBindings.append(uint32Binding(seqLenIndex, UInt32(maximumSequenceLength)))
+        bytesBindings.append(uint32Binding(seqLenIndex + 1, UInt32(inputRowStride)))
+        bytesBindings.append(uint32Binding(seqLenIndex + 2, UInt32(slotDimension)))
+
+        let simdWidth = max(pipeline.threadExecutionWidth, 1)
+        let rowsPerThreadgroup = 2
+        let threads = min(simdWidth * rowsPerThreadgroup, pipeline.maxTotalThreadsPerThreadgroup)
+        let gridSize = MTLSize(
+            width: (totalOutputDim + rowsPerThreadgroup - 1) / rowsPerThreadgroup,
+            height: maximumSequenceLength,
+            depth: 1
+        )
+        let threadgroupSize = MTLSize(width: threads, height: 1, depth: 1)
+        let readIndices = Set(0...count)
+        let writeIndices = Set((count + 1)...(2 * count))
+
+        for projection in batched.projections {
+            let descriptor = resolveProjectionWeightDescriptor(role: projection.field, entry: entry)
+            recordProjectionQuantization(
+                entry: entry,
+                descriptor: descriptor,
+                mode: .batch,
+                inputRowStride: inputRowStride,
+                inputDimension: projection.inputDimension,
+                selectedKernelName: kernelName,
+                usesMPPForStep: false
+            )
+        }
+
+        routingState.lastOutputIsHidden = false
+        routingState.currentInputOffset = lastOutputOffset
+        return MetalPrefillStep(
+            pipeline: pipeline,
+            gridSize: gridSize,
+            threadgroupSize: threadgroupSize,
+            bufferBindings: bufferBindings,
+            bytesBindings: bytesBindings,
+            threadgroupMemoryLength: 0,
+            sync: .bufferBarrier,
+            mode: .batch,
+            sequenceLengthPolicy: .bindAndAdjustGridHeight(index: seqLenIndex),
+            positionBufferIndex: nil,
+            perPositionStrides: [:],
+            metadata: .init(
+                kernelName: kernelName,
+                entryIndex: entry.index,
+                weightTensorName: nil,
+                bufferAccessPattern: .init(reads: readIndices, writes: writeIndices)
+            )
+        )
     }
 
     private mutating func buildBatchedFragmentPrefillSteps(
@@ -1139,7 +1501,7 @@ private struct PrefillStepPlanner {
         let (kWeightBuffer, kWeightOffset) = qWeightResolver.resolve(role: kNorm.weightRole)
 
         let totalHeadCount = qNorm.headCount + kNorm.headCount
-        let threads = min(32, pipeline.maxTotalThreadsPerThreadgroup)
+        let threads = min(256, pipeline.maxTotalThreadsPerThreadgroup)
 
         let qTotalDimension = qNorm.headCount * qNorm.headDimension
         let kTotalDimension = kNorm.headCount * kNorm.headDimension
@@ -1335,18 +1697,23 @@ private struct PrefillStepPlanner {
         var bufferBindings: [(Int, MTLBuffer, Int)] = [(0, inputBuffer, inputOffset)]
         var lastOutputOffset = routingState.currentInputOffset
         var totalNTiles = 0
+        let firstOutputSlot = firstNonAliasingScratchOutputSlot(
+            inputBuffer: inputBuffer,
+            inputOffset: inputOffset,
+            scratchSlotSize: scratchSlotSize
+        )
 
         for (i, projection) in batched.projections.enumerated() {
             let (weightBuffer, weightOffset) = weightResolver.resolve(role: projection.field)
             bufferBindings.append((1 + i, weightBuffer, weightOffset))
 
-            let outputOffset = (routingState.projectionIndex + 1) * scratchSlotSize
+            let outputOffset = (firstOutputSlot + i) * scratchSlotSize
             lastOutputOffset = outputOffset
-            routingState.projectionIndex += 1
             bufferBindings.append((1 + count + i, buffers.scratch, outputOffset))
 
             totalNTiles += projection.outputDimension / nTile
         }
+        routingState.projectionIndex = firstOutputSlot + count - 1
 
         // Bytes layout: inputDim(2N+1), outDim0..N-1(2N+2..3N+1), seqLen(3N+2), rowStride(3N+3)
         let dimBase = 1 + 2 * count

@@ -2,6 +2,27 @@
 
 ## Background
 
+### Current hybrid prefill status
+
+Hybrid models with convolution or recurrent state are correctness-gated before
+they can use sequence prefill. `MetalPrefillPlan.requiresSequentialPromptIngestion`
+is no longer driven by state-buffer presence alone, but it still returns `true`
+when the plan contains an SSM sequence kernel whose output has not matched
+decode-equivalent ingestion:
+
+- `ssm_recurrence_seq_*`
+
+Q3 prefill projection and embedding lookup also remain an explicit unsupported
+sequence-prefill case. BF16 `conv1d_causal_seq` is enabled for LFM-style
+short-convolution plans after matching decode-equivalent short traces, while
+Qwen DeltaNet/SSM prompt ingestion still runs token by token until the SSM
+sequence kernel is fixed and tested.
+
+Before any Metal 4 command-buffer reuse or MPP prefill work is treated as a
+performance win for hybrid models, the stateful sequence path must produce the
+same first token and short decode trace as `prefillPlan = nil` sequential
+ingestion on the same prompt for the model family being claimed.
+
 ### Profile Data (LFM2.5-1.2B, current implementation)
 
 ```

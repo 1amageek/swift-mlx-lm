@@ -79,19 +79,26 @@ extension BatchedProjection: PrimitiveMetalKernelFragment {
             (0, inputBuffer, inputOffset),
         ]
         var bytesBindings: [(index: Int, value: [UInt8])] = []
-        var lastOutputOffset = context.currentInputOffset
 
         for (i, proj) in projections.enumerated() {
             let weight = context.resolveWeight(proj.field)
             bufferBindings.append((1 + i, weight.buffer, weight.offset))
         }
 
+        let scratchSlotStride = context.slotDimension * context.elementSize
+        let inputScratchSlot = inputBuffer === context.bufferSet.scratch && scratchSlotStride > 0
+            ? inputOffset / scratchSlotStride
+            : nil
+        let firstOutputSlot = max(
+            context.projectionIndex + 1,
+            inputScratchSlot.map { $0 + 1 } ?? 0
+        )
         for i in 0..<count {
-            let scratchSlot = context.projectionIndex + 1 + i
+            let scratchSlot = firstOutputSlot + i
             let outputOffset = scratchSlot * context.slotDimension * context.elementSize
-            lastOutputOffset = outputOffset
             bufferBindings.append((1 + count + i, context.bufferSet.scratch, outputOffset))
         }
+        let consumedSlots = firstOutputSlot + count - 1 - context.projectionIndex
 
         let bytesStart = 1 + 2 * count
         bytesBindings.append(uint32Binding(bytesStart, UInt32(inputDimension)))
@@ -105,7 +112,7 @@ extension BatchedProjection: PrimitiveMetalKernelFragment {
             bytes: bytesBindings,
             outputIsHidden: false,
             writeBufferIndices: writeIndices,
-            projectionSlotsConsumed: count
+            projectionSlotsConsumed: consumedSlots
         )
     }
 

@@ -111,7 +111,7 @@ public struct BatchedQKNormRoPEFragment: PrimitiveMetalKernelFragment {
         let (kWeightBuffer, kWeightOffset) = context.resolveWeight(kNorm.weightRole)
 
         let totalHeads = qNorm.headCount + kNorm.headCount
-        let threads = min(32, pipeline.maxTotalThreadsPerThreadgroup)
+        let threads = min(256, pipeline.maxTotalThreadsPerThreadgroup)
 
         let qTotalDimension = qNorm.headCount * qNorm.headDimension
         let kTotalDimension = kNorm.headCount * kNorm.headDimension
@@ -144,13 +144,19 @@ public struct BatchedQKNormRoPEFragment: PrimitiveMetalKernelFragment {
                     uint32Binding(17, UInt32(qTotalDimension)),
                     uint32Binding(18, UInt32(kTotalDimension)),
                     uint32Binding(19, UInt32(usesProportionalRoPE ? 1 : 0)),
+                    uint32Binding(20, UInt32(context.slotDimension)),
+                    uint32Binding(21, UInt32(context.slotDimension)),
                 ],
                 threadgroupMemoryLength: 0,
                 sync: .bufferBarrier,
                 mode: .batch,
                 sequenceLengthPolicy: .bindAndAdjustGridHeight(index: 16),
                 positionBufferIndex: nil,
-                perPositionStrides: [:]
+                perPositionStrides: [:],
+                metadata: .init(
+                    kernelName: kernelName,
+                    bufferAccessPattern: .init(reads: [0, 1, 2, 3, 4], writes: [0, 1])
+                )
             )],
             outputIsHidden: false
         )

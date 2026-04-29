@@ -36,8 +36,12 @@ public struct StandardizeFragment: PrimitiveMetalKernelFragment {
         let readBias = weightFormat.readExpression("std_bias[idx]")
         let readScale = weightFormat.readExpression("std_scale[idx]")
         let bt = bufferPrecision.metalType
+        let value = "(float(data[idx]) - \(readBias)) * \(readScale)"
+        let stored = bufferPrecision.isPrefillSequencePrecision
+            ? MetalSourceGenerator.sequenceStorageValue(value, weightFormat: weightFormat)
+            : value
         return """
-        output[idx] = \(bt)((float(data[idx]) - \(readBias)) * \(readScale));
+        output[idx] = \(bt)(\(stored));
         """
     }
 
