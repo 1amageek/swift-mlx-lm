@@ -33,6 +33,7 @@ public struct QKNormFragment: PrimitiveMetalKernelFragment {
         headCount * headDimension * bytesPerScalar
     }
     public var normEpsilon: Float? { epsilon }
+    public var normWeightBias: Float? { weightBias }
     public var supportsInPlaceBatching: Bool { true }
 
     // MARK: - Fusion Contract

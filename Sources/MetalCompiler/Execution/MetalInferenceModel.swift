@@ -1579,7 +1579,16 @@ public struct MetalInferenceModel: @unchecked Sendable {
             }
             stagingBuffers[probe.label] = (stagingBuffer, probe.precision, clampedCount)
         }
-        let resolvedStepVisibilityOptions = stepVisibilityOptions ?? visibilityOptions
+        let stagingLease = try MetalResidencyLease.required(
+            device: probeSubmission.device,
+            label: "debugPrefillProbeStaging",
+            buffers: stagingBuffers.values.map { $0.buffer }
+        )
+        let combinedLease = MetalResidencyLease.combined(
+            label: "debugPrefillProbeCombined",
+            leases: [stableResidencyLease, stagingLease]
+        )
+        _ = stepVisibilityOptions ?? visibilityOptions
         let resolvedProbeVisibilityOptions = probeVisibilityOptions ?? visibilityOptions
 
         resetState(using: &probeSubmission)
@@ -1607,7 +1616,7 @@ public struct MetalInferenceModel: @unchecked Sendable {
         if hiddenOverrideReplayStart > 0 && !allTokensOverridden {
             let embeddingReplayEnd = min(hiddenOverrideReplayStart - 1, maximumStepIndex)
             if embeddingReplayEnd >= 0 {
-                try probeSubmission.withCompute { encoder, argumentTable in
+                try probeSubmission.withCompute(ephemeralResidency: combinedLease) { encoder, argumentTable in
                     for currentStepIndex in 0...embeddingReplayEnd {
                         let currentStep = prefillPlan.steps[currentStepIndex]
                         let currentProbes = probes.filter { ($0.stepIndex ?? stepIndex) == currentStepIndex }
@@ -1667,7 +1676,7 @@ public struct MetalInferenceModel: @unchecked Sendable {
             return snapshots
         }
 
-        try probeSubmission.withCompute { encoder, argumentTable in
+        try probeSubmission.withCompute(ephemeralResidency: combinedLease) { encoder, argumentTable in
             for currentStepIndex in replayStartStepIndex...maximumStepIndex {
                 let currentStep = prefillPlan.steps[currentStepIndex]
                 let currentProbes = probes.filter { ($0.stepIndex ?? stepIndex) == currentStepIndex }
@@ -1766,6 +1775,15 @@ public struct MetalInferenceModel: @unchecked Sendable {
             }
             stagingBuffers[probe.label] = (stagingBuffer, probe.precision, probe.count)
         }
+        let stagingLease = try MetalResidencyLease.required(
+            device: submission.device,
+            label: "debugDecodeProbeStaging",
+            buffers: stagingBuffers.values.map { $0.buffer }
+        )
+        let combinedLease = MetalResidencyLease.combined(
+            label: "debugDecodeProbeCombined",
+            leases: [stableResidencyLease, stagingLease]
+        )
 
         resetState()
         if !promptTokens.isEmpty {
@@ -1782,7 +1800,7 @@ public struct MetalInferenceModel: @unchecked Sendable {
         buffers.tokenIn.contents().bindMemory(to: Int32.self, capacity: 1).pointee = tokenID
         let steps = decodePlan.steps
 
-        try submission.withCompute { encoder, argumentTable in
+        try submission.withCompute(ephemeralResidency: combinedLease) { encoder, argumentTable in
             for currentStepIndex in 0...maximumStepIndex {
                 let step = steps[currentStepIndex]
                 let currentProbes = probes.filter { $0.stepIndex == currentStepIndex }

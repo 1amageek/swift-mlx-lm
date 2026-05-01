@@ -215,13 +215,18 @@ extension MetalSourceGenerator {
                 device \(bt)* output             [[buffer(2)]],
                 constant uint& dimension         [[buffer(3)]],
                 constant uint& sequenceLength    [[buffer(4)]],
+                constant uint& rowStride         [[buffer(5)]],
                 uint2 gid                        [[thread_position_in_grid]]
             ) {
                 uint i = gid.x;
                 uint seqPos = gid.y;
                 if (i >= dimension || seqPos >= sequenceLength) return;
 
-                uint idx = seqPos * dimension + i;
+                // Sequence prefill writes gate/up at scratch slot stride (slotDimension),
+                // not the activation dimension — slotDimension >= dimension when packed
+                // projections (e.g. sigmoid-gated Q) widen the slot. Keep read/write at
+                // rowStride to stay consistent with the GEMV producers and consumers.
+                uint idx = seqPos * rowStride + i;
                 float g = float(gate[idx]);
                 float activated = \(activationExpr);
                 output[idx] = \(bt)(activated * float(up[idx]));

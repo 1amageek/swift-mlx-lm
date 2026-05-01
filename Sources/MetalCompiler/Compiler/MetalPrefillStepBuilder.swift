@@ -691,6 +691,14 @@ private struct PrefillStepPlanner {
             } else {
                 mppTileVariants = []
             }
+            let outputRowStride: Int
+            if outputBuffer === buffers.hidden {
+                outputRowStride = (buffers.hidden.length / max(maximumSequenceLength, 1)) / scratchElementSize
+            } else if outputBuffer === buffers.logits {
+                outputRowStride = projection.outputDimension
+            } else {
+                outputRowStride = slotDimension
+            }
             return dequantSteps + [MetalPrefillStep(
                 pipeline: selectedPipeline,
                 gridSize: gridSize,
@@ -700,12 +708,18 @@ private struct PrefillStepPlanner {
                     (1, gemmWeightBuffer, gemmWeightOffset),
                     (2, outputBuffer, outputOffset),
                 ],
-                bytesBindings: [
-                    uint32Binding(3, UInt32(projection.inputDimension)),
-                    uint32Binding(4, UInt32(projection.outputDimension)),
-                    uint32Binding(5, seqLenValue),
-                    uint32Binding(6, UInt32(inputRowStride)),
-                ],
+                bytesBindings: {
+                    var bindings: [(index: Int, value: [UInt8])] = [
+                        uint32Binding(3, UInt32(projection.inputDimension)),
+                        uint32Binding(4, UInt32(projection.outputDimension)),
+                        uint32Binding(5, seqLenValue),
+                        uint32Binding(6, UInt32(inputRowStride)),
+                    ]
+                    if usesSequenceGEMVForStep {
+                        bindings.append(uint32Binding(7, UInt32(outputRowStride)))
+                    }
+                    return bindings
+                }(),
                 threadgroupMemoryLength: useDirectQuantizedGEMM
                     ? (directGEMM?.threadgroupMemoryLength ?? 0)
                     : ((usesMPPForStep || usesSequenceGEMVForStep) ? 0 : resolved.config.sharedMemoryBytes),

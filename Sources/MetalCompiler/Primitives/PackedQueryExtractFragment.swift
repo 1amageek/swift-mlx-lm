@@ -79,8 +79,14 @@ public struct PackedQueryExtractFragment: PrimitiveMetalKernelFragment {
                 bytesBindings: [
                     uint32Binding(2, UInt32(headCount)),
                     uint32Binding(3, UInt32(headDimension)),
-                    uint32Binding(4, UInt32(headCount * headDimension * 2)),
-                    uint32Binding(5, UInt32(headCount * headDimension)),
+                    // Both source and destination slots are slotDimension-strided.
+                    // The packed Q (slot 1) was written by BatchedSequenceGEMV at
+                    // outputRowStride = slotDimension, and the extracted Q (slot 4)
+                    // is consumed by BatchedQKNormRoPE which reads at qRowStride =
+                    // slotDimension. Using attentionDimension as the row stride
+                    // misaligns positions >= 1 within the slot.
+                    uint32Binding(4, UInt32(context.slotDimension)),
+                    uint32Binding(5, UInt32(context.slotDimension)),
                     uint32Binding(6, UInt32(context.maximumSequenceLength)),
                 ],
                 threadgroupMemoryLength: 0,

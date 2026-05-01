@@ -82,8 +82,14 @@ public struct PackedSigmoidGateFragment: PrimitiveMetalKernelFragment {
                     uint32Binding(4, UInt32(headDimension)),
                     uint32Binding(5, UInt32(packedHeadStride)),
                     uint32Binding(6, UInt32(gateHeadOffset)),
-                    uint32Binding(7, UInt32((dimension / headDimension) * packedHeadStride)),
-                    uint32Binding(8, UInt32(dimension)),
+                    // Source (packed Q slot) and destination (attention output slot 0)
+                    // are both slotDimension-strided in scratch — the packed Q was
+                    // written by BatchedSequenceGEMV at slotDimension stride, and the
+                    // attention output (slot 0) was written by flash_attn_batch_f32 at
+                    // activationRowStride = slotDimension. Reading/writing at the
+                    // narrower attention dimension misaligns positions >= 1.
+                    uint32Binding(7, UInt32(context.slotDimension)),
+                    uint32Binding(8, UInt32(context.slotDimension)),
                     uint32Binding(9, UInt32(context.maximumSequenceLength)),
                 ],
                 threadgroupMemoryLength: 0,

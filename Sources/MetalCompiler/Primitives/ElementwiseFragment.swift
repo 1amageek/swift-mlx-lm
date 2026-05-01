@@ -123,6 +123,7 @@ public struct ElementwiseFragment: PrimitiveMetalKernelFragment {
                 bytesBindings: [
                     uint32Binding(3, UInt32(count)),
                     uint32Binding(4, UInt32(context.maximumSequenceLength)),
+                    uint32Binding(5, UInt32(context.slotDimension)),
                 ],
                 threadgroupMemoryLength: 0,
                 sync: .bufferBarrier,

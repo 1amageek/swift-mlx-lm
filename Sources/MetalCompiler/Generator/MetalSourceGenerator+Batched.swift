@@ -883,10 +883,8 @@ public static func generateBatchedQKNormRoPESequence(
             data[offset + i] = \(bt)(\(normStoreValue("normalized")));
         }
 
-        // Ensure norm writes are visible before RoPE reads. Same-thread order is
-        // already guaranteed when pairCount % SIMD_WIDTH == 0 (typical case), but
-        // we keep the barrier to cover kernels where this assumption does not hold.
-        simdgroup_barrier(mem_flags::mem_device);
+        // Cross-SIMD device-memory visibility before RoPE reads paired indices.
+        threadgroup_barrier(mem_flags::mem_device);
 
         // Phase 2: RoPE rotation (in-place).
         const bool useProportional = proportionalRoPE != 0;
