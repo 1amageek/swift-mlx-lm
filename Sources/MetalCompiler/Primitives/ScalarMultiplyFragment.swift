@@ -92,7 +92,8 @@ public struct ScalarMultiplyFragment: PrimitiveMetalKernelFragment {
 
     public func prefillSteps(context: PrefillBindingContext) throws -> FragmentPrefillSteps {
         let (weightBuffer, weightOffset) = context.resolveWeight(weightRole)
-        let pipeline = try context.getPipeline(kernelName(context: context.kernelContext))
+        let kernelName = kernelName(context: context.kernelContext)
+        let pipeline = try context.getPipeline(kernelName)
         let tgSize = min(256, pipeline.maxTotalThreadsPerThreadgroup)
         let gridX = (count + tgSize - 1) / tgSize
         return FragmentPrefillSteps(
@@ -114,7 +115,11 @@ public struct ScalarMultiplyFragment: PrimitiveMetalKernelFragment {
                 mode: .batch,
                 sequenceLengthPolicy: .bindAndAdjustGridHeight(index: 4),
                 positionBufferIndex: nil,
-                perPositionStrides: [:]
+                perPositionStrides: [:],
+                metadata: .init(
+                    kernelName: kernelName,
+                    bufferAccessPattern: .init(reads: [0, 1], writes: [2])
+                )
             )],
             outputIsHidden: true,
             resetsProjectionIndex: true

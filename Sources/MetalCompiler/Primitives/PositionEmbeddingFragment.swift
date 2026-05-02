@@ -124,7 +124,8 @@ public struct PositionEmbeddingFragment: PrimitiveMetalKernelFragment {
 
     public func prefillSteps(context: PrefillBindingContext) throws -> FragmentPrefillSteps {
         let (tableBuffer, tableOffset) = context.resolveWeight("position_embedding_table")
-        let pipeline = try context.getPipeline(kernelName(context: context.kernelContext))
+        let kernelName = kernelName(context: context.kernelContext)
+        let pipeline = try context.getPipeline(kernelName)
         let tgSize = min(256, pipeline.maxTotalThreadsPerThreadgroup)
         let gridX = (hiddenSize + tgSize - 1) / tgSize
         return FragmentPrefillSteps(
@@ -147,7 +148,11 @@ public struct PositionEmbeddingFragment: PrimitiveMetalKernelFragment {
                 mode: .batch,
                 sequenceLengthPolicy: .bindAndAdjustGridHeight(index: 5),
                 positionBufferIndex: nil,
-                perPositionStrides: [:]
+                perPositionStrides: [:],
+                metadata: .init(
+                    kernelName: kernelName,
+                    bufferAccessPattern: .init(reads: [0, 1], writes: [0])
+                )
             )],
             outputIsHidden: true,
             resetsProjectionIndex: true

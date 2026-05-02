@@ -113,7 +113,11 @@ public struct ResidualAddFragment: PrimitiveMetalKernelFragment {
                     mode: .batch,
                     sequenceLengthPolicy: .bindAndAdjustGridHeight(index: 3),
                     positionBufferIndex: nil,
-                    perPositionStrides: [:]
+                    perPositionStrides: [:],
+                    metadata: .init(
+                        kernelName: inplaceKernelName,
+                        bufferAccessPattern: .init(reads: [0, 1], writes: [0])
+                    )
                 )],
                 outputIsHidden: true,
                 resetsProjectionIndex: false
@@ -143,7 +147,11 @@ public struct ResidualAddFragment: PrimitiveMetalKernelFragment {
                 mode: .batch,
                 sequenceLengthPolicy: .bindAndAdjustGridHeight(index: 4),
                 positionBufferIndex: nil,
-                perPositionStrides: [:]
+                perPositionStrides: [:],
+                metadata: .init(
+                    kernelName: kernelName,
+                    bufferAccessPattern: .init(reads: [0, 1], writes: [2])
+                )
             )],
             outputIsHidden: true,
             resetsProjectionIndex: false

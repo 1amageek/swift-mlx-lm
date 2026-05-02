@@ -104,7 +104,11 @@ public struct CopyFragment: PrimitiveMetalKernelFragment {
                 mode: .batch,
                 sequenceLengthPolicy: .bindAndAdjustGridHeight(index: 3),
                 positionBufferIndex: nil,
-                perPositionStrides: [:]
+                perPositionStrides: [:],
+                metadata: .init(
+                    kernelName: kernelName,
+                    bufferAccessPattern: .init(reads: [0], writes: [1])
+                )
             )],
             outputIsHidden: true,
             resetsProjectionIndex: true

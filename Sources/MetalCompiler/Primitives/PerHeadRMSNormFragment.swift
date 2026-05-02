@@ -56,7 +56,8 @@ public struct PerHeadRMSNormFragment: PrimitiveMetalKernelFragment {
     }
 
     public func prefillSteps(context: PrefillBindingContext) throws -> FragmentPrefillSteps {
-        let pipeline = try context.getPipeline(kernelName(context: context.kernelContext))
+        let kernelName = kernelName(context: context.kernelContext)
+        let pipeline = try context.getPipeline(kernelName)
         let scratchSlotSize = context.slotDimension * context.scratchElementSize * context.maximumSequenceLength
         let threads = min(32, pipeline.maxTotalThreadsPerThreadgroup)
         return FragmentPrefillSteps(
@@ -79,7 +80,11 @@ public struct PerHeadRMSNormFragment: PrimitiveMetalKernelFragment {
                 mode: .batch,
                 sequenceLengthPolicy: .bindAndAdjustGridHeight(index: 4),
                 positionBufferIndex: nil,
-                perPositionStrides: [:]
+                perPositionStrides: [:],
+                metadata: .init(
+                    kernelName: kernelName,
+                    bufferAccessPattern: .init(reads: [0], writes: [0])
+                )
             )],
             outputIsHidden: false
         )

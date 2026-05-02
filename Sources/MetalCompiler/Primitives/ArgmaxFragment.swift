@@ -58,7 +58,11 @@ public struct ArgmaxFragment: PrimitiveMetalKernelFragment {
                 mode: .lastToken,
                 sequenceLengthPolicy: .none,
                 positionBufferIndex: nil,
-                perPositionStrides: [:]
+                perPositionStrides: [:],
+                metadata: .init(
+                    kernelName: kernelName,
+                    bufferAccessPattern: .init(reads: [0], writes: [1])
+                )
             )],
             outputIsHidden: false
         )

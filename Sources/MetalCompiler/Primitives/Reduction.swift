@@ -175,6 +175,7 @@ public struct Reduction: PrimitiveMetalKernelFragment {
 
         let bufferBindings: [(Int, MTLBuffer, Int)]
         let bytesBindings: [(index: Int, value: [UInt8])]
+        let bufferAccessPattern: MetalDispatchStepMetadata.BufferAccessPattern
 
         if withScale {
             let (weightBuffer, weightOffset) = context.resolveWeight(weightRole)
@@ -189,6 +190,7 @@ public struct Reduction: PrimitiveMetalKernelFragment {
                 floatBinding(5, weightBias),
                 uint32Binding(6, UInt32(context.maximumSequenceLength)),
             ]
+            bufferAccessPattern = .init(reads: [0, 1], writes: [2])
         } else {
             bufferBindings = [
                 (0, context.currentInputBuffer, context.currentInputOffset),
@@ -199,6 +201,7 @@ public struct Reduction: PrimitiveMetalKernelFragment {
                 floatBinding(3, epsilon),
                 uint32Binding(4, UInt32(context.maximumSequenceLength)),
             ]
+            bufferAccessPattern = .init(reads: [0], writes: [1])
         }
 
         return FragmentPrefillSteps(
@@ -213,7 +216,11 @@ public struct Reduction: PrimitiveMetalKernelFragment {
                 mode: .batch,
                 sequenceLengthPolicy: .bind(index: withScale ? 6 : 4),
                 positionBufferIndex: nil,
-                perPositionStrides: [:]
+                perPositionStrides: [:],
+                metadata: .init(
+                    kernelName: kernelName,
+                    bufferAccessPattern: bufferAccessPattern
+                )
             )],
             outputIsHidden: true,
             resetsProjectionIndex: true
