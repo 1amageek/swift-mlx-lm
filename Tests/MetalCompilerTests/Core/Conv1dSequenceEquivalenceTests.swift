@@ -149,6 +149,10 @@ struct Conv1dSequenceEquivalenceTests {
         var inputProjDim = UInt32(inputProjectionDimension)
         var kernel = UInt32(kernelSize)
         var seqLen = UInt32(sequenceLength)
+        // Native packed layout for the unit test: input rows stride at
+        // inputProjectionDimension, output rows stride at convDimension.
+        var inputRowStride = UInt32(inputProjectionDimension)
+        var outputRowStride = UInt32(convDimension)
 
         let sequenceThreads = MTLSize(width: 8, height: 1, depth: 1)
         let sequenceGrid = MTLSize(
@@ -165,6 +169,8 @@ struct Conv1dSequenceEquivalenceTests {
         sequenceEncoder.setBytes(&inputProjDim, length: MemoryLayout<UInt32>.stride, index: 4)
         sequenceEncoder.setBytes(&kernel, length: MemoryLayout<UInt32>.stride, index: 5)
         sequenceEncoder.setBytes(&seqLen, length: MemoryLayout<UInt32>.stride, index: 6)
+        sequenceEncoder.setBytes(&inputRowStride, length: MemoryLayout<UInt32>.stride, index: 7)
+        sequenceEncoder.setBytes(&outputRowStride, length: MemoryLayout<UInt32>.stride, index: 8)
         sequenceEncoder.dispatchThreadgroups(sequenceGrid, threadsPerThreadgroup: sequenceThreads)
         sequenceEncoder.endEncoding()
         try harness.complete(sequenceCommandBuffer)
@@ -183,6 +189,7 @@ struct Conv1dSequenceEquivalenceTests {
         extractEncoder.setBytes(&inputProjDim, length: MemoryLayout<UInt32>.stride, index: 3)
         extractEncoder.setBytes(&kernel, length: MemoryLayout<UInt32>.stride, index: 4)
         extractEncoder.setBytes(&seqLen, length: MemoryLayout<UInt32>.stride, index: 5)
+        extractEncoder.setBytes(&inputRowStride, length: MemoryLayout<UInt32>.stride, index: 6)
         extractEncoder.dispatchThreadgroups(extractGrid, threadsPerThreadgroup: extractThreads)
         extractEncoder.endEncoding()
         try harness.complete(extractCommandBuffer)

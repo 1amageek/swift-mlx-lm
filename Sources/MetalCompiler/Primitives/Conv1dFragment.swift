@@ -87,13 +87,19 @@ public struct Conv1dFragment: PrimitiveMetalKernelFragment {
                 uint32Binding(4, UInt32(inProjDim)),
                 uint32Binding(5, UInt32(kernelSize)),
                 uint32Binding(6, UInt32(context.maximumSequenceLength)),
+                uint32Binding(7, UInt32(context.slotDimension)),
+                uint32Binding(8, UInt32(context.slotDimension)),
             ],
             threadgroupMemoryLength: 0,
             sync: .bufferBarrier,
             mode: .batch,
             sequenceLengthPolicy: .bindAndAdjustGridHeight(index: 6),
             positionBufferIndex: nil,
-            perPositionStrides: [:]
+            perPositionStrides: [:],
+            metadata: .init(
+                kernelName: kernelName,
+                bufferAccessPattern: .init(reads: [0, 1], writes: [2])
+            )
         ))
 
         // Step 2: Extract conv_state from in_proj output (last kernelSize positions)
@@ -116,13 +122,18 @@ public struct Conv1dFragment: PrimitiveMetalKernelFragment {
                     uint32Binding(3, UInt32(inProjDim)),
                     uint32Binding(4, UInt32(kernelSize)),
                     uint32Binding(5, UInt32(context.maximumSequenceLength)),
+                    uint32Binding(6, UInt32(context.slotDimension)),
                 ],
                 threadgroupMemoryLength: 0,
                 sync: .bufferBarrier,
                 mode: .batch,
                 sequenceLengthPolicy: .bind(index: 5),
                 positionBufferIndex: nil,
-                perPositionStrides: [:]
+                perPositionStrides: [:],
+                metadata: .init(
+                    kernelName: "extract_conv_state_f32",
+                    bufferAccessPattern: .init(reads: [0], writes: [1])
+                )
             ))
         }
 

@@ -137,25 +137,34 @@ public static func generateConv1dCausalSeq(
 
     return """
     kernel void \(name)(
-        device const \(bt)* input      [[buffer(0)]],
-        device const \(wt)* weight     [[buffer(1)]],
-        device \(bt)* output           [[buffer(2)]],
-        constant uint& convDim         [[buffer(3)]],
-        constant uint& inProjDim       [[buffer(4)]],
-        constant uint& kernelSize      [[buffer(5)]],
-        constant uint& sequenceLength  [[buffer(6)]],
-        uint2 gid                      [[thread_position_in_grid]]
+        device const \(bt)* input         [[buffer(0)]],
+        device const \(wt)* weight        [[buffer(1)]],
+        device \(bt)* output              [[buffer(2)]],
+        constant uint& convDim            [[buffer(3)]],
+        constant uint& inProjDim          [[buffer(4)]],
+        constant uint& kernelSize         [[buffer(5)]],
+        constant uint& sequenceLength     [[buffer(6)]],
+        constant uint& inputRowStride     [[buffer(7)]],
+        constant uint& outputRowStride    [[buffer(8)]],
+        uint2 gid                         [[thread_position_in_grid]]
     ) {
         uint ch = gid.x;
         uint pos = gid.y;
         if (ch >= convDim || pos >= sequenceLength) return;
 
+        // Sequence prefill packs the in_proj output (3 * convDim columns: B|C|x)
+        // into scratch slots that span slotDimension (>= inProjDim). Using the
+        // narrower `inProjDim` as a row stride misaligns positions >= 1 because
+        // the GEMM producer writes at slot stride. The conv output is consumed
+        // by out_proj at slot stride too, so writes use `outputRowStride`.
+        // Standalone unit tests can pass `inputRowStride == inProjDim` and
+        // `outputRowStride == convDim` for native-packed buffers.
         float convOut = 0.0f;
         for (uint k = 0; k < kernelSize; k++) {
             int srcPos = int(pos) - int(kernelSize - 1) + int(k);
             if (srcPos >= 0) {
-                float B = float(input[uint(srcPos) * inProjDim + ch]);
-                float x = float(input[uint(srcPos) * inProjDim + 2 * convDim + ch]);
+                float B = float(input[uint(srcPos) * inputRowStride + ch]);
+                float x = float(input[uint(srcPos) * inputRowStride + 2 * convDim + ch]);
                 float Bx = B * x;
                 if (uint(srcPos) != pos) {
                     Bx = \(quantizedStateValue("Bx"));
@@ -164,8 +173,8 @@ public static func generateConv1dCausalSeq(
             }
         }
 
-        float C = float(input[pos * inProjDim + convDim + ch]);
-        output[pos * convDim + ch] = \(bt)(C * convOut);
+        float C = float(input[pos * inputRowStride + convDim + ch]);
+        output[pos * outputRowStride + ch] = \(bt)(C * convOut);
     }
     """
 }
@@ -188,15 +197,19 @@ public static func generateExtractConvState(
         constant uint& inProjDim           [[buffer(3)]],
         constant uint& kernelSize          [[buffer(4)]],
         constant uint& sequenceLength      [[buffer(5)]],
+        constant uint& inputRowStride      [[buffer(6)]],
         uint2 gid                          [[thread_position_in_grid]]
     ) {
         uint ch = gid.x;
         uint k = gid.y;
         if (ch >= convDim || k >= kernelSize) return;
+        // Read the in_proj scratch slot at `inputRowStride` (slotDimension in
+        // production prefill, or inProjDim in standalone unit tests) — the same
+        // stride the conv1d_causal_seq kernel and the producing GEMM use.
         int srcPos = int(sequenceLength) - int(kernelSize) + int(k);
         if (srcPos >= 0 && uint(srcPos) < sequenceLength) {
-            float B = float(inProjOutput[uint(srcPos) * inProjDim + ch]);
-            float x = float(inProjOutput[uint(srcPos) * inProjDim + 2 * convDim + ch]);
+            float B = float(inProjOutput[uint(srcPos) * inputRowStride + ch]);
+            float x = float(inProjOutput[uint(srcPos) * inputRowStride + 2 * convDim + ch]);
             convState[k * convDim + ch] = \(writeConvState("B * x"));
         } else {
             convState[k * convDim + ch] = 0;
