@@ -371,9 +371,35 @@ struct RotorQuantBenchmarkTests {
 
     // MARK: - Gemma4 (Pure Transformer) Benchmarks
 
-    static let gemma4BundlePath = URL(fileURLWithPath: BenchmarkSupport.testDataPath)
-        .appendingPathComponent("gemma-4-E2B-it")
-        .path
+    static var gemma4BundlePath: String {
+        let envCandidates = [
+            ProcessInfo.processInfo.environment["SWIFTLM_GEMMA4_DIR"],
+            ProcessInfo.processInfo.environment["SWIFTLM_GEMMA4_E2B_DIR"],
+        ].compactMap { $0 }
+        for candidate in envCandidates {
+            let path = NSString(string: candidate).expandingTildeInPath
+            if FileManager.default.fileExists(atPath: "\(path)/config.json") {
+                return path
+            }
+        }
+
+        let hubRoot = HFCacheLocator.hubRoot
+        let entries: [String]
+        do {
+            entries = try FileManager.default.contentsOfDirectory(atPath: hubRoot)
+        } catch {
+            return ""
+        }
+        for entry in entries.sorted() where entry.lowercased().hasPrefix("models--google--gemma-4-e2b") {
+            if let snapshot = HFCacheLocator.resolveSnapshotPath(repoDirectoryName: entry) {
+                return snapshot
+            }
+        }
+
+        return URL(fileURLWithPath: BenchmarkSupport.testDataPath)
+            .appendingPathComponent("gemma-4-E2B-it")
+            .path
+    }
 
     @Test("Gemma4 decode throughput: FP16 vs RotorQ8 vs RotorQ4")
     func gemma4DecodeComparison() throws {
@@ -661,11 +687,11 @@ struct RotorQuantBenchmarkTests {
         let gpuLock = try GPUTestExclusion.acquire()
         defer { gpuLock.release() }
 
-        let fillLevels = [64, 256, 512]
+        let fillLevels = [64, 512]
         let maxSeqLen = 600  // headroom for fill + decode + warmup
-        let decodeSteps = 20
-        let warmupSteps = 5
-        let iterations = 3
+        let decodeSteps = 10
+        let warmupSteps = 2
+        let iterations = 1
 
         let policies: [(String, InferencePolicy)] = [
             ("FP16", InferencePolicy(

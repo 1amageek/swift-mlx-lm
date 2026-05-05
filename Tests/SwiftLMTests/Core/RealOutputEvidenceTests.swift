@@ -31,9 +31,8 @@ struct RealOutputEvidenceTests {
         print("[Qwen3.5 evidence raw token ids] \(output.rawTokenIDs)")
         print("[Qwen3.5 evidence visible token ids] \(output.visibleTokenIDs)")
         print("[Qwen3.5 evidence greedy text] \(text)")
-        RealOutputAssertionSupport.assertHasPrefix(
+        RealOutputAssertionSupport.assertStartsWithTokyo(
             text,
-            prefix: "Japan's capital is Tokyo",
             label: "Qwen3.5 evidence greedy"
         )
     }

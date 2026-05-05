@@ -9,19 +9,16 @@ Host: macOS (Apple Silicon, same machine, same session)
 
 ## Current implementation note
 
-As of 2026-04-29, the Qwen3.5 BF16 hybrid prompt path still uses
-decode-equivalent sequential ingestion. `MetalPrefillPlan` now reports the
-fallback reason explicitly: `ssm_recurrence_seq_*` is not yet proven
-output-equivalent to token-by-token decode ingestion. The old broad gate
-(`convState != nil || recurrentState != nil`) was removed, and BF16
-`conv1d_causal_seq` is now covered by an LFM short-trace equivalence test, but
-Qwen's DeltaNet/SSM sequence prefill remains disabled for correctness.
+As of 2026-05-05, the old broad hybrid fallback
+(`convState != nil || recurrentState != nil`) is no longer the Qwen3.5 BF16
+prompt-ingestion gate. BF16 Qwen DeltaNet/SSM prompt ingestion is now guarded by
+a trace-equivalence test against decode-equivalent sequential ingestion, and Q3
+sequence prefill remains explicitly unsupported.
 
-Therefore this benchmark's prefill conclusion remains current: Qwen3.5
-swift-lm prefill still scales roughly linearly with prompt length, and the
-recent fallback-diagnostics change should not be treated as a throughput
-improvement. A future Qwen speedup must first make the SSM sequence kernels
-decode-equivalent, then re-run this benchmark.
+The benchmark numbers below are still the 2026-04-17 measurement. They should
+not be used as a current Qwen sequence-prefill speed claim until the same
+benchmark is re-run on the current implementation after correctness gates pass.
+Current speed claim: pending re-benchmark.
 
 ## 方法論
 
@@ -62,7 +59,11 @@ decode-equivalent, then re-run this benchmark.
 **アーキテクチャは両者で完全一致** — Gemma 4 vs Gemma 3n の時のような構造の違いはない。
 VLM 由来の vision_tower / model.visual weights は両方とも drop 済み (text path のみ実行)。
 
-## 結果
+## Historical 2026-04-17 results
+
+The following tables are retained as historical comparison data only. They were
+captured before the current BF16 Qwen sequence-prefill correctness gate was in
+place, so they are not release evidence for the current implementation.
 
 ### Prefill throughput (tok/s — time-to-first-token)
 
@@ -175,9 +176,10 @@ xcodebuild test-without-building \
 - swift-lm (run 2): `/tmp/bench-qwen35/swiftlm-run2.txt`
 - MLX (run 3)    : `/tmp/bench-qwen35/mlx-run3.txt`
 
-## 要約
+## Historical summary
 
-同一 Qwen 3.5 0.8B BF16 アーキテクチャで、swift-lm と mlx-swift を比較:
+The 2026-04-17 run compared swift-lm and mlx-swift on the same Qwen 3.5 0.8B
+BF16 architecture:
 
 - **Decode: swift-lm 1.60×** (83.7 vs 52.2 tok/s) — bandwidth-bound regime で swift-lm 優位
 - **Prefill: MLX 1.16×–6.45×** (length 依存) — length が伸びるほど MLX の graph compilation
@@ -187,10 +189,9 @@ swift-lm の decode 優位は Gemma 4 (2.09×) → Qwen 3.5 (1.60×) でモデ�
 縮小するが依然として勝つ。Prefill は逆に MLX が小さいモデルで圧勝 — swift-lm の per-dispatch
 コストが amortize しきれないため。
 
-**swift-lm の今後の勝負所**: prefill の dispatch 数削減 (graph 単位 fusion / Metal 4 concurrent
-dispatch) で MLX に追随する必要がある。decode path は既に MLX を 1.6× 上回っている。
+These numbers should not be presented as the current Qwen prefill state. The
+current release step is to re-run the Qwen benchmark after the BF16 Qwen
+trace-equivalence gate and the broader production-readiness matrix pass.
 
-The first correctness milestone before re-benchmarking is to enable sequence
-prefill for BF16/Q4/Q8 hybrid plans without changing the token trace relative
-to `prefillPlan = nil` sequential ingestion. Q3 prefill remains unsupported
-for sequence prefill and should continue to use the explicit fallback reason.
+Q3 prefill remains unsupported for sequence prefill and should continue to use
+the explicit fallback reason.

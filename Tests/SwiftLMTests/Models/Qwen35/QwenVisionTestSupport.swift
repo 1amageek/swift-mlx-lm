@@ -1,10 +1,12 @@
 import Foundation
+import Jinja
 import Metal
 import Testing
 import Tokenizers
 @testable import MetalCompiler
 @testable import SwiftLM
 @testable import LMArchitecture
+@testable import LMIR
 @testable import ModelDeclarations
 
 enum QwenVisionTestSupport {
@@ -481,12 +483,14 @@ private actor QwenVisionSyntheticContainerCache {
         )
         let graph = try ModelGraph(Transformer(config: config))
         let resolvedGraph = ParameterResolver().resolve(graph: graph, convention: .llamaFamily)
+        let weightStore = try makeSyntheticWeightStore(config: config, device: device)
         let compiler = MetalInferenceCompiler()
         var compiledModel = try compiler.compile(
             graph: resolvedGraph,
             hiddenSize: config.hiddenSize,
             intermediateSize: config.intermediateSize,
             vocabSize: config.vocabSize,
+            stafWeightStore: weightStore,
             device: device
         )
         let prefillPlan = try compiler.compilePrefill(
@@ -495,6 +499,7 @@ private actor QwenVisionSyntheticContainerCache {
             intermediateSize: config.intermediateSize,
             vocabSize: config.vocabSize,
             inferencePolicy: InferencePolicy(maximumSequenceLength: 512),
+            stafWeightStore: weightStore,
             sharedKVCache: compiledModel.buffers.kvCache,
             sharedConvState: compiledModel.buffers.convState,
             sharedConvStateDimension: compiledModel.buffers.convStateDimension,
@@ -519,10 +524,77 @@ private actor QwenVisionSyntheticContainerCache {
             inferenceModel: inferenceModel,
             tokenizer: QwenVisionTestTokenizer(),
             configuration: configuration,
+            chatTemplate: try Template(Self.syntheticChatTemplateSource),
+            chatTemplateSource: Self.syntheticChatTemplateSource,
             vocabularySize: config.vocabSize,
             visionRuntime: runtime
         )
         return container
+    }
+
+    private static let syntheticChatTemplateSource = """
+        {%- for message in messages -%}
+        {%- for item in message.content -%}
+        {%- if item.type == "text" -%}{{ item.text }}{%- endif -%}
+        {%- if item.type == "image" -%}<|vision_start|><|image_pad|><|vision_end|>{%- endif -%}
+        {%- if item.type == "video" -%}<|vision_start|><|video_pad|><|vision_end|>{%- endif -%}
+        {%- endfor -%}
+        {%- endfor -%}
+        {%- if add_generation_prompt -%}<|assistant|>{%- endif -%}
+        """
+
+    private func makeSyntheticWeightStore(config: ModelConfig, device: MTLDevice) throws -> STAFWeightStore {
+        let maxElements = max(
+            config.vocabSize * config.hiddenSize,
+            config.hiddenSize * config.intermediateSize,
+            config.hiddenSize * config.hiddenSize
+        )
+        let payloadSize = max(1, maxElements * MemoryLayout<UInt16>.stride)
+        guard let buffer = device.makeBuffer(length: payloadSize, options: .storageModeShared) else {
+            throw MetalCompilerError.deviceSetupFailed("Cannot allocate synthetic Qwen vision weight buffer")
+        }
+        buffer.contents().initializeMemory(as: UInt8.self, repeating: 0, count: payloadSize)
+
+        let kvOutputSize = config.kvHeads * config.headDim
+        var tensorShapes: [String: [Int]] = [
+            "model.embed_tokens.weight": [config.vocabSize, config.hiddenSize],
+            "model.norm.weight": [config.hiddenSize],
+            "lm_head.weight": [config.vocabSize, config.hiddenSize]
+        ]
+        for layerIndex in 0..<config.layerCount {
+            let prefix = "model.layers.\(layerIndex)"
+            tensorShapes["\(prefix).input_layernorm.weight"] = [config.hiddenSize]
+            tensorShapes["\(prefix).self_attn.q_proj.weight"] = [config.hiddenSize, config.hiddenSize]
+            tensorShapes["\(prefix).self_attn.k_proj.weight"] = [kvOutputSize, config.hiddenSize]
+            tensorShapes["\(prefix).self_attn.v_proj.weight"] = [kvOutputSize, config.hiddenSize]
+            tensorShapes["\(prefix).self_attn.o_proj.weight"] = [config.hiddenSize, config.hiddenSize]
+            tensorShapes["\(prefix).post_attention_layernorm.weight"] = [config.hiddenSize]
+            tensorShapes["\(prefix).mlp.gate_proj.weight"] = [config.intermediateSize, config.hiddenSize]
+            tensorShapes["\(prefix).mlp.up_proj.weight"] = [config.intermediateSize, config.hiddenSize]
+            tensorShapes["\(prefix).mlp.down_proj.weight"] = [config.hiddenSize, config.intermediateSize]
+        }
+
+        var entries: [String: STAFTensorEntry] = [:]
+        for (tensorName, shape) in tensorShapes {
+            entries[tensorName] = STAFTensorEntry(
+                name: tensorName,
+                payloadOffset: 0,
+                payloadSize: payloadSize,
+                schemeIdentifier: .passthrough,
+                semanticRole: .unknown,
+                shape: shape,
+                blockSize: 0,
+                groupSize: 0,
+                bufferOffset: 0
+            )
+        }
+
+        return STAFWeightStore(
+            buffer: buffer,
+            entries: entries,
+            metadata: .empty,
+            specializedBufferAccesses: [:]
+        )
     }
 }
 

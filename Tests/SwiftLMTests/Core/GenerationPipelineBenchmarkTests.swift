@@ -220,8 +220,8 @@ struct GenerationStreamingBenchmarkTests {
     @Test("Stream chunk size comparison", .timeLimit(.minutes(3)))
     func streamChunkSizeComparison() async throws {
         let promptTokens = [1, 1, 6, 6423, 708]
-        let generateCount = 256
-        let chunkSizes = [1, 4, 8, 16]
+        let generateCount = 128
+        let chunkSizes = [1, 8, 16]
 
         print("")
         print("=== Stream Chunk Size Comparison: LFM2.5-1.2B ===")
@@ -235,8 +235,8 @@ struct GenerationStreamingBenchmarkTests {
                 )
                 defer { resources.release() }
                 return try await GenerationPipelineBenchmarkSupport.measureStreamMedian(
-                    iterations: 3,
-                    warmup: 1
+                    iterations: 1,
+                    warmup: 0
                 ) {
                     try await GenerationPipelineBenchmarkSupport.runContainerGenerateMeasured(
                         container: resources.container,

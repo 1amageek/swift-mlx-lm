@@ -198,9 +198,24 @@ struct AttentionSequenceEquivalenceTests {
         headSlotBytes: Int
     ) throws -> (output: [Float], keyCacheBytes: [UInt8], valueCacheBytes: [UInt8]) {
         let cacheByteLength = kvHeadCount * maximumSequenceLength * headSlotBytes
+        let activationRowStride = headCount * headDimension
+        let paddedKeyValues = paddedKVRows(
+            keyValues,
+            kvHeadCount: kvHeadCount,
+            headDimension: headDimension,
+            activationRowStride: activationRowStride,
+            sequenceLength: sequenceLength
+        )
+        let paddedValueValues = paddedKVRows(
+            valueValues,
+            kvHeadCount: kvHeadCount,
+            headDimension: headDimension,
+            activationRowStride: activationRowStride,
+            sequenceLength: sequenceLength
+        )
         let queryBuffer = try harness.makeSharedBuffer(values: queryValues)
-        let keyBuffer = try harness.makeSharedBuffer(values: keyValues)
-        let valueBuffer = try harness.makeSharedBuffer(values: valueValues)
+        let keyBuffer = try harness.makeSharedBuffer(values: paddedKeyValues)
+        let valueBuffer = try harness.makeSharedBuffer(values: paddedValueValues)
         let keyCache = try harness.makeZeroedSharedBuffer(byteLength: cacheByteLength)
         let valueCache = try harness.makeZeroedSharedBuffer(byteLength: cacheByteLength)
         let outputBuffer = try harness.makeZeroedSharedBuffer(
@@ -224,7 +239,8 @@ struct AttentionSequenceEquivalenceTests {
             headDimension: headDimension,
             maximumSequenceLength: maximumSequenceLength,
             sequenceLength: sequenceLength,
-            headSlotBytes: headSlotBytes
+            headSlotBytes: headSlotBytes,
+            activationRowStride: activationRowStride
         )
         fillEncoder.dispatchThreadgroups(
             MTLSize(width: sequenceLength, height: 1, depth: 1),
@@ -252,7 +268,8 @@ struct AttentionSequenceEquivalenceTests {
             headDimension: headDimension,
             maximumSequenceLength: maximumSequenceLength,
             sequenceLength: sequenceLength,
-            headSlotBytes: headSlotBytes
+            headSlotBytes: headSlotBytes,
+            activationRowStride: activationRowStride
         )
         batchEncoder.dispatchThreadgroups(
             MTLSize(width: sequenceLength * headCount, height: 1, depth: 1),
@@ -312,7 +329,8 @@ struct AttentionSequenceEquivalenceTests {
         headDimension: Int,
         maximumSequenceLength: Int,
         sequenceLength: Int,
-        headSlotBytes: Int
+        headSlotBytes: Int,
+        activationRowStride: Int
     ) {
         var kvHeads = UInt32(kvHeadCount)
         var headDim = UInt32(headDimension)
@@ -322,6 +340,7 @@ struct AttentionSequenceEquivalenceTests {
         var scheme = UInt32(QuantizationSchemeIdentifier.bf16RowMajor.rawValue)
         var slotBytes = UInt32(headSlotBytes)
         var zero = UInt32(0)
+        var rowStride = UInt32(activationRowStride)
         encoder.setBytes(&kvHeads, length: MemoryLayout<UInt32>.stride, index: 4)
         encoder.setBytes(&headDim, length: MemoryLayout<UInt32>.stride, index: 5)
         encoder.setBytes(&maxSeq, length: MemoryLayout<UInt32>.stride, index: 6)
@@ -333,6 +352,7 @@ struct AttentionSequenceEquivalenceTests {
         encoder.setBytes(&slotBytes, length: MemoryLayout<UInt32>.stride, index: 12)
         encoder.setBytes(&zero, length: MemoryLayout<UInt32>.stride, index: 16)
         encoder.setBytes(&zero, length: MemoryLayout<UInt32>.stride, index: 17)
+        encoder.setBytes(&rowStride, length: MemoryLayout<UInt32>.stride, index: 18)
     }
 
     private func setBatchAttentionConstants(
@@ -342,7 +362,8 @@ struct AttentionSequenceEquivalenceTests {
         headDimension: Int,
         maximumSequenceLength: Int,
         sequenceLength: Int,
-        headSlotBytes: Int
+        headSlotBytes: Int,
+        activationRowStride: Int
     ) {
         var heads = UInt32(headCount)
         var kvHeads = UInt32(kvHeadCount)
@@ -356,6 +377,7 @@ struct AttentionSequenceEquivalenceTests {
         var zero = UInt32(0)
         var causal = UInt32(1)
         var window = UInt32.max
+        var rowStride = UInt32(activationRowStride)
         encoder.setBytes(&heads, length: MemoryLayout<UInt32>.stride, index: 4)
         encoder.setBytes(&kvHeads, length: MemoryLayout<UInt32>.stride, index: 5)
         encoder.setBytes(&headDim, length: MemoryLayout<UInt32>.stride, index: 6)
@@ -372,6 +394,27 @@ struct AttentionSequenceEquivalenceTests {
         encoder.setBytes(&causal, length: MemoryLayout<UInt32>.stride, index: 20)
         encoder.setBytes(&window, length: MemoryLayout<UInt32>.stride, index: 21)
         encoder.setBytes(&window, length: MemoryLayout<UInt32>.stride, index: 22)
+        encoder.setBytes(&rowStride, length: MemoryLayout<UInt32>.stride, index: 25)
+    }
+
+    private func paddedKVRows(
+        _ values: [Float],
+        kvHeadCount: Int,
+        headDimension: Int,
+        activationRowStride: Int,
+        sequenceLength: Int
+    ) -> [Float] {
+        let compactRowStride = kvHeadCount * headDimension
+        var padded = [Float](repeating: .zero, count: sequenceLength * activationRowStride)
+        for position in 0..<sequenceLength {
+            let sourceBase = position * compactRowStride
+            let destinationBase = position * activationRowStride
+            padded.replaceSubrange(
+                destinationBase..<(destinationBase + compactRowStride),
+                with: values[sourceBase..<(sourceBase + compactRowStride)]
+            )
+        }
+        return padded
     }
 
     private func readBytes(_ buffer: MTLBuffer, count: Int) -> [UInt8] {

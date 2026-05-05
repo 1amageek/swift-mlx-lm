@@ -2,6 +2,8 @@
 
 This document defines the minimum release gates for `swift-lm`.
 
+Latest captured evidence: [Production Readiness Evidence - 2026-05-05](releases/production-readiness-2026-05-05.md).
+
 ## Goal
 
 The release bar is:
@@ -31,21 +33,26 @@ Required expectations:
 - Gemma4 FP16 real bundle first non-empty chunk starts with `Tokyo` (`RotorQuantRealBundleBaselineTests`)
 - Qwen3.5 real bundle first non-empty chunk starts with `Tokyo`
 - RotorQuant Gemma4 full K+V paths (RotorQ8, RotorQ4) preserve the same short factual answer shape (`RotorQuantRealBundleFullTests`)
-- Hybrid stateful sequence prefill is model-family gated by real-bundle trace
-  equivalence. BF16 LFM short-convolution sequence prefill is enabled only while
-  its focused short-trace test matches decode-equivalent ingestion. Qwen
-  DeltaNet/SSM prefill is not considered enabled until BF16 sequence prefill
-  produces the same first token and short decode trace as decode-equivalent
-  sequential ingestion. Until then,
-  `sequencePrefillFallbackReason == .stateSpaceSequenceKernelNotDecodeEquivalent`
-  is the expected behavior for plans containing `ssm_recurrence_seq_*`.
+- Hybrid stateful sequence prefill is model-family gated by trace equivalence.
+  BF16 LFM short-convolution sequence prefill and BF16 Qwen DeltaNet/SSM prompt
+  ingestion may use the sequence path only while their focused short-trace tests
+  match decode-equivalent ingestion. Q3 sequence prefill remains unsupported and
+  must report an explicit `sequencePrefillFallbackReason`.
 
 ## Performance Gates
 
-These suites must pass and their output must be reviewed against the latest saved baseline:
+These suites or benchmark cases must pass and their output must be reviewed
+against the latest saved baseline:
 
 - `xcodebuild test -scheme swift-lm-Package -destination 'platform=macOS,arch=arm64' -only-testing:MetalCompilerTests/RotorQuantBenchmarkTests`
 - `xcodebuild test -scheme swift-lm-Package -destination 'platform=macOS,arch=arm64' -only-testing:MetalCompilerTests/BenchmarkDiagnosticsTests`
+- `xcodebuild test -scheme swift-lm-Package -destination 'platform=macOS,arch=arm64' -only-testing:SwiftLMTests/GenerationThroughputBenchmarkTests`
+- `xcodebuild test -scheme swift-lm-Package -destination 'platform=macOS,arch=arm64' -only-testing:SwiftLMTests/GenerationScalingBenchmarkTests`
+- `xcodebuild test -scheme swift-lm-Package -destination 'platform=macOS,arch=arm64' -only-testing:SwiftLMTests/GenerationStreamingBenchmarkTests`
+
+If a benchmark suite exceeds the 120-second outer timeout, split it into
+individual test cases and keep each case within 120 seconds. Do not raise the
+outer timeout to hide an oversized benchmark harness.
 
 Review items:
 

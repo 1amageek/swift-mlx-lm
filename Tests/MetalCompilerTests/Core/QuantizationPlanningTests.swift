@@ -8,8 +8,8 @@ import ModelDeclarations
 @Suite("Quantization Planning", .serialized)
 struct QuantizationPlanningTests {
 
-    @Test("q4 prefill projection records custom quantized kernel family")
-    func q4PrefillProjectionUsesQuantizedKernelFamily() throws {
+    @Test("q4 prefill projection uses MPP acceleration when strides are compatible")
+    func q4PrefillProjectionUsesMPPWhenStridesAreCompatible() throws {
         guard let device = MTLCreateSystemDefaultDevice() else {
             Issue.record("No Metal device")
             return
@@ -17,7 +17,9 @@ struct QuantizationPlanningTests {
 
         let config = makeConfig()
         let graph = try resolvedGraph(config: config)
-        let target = try firstPrefillProjection(in: graph, device: device)
+        let target = try firstPrefillProjection(in: graph, device: device) {
+            $0.inputDimension == config.intermediateSize
+        }
         let store = try makeWeightStore(
             for: graph,
             device: device,
@@ -41,8 +43,48 @@ struct QuantizationPlanningTests {
         )
         #expect(quantizedEntry.path == .prefillProjection)
         #expect(quantizedEntry.schemeIdentifier == .q4Group64ScaleF16)
-        // Q4 prefill uses dequant→AMX matmul2d pipeline (commit 33beb7d)
         #expect(quantizedEntry.kernelFamily == .mppGEMM)
+        #expect(!quantizedEntry.usedFallback)
+    }
+
+    @Test("q4 prefill projection records direct kernel fallback when input stride is incompatible")
+    func q4PrefillProjectionRecordsDirectKernelStrideFallback() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else {
+            Issue.record("No Metal device")
+            return
+        }
+
+        let config = makeConfig()
+        let graph = try resolvedGraph(config: config)
+        let target = try firstPrefillProjection(in: graph, device: device) {
+            $0.inputDimension != config.intermediateSize
+        }
+        let store = try makeWeightStore(
+            for: graph,
+            device: device,
+            overriding: target.tensorName,
+            withShape: [target.outputDimension, target.inputDimension],
+            schemeIdentifier: .q4Group64ScaleF16
+        )
+
+        let plan = try MetalInferenceCompiler().compilePrefill(
+            graph: graph,
+            hiddenSize: config.hiddenSize,
+            intermediateSize: config.intermediateSize,
+            vocabSize: config.vocabSize,
+            inferencePolicy: InferencePolicy(maximumSequenceLength: 16),
+            stafWeightStore: store,
+            device: device
+        )
+
+        let quantizedEntry = try #require(
+            plan.quantizationPlan.entries.first(where: { $0.tensorName == target.tensorName })
+        )
+        #expect(quantizedEntry.path == .prefillProjection)
+        #expect(quantizedEntry.schemeIdentifier == .q4Group64ScaleF16)
+        #expect(quantizedEntry.kernelFamily == .q4G64GEMM)
+        #expect(quantizedEntry.usedFallback)
+        #expect(quantizedEntry.fallbackReason == .inputStrideMismatch)
     }
 
     @Test("dense prefill projection records disabled environment fallback when MPP is off")
@@ -54,7 +96,9 @@ struct QuantizationPlanningTests {
 
         let config = makeConfig()
         let graph = try resolvedGraph(config: config)
-        let target = try firstPrefillProjection(in: graph, device: device)
+        let target = try firstPrefillProjection(in: graph, device: device) {
+            $0.inputDimension == config.intermediateSize
+        }
         let store = try makeWeightStore(
             for: graph,
             device: device,
@@ -181,8 +225,9 @@ struct QuantizationPlanningTests {
         )
         #expect(quantizedEntry.path == .prefillProjection)
         #expect(quantizedEntry.schemeIdentifier == .q3Group64ScaleF16)
-        #expect(quantizedEntry.kernelFamily == .mppGEMM)
-        #expect(!quantizedEntry.usedFallback)
+        #expect(quantizedEntry.kernelFamily == .naiveGEMM)
+        #expect(quantizedEntry.usedFallback)
+        #expect(quantizedEntry.fallbackReason == .inputStrideMismatch)
         #expect(plan.requiresSequentialPromptIngestion)
         #expect(plan.sequencePrefillFallbackReason == .unsupportedQ3Quantization)
     }
@@ -321,6 +366,14 @@ struct QuantizationPlanningTests {
         in graph: ModelGraph,
         device: MTLDevice
     ) throws -> ProjectionTarget {
+        try firstPrefillProjection(in: graph, device: device) { _ in true }
+    }
+
+    private func firstPrefillProjection(
+        in graph: ModelGraph,
+        device: MTLDevice,
+        matching predicate: (ProjectionTarget) -> Bool
+    ) throws -> ProjectionTarget {
         let context = CompileContext(
             graph: graph,
             hiddenSize: 128,
@@ -342,12 +395,15 @@ struct QuantizationPlanningTests {
             // Find standalone LinearFragment (e.g. o_proj, down_proj)
             if let projection = entry.fragment as? LinearFragment,
                let binding = entry.parameterBindings.first(where: { $0.role == projection.field }) {
-                return ProjectionTarget(
+                let target = ProjectionTarget(
                     entry: entry,
                     tensorName: binding.tensorName,
                     inputDimension: projection.inputDimension,
                     outputDimension: projection.outputDimension
                 )
+                if predicate(target) {
+                    return target
+                }
             }
         }
 

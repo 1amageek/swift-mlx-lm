@@ -272,19 +272,41 @@ struct BarrierOptimizationTests {
         for graph: ModelGraph,
         device: MTLDevice
     ) throws -> STAFWeightStore {
-        guard let buffer = device.makeBuffer(length: MemoryLayout<Float16>.size, options: .storageModeShared) else {
+        let payloadSize = 4 * 1024 * 1024
+        guard let buffer = device.makeBuffer(length: payloadSize, options: .storageModeShared) else {
             throw MetalCompilerError.deviceSetupFailed("Cannot allocate dummy STAF weight buffer")
         }
 
         var entries: [String: STAFTensorEntry] = [:]
-        for tensorName in tensorNames(in: graph.rootRegion) {
+        var names = tensorNames(in: graph.rootRegion)
+        names.formUnion([
+            "model.embed_tokens.weight",
+            "model.norm.weight",
+            "lm_head.weight"
+        ])
+        for layerIndex in 0..<8 {
+            let prefix = "model.layers.\(layerIndex)"
+            names.formUnion([
+                "\(prefix).input_layernorm.weight",
+                "\(prefix).self_attn.q_proj.weight",
+                "\(prefix).self_attn.k_proj.weight",
+                "\(prefix).self_attn.v_proj.weight",
+                "\(prefix).self_attn.o_proj.weight",
+                "\(prefix).post_attention_layernorm.weight",
+                "\(prefix).mlp.gate_proj.weight",
+                "\(prefix).mlp.up_proj.weight",
+                "\(prefix).mlp.down_proj.weight"
+            ])
+        }
+
+        for tensorName in names {
             entries[tensorName] = STAFTensorEntry(
                 name: tensorName,
                 payloadOffset: 0,
-                payloadSize: buffer.length,
+                payloadSize: payloadSize,
                 schemeIdentifier: .passthrough,
                 semanticRole: .unknown,
-                shape: [1],
+                shape: [payloadSize / MemoryLayout<UInt16>.stride],
                 blockSize: 0,
                 groupSize: 0,
                 bufferOffset: 0

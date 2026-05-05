@@ -242,18 +242,19 @@ struct Qwen35PromptIngestionTests {
             model: model,
             promptTokens: promptTokens,
             count: 128,
-            tolerance: 0.05
+            tolerance: 0.05,
+            relativeTolerance: 0.002
         ) {
-            print("[QwenPrefillState] \(entryDifference)")
+            return entryDifference
         }
         if sequenceState.position != sequentialState.position {
             return "post-prefill position mismatch: sequence=\(sequenceState.position), sequential=\(sequentialState.position)"
         }
         // KV cache values amplify F32 vs BF16 input drift through K/V projection
-        // (~sqrt(hiddenSize) = ~32x). Sequence prefill computes hidden in F32
-        // while decode-equivalent computes in BF16, so layer-N K/V can diverge
-        // by tens of BF16 ulp at small magnitudes. Compare informationally and
-        // rely on outputHeadInput / logits / firstToken for authoritative parity.
+        // (~sqrt(hiddenSize) = ~32x). Sequence prefill computes each sequence
+        // kernel in F32, then rounds storage to decode precision. Compare this
+        // state diagnostically and rely on precision-aware activation probes plus
+        // generated token trace for the hard prompt-ingestion contract.
         for layerIndex in 0..<min(sequenceState.keyLayers.count, sequentialState.keyLayers.count) {
             if let difference = firstFloatDifference(
                 name: "kvCache.keys[\(layerIndex)]",
@@ -282,8 +283,7 @@ struct Qwen35PromptIngestionTests {
         }
         // ConvState (DeltaNet conv1d sliding window) is BF16-stored. Like the
         // KV cache, it amplifies F32 vs BF16 hidden drift through conv1d
-        // projection. Compare informationally and rely on recurrentState /
-        // outputHeadInput / logits / firstToken for authoritative parity.
+        // projection, so it remains diagnostic at full-model scale.
         let sequenceConvFloats = sequenceState.convStateBytes.map { decodeBF16Bytes($0) }
         let sequentialConvFloats = sequentialState.convStateBytes.map { decodeBF16Bytes($0) }
         if let difference = firstFloatDifference(
@@ -298,8 +298,8 @@ struct Qwen35PromptIngestionTests {
         // RecurrentState (DeltaNet F32 accumulator) is fed by BF16-rounded input
         // in the decode-equivalent path and F32 input in the sequence path.
         // Multi-token SSM recurrence amplifies the per-token input drift across
-        // the sequence; report informationally and rely on outputHeadInput /
-        // logits / firstToken for authoritative parity.
+        // the sequence, so exact full-model state equality is not the production
+        // contract for BF16 prompt ingestion.
         if let difference = firstFloatDifference(
             name: "recurrentState",
             lhs: sequenceState.recurrentStateFloats,
@@ -311,7 +311,7 @@ struct Qwen35PromptIngestionTests {
         }
         // OutputHeadInput is the final hidden state fed to the LM head GEMM.
         // Accumulated F32 vs BF16 drift across all transformer layers reaches
-        // the output head; report informationally and rely on logits / firstToken.
+        // the output head; trace parity below remains the hard behavioral check.
         if let difference = firstFloatDifference(
             name: "outputHeadInput",
             lhs: sequenceState.outputHeadInput,
@@ -322,8 +322,8 @@ struct Qwen35PromptIngestionTests {
             print("[QwenPrefillState] cross-precision drift (informational): \(difference)")
         }
         // Logits inherit accumulated F32 vs BF16 drift through 30 layers + LM
-        // head GEMM. Report informationally and rely on firstToken (argmax)
-        // for behavioral parity.
+        // head GEMM. Report diagnostically; token trace parity is enforced by
+        // the caller for behavioral parity.
         if let difference = firstFloatDifference(
             name: "logits",
             lhs: sequenceState.logits,
@@ -414,7 +414,8 @@ struct Qwen35PromptIngestionTests {
         model: MetalInferenceModel,
         promptTokens: [Int32],
         count: Int,
-        tolerance: Float
+        tolerance: Float,
+        relativeTolerance: Float
     ) throws -> String? {
         var sequenceModel = try makeRuntimeIsolatedModel(from: model)
         var sequentialModel = try makeRuntimeIsolatedModel(from: model)
@@ -541,7 +542,8 @@ struct Qwen35PromptIngestionTests {
                 name: "entryOutput \(key)",
                 lhs: prefill,
                 rhs: decode,
-                tolerance: tolerance
+                tolerance: tolerance,
+                relativeTolerance: relativeTolerance
             ) {
                 let prefillKernel = prefillByKey[key]?.kernelName ?? "(unknown)"
                 let decodeKernel = decodeByKey[key]?.kernelName ?? "(unknown)"
